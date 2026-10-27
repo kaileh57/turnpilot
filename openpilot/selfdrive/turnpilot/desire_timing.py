@@ -5,8 +5,8 @@ lead distance is the timing lever. Gate 1 (big model, 25 km/h, 2026-10-27) took 
 40 m before the junction and not from 10-20 m; a keep desire goes within max(2.5 s * v, 20 m). Once a desire
 starts it is latched until the maneuver is passed or the timeout: navd's 1 Hz distance carries a few meters of
 noise, and dropping the desire whenever it read past the lead again sent the model a new rising edge each time.
-A keep toward a side where the model sees no lane line drove the car off the road there, so it is dropped. A repeat pulse is a short drop to none, long enough that
-modeld (unsynchronized, conflated subscriber) can't miss it.
+A keep toward a side where the model sees no lane line drove the car off the road there, so it is dropped. A repeat pulse is a short drop to none, long enough
+that modeld (unsynchronized, conflated subscriber) can't miss it.
 """
 from openpilot.cereal import log
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, LEFT, TURN
