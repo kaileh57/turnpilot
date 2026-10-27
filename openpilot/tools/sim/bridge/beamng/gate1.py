@@ -31,6 +31,9 @@ ENGAGE_TIMEOUT = 20.0
 PASS_DIST = 35.0  # m from the junction, moving away, ends a run
 RUN_TIMEOUT = 90.0
 STUCK_TIME = 15.0
+# s between cancelling and the next teleport: a teleport stops the car dead, and if openpilot's longitudinal is still
+# active then, selfdrived latches Offroad_ExcessiveActuation and nothing engages again until it's cleared
+CANCEL_WAIT = 1.5
 TOOK_TURN_HEADING = 30.0  # deg from the expected 90
 TOOK_TURN_EXIT = 6.0  # m from the exit road's centreline
 
@@ -54,7 +57,7 @@ class Gate1:
     self.desire = log.Desire.turnLeft if turn.direction == "left" else log.Desire.turnRight
     if pulse_frames == 0:  # the baseline: what the model does at this junction with no desire
       self.desire, self.pulse_frames = log.Desire.none, 1
-    self.results, self.run, self.phase = [], -1, "next"
+    self.results, self.run, self.phase, self.t_end = [], -1, "next", 0.0
     self.pm = None
 
   def start_run(self, b):
@@ -85,6 +88,8 @@ class Gate1:
     s = b.simulator_state
     now = time.monotonic()
     if self.phase == "next":
+      if now - self.t_end < CANCEL_WAIT:
+        return False
       if self.run + 1 >= len(self.leads):
         self.finish(b)
         return True
@@ -130,6 +135,7 @@ class Gate1:
   def end_run(self, b, reason):
     b.car.cancel()
     b.auto_engage = False
+    self.t_end = time.monotonic()
     rows = self.rows
     res = {"run": self.run + 1, "lead": self.lead, "direction": self.turn.direction, "junction": self.turn.junction, "end": reason,
            "disengaged": self.disengaged, "expected_deg": round(math.degrees(self.turn.angle), 1)}

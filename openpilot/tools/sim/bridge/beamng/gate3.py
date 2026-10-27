@@ -23,7 +23,7 @@ import numpy as np
 import openpilot.cereal.messaging as messaging
 from openpilot.tools.sim.bridge.beamng.bridge import BeamNGBridge
 from openpilot.tools.sim.bridge.beamng.cameras import MOUNT
-from openpilot.tools.sim.bridge.beamng.gate1 import pick_turn
+from openpilot.tools.sim.bridge.beamng.gate1 import CANCEL_WAIT, pick_turn
 from openpilot.tools.sim.bridge.beamng.roadgraph import RoadGraph
 from openpilot.tools.sim.bridge.beamng.run_bridge import config_from_args, parse_args
 from openpilot.tools.sim.bridge.beamng.scenario import ego_pose, heading_quat, remove_pedestrian, spawn_pedestrian
@@ -42,7 +42,7 @@ DEFAULT_FRONT_M = 2.3  # ref node to the ETK 800's front bumper, if the bounding
 class Gate3:
   def __init__(self, turn, runs: int, approach: float, ped_ahead: float, speed_kph: float, out: str):
     self.turn, self.runs, self.approach, self.ped_ahead, self.speed_kph, self.out = turn, runs, approach, ped_ahead, speed_kph, out
-    self.results, self.run, self.phase = [], -1, "next"
+    self.results, self.run, self.phase, self.t_end = [], -1, "next", 0.0
     self.sm = None
 
   def start_run(self, b):
@@ -92,6 +92,8 @@ class Gate3:
     s = b.simulator_state
     now = time.monotonic()
     if self.phase == "next":
+      if now - self.t_end < CANCEL_WAIT:
+        return False
       if self.run + 1 >= self.runs:
         self.finish(b)
         return True
@@ -156,6 +158,7 @@ class Gate3:
   def end_run(self, b, reason, cam_gap, bumper_gap):
     b.car.cancel()
     b.auto_engage = False
+    self.t_end = time.monotonic()
     with b.world.bng_lock:
       remove_pedestrian(b.world.bng, PED)
     rows, dets = self.rows, self.dets
