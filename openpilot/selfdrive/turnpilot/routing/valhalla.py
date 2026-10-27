@@ -1,0 +1,112 @@
+"""Valhalla as a route source: pyvalhalla in this process when it imports, else a local valhalla_service."""
+import importlib
+import os
+import sys
+from pathlib import Path
+
+import requests
+
+from openpilot.common.swaglog import cloudlog
+
+# tools/turnpilot/install_valhalla_device.sh puts pyvalhalla here, since the system venv is read-only
+DEVICE_PYVALHALLA = '/data/turnpilot/pyvalhalla'
+DEFAULT_URL = 'http://127.0.0.1:8002'  # valhalla_service's default port
+HEADING_TOLERANCE = 90  # degrees either side of the bearing, the same range navd gives Mapbox
+
+
+def locate(tiles) -> dict | None:
+  """What a TurnPilotValhallaTiles value points at, or None if there is nothing usable there:
+  {'url': base} for a running valhalla_service, {'config': path} for a Valhalla config file, or
+  {'extract': path, 'dir': path} for a tile extract (.tar) and/or tile directory, given directly or as the
+  directory tools/turnpilot/build_valhalla_tiles.sh wrote (tiles.tar, tiles/)."""
+  if not tiles:
+    return None
+  if tiles.startswith(('http://', 'https://')):
+    return {'url': tiles.rstrip('/')}
+  path = Path(tiles).expanduser()
+  if path.is_file():
+    if path.suffix == '.json':
+      return {'config': str(path)}
+    return {'extract': str(path), 'dir': ''} if path.suffix == '.tar' else None
+  if not path.is_dir():
+    return None
+  extract, tile_dir = path / 'tiles.tar', path / 'tiles'
+  if extract.is_file():
+    return {'extract': str(extract), 'dir': str(tile_dir) if tile_dir.is_dir() else ''}
+  if tile_dir.is_dir():
+    return {'extract': '', 'dir': str(tile_dir)}
+  if (path / 'valhalla.json').is_file():
+    return {'config': str(path / 'valhalla.json')}
+  if any(child.is_dir() and child.name.isdigit() for child in path.iterdir()):  # a tile hierarchy: 0/, 1/, 2/
+    return {'extract': '', 'dir': str(path)}
+  return None
+
+
+def tiles_usable(tiles) -> bool:
+  return locate(tiles) is not None
+
+
+def import_valhalla():
+  """The valhalla module, or None. Falls back to the device install, since the system venv is read-only."""
+  try:
+    return importlib.import_module('valhalla')
+  except ImportError:
+    pass
+  path = os.environ.get('TURNPILOT_PYVALHALLA', DEVICE_PYVALHALLA)
+  if not os.path.isdir(path):
+    return None
+  if path not in sys.path:
+    sys.path.append(path)
+  importlib.invalidate_caches()
+  try:
+    return importlib.import_module('valhalla')
+  except ImportError:
+    cloudlog.exception(f"pyvalhalla at {path} does not import")
+    return None
+
+
+class ValhallaSource:
+  def __init__(self, tiles):
+    where = locate(tiles)
+    if where is None:
+      raise FileNotFoundError(f"no Valhalla config or tiles at {tiles!r}")
+    self.url = where.get('url', '')
+    self.actor = None
+    if self.url:
+      return
+    valhalla = import_valhalla()
+    if valhalla is None:
+      self.url = os.environ.get('TURNPILOT_VALHALLA_URL', DEFAULT_URL)
+      cloudlog.warning(f"pyvalhalla is not installed: routing through valhalla_service at {self.url}")
+    elif 'config' in where:
+      self.actor = valhalla.Actor(where['config'])
+    else:
+      self.actor = valhalla.Actor(valhalla.get_config(tile_extract=where['extract'], tile_dir=where['dir']))
+
+  def request(self, start, destination, bearing, language) -> dict:
+    """Valhalla's /route request for what navd gives Mapbox, with the bearing as the start's heading."""
+    origin = {'lon': start[0], 'lat': start[1]}
+    if bearing is not None:
+      origin.update(heading=round(bearing) % 360, heading_tolerance=HEADING_TOLERANCE)
+    request = {
+      'locations': [origin, {'lon': destination[0], 'lat': destination[1]}],
+      'costing': 'auto',
+      'format': 'osrm',
+      'shape_format': 'geojson',  # navd reads step geometry as geojson; the default polyline6 breaks it
+      'banner_instructions': True,
+      'voice_instructions': True,
+      'units': 'miles',
+    }
+    if language is not None:
+      request['language'] = language
+    return request
+
+  def route(self, start, destination, bearing, language):
+    request = self.request(start, destination, bearing, language)
+    if self.actor is not None:
+      r = self.actor.route(request)
+    else:
+      resp = requests.post(self.url + '/route', json=request, timeout=10)
+      resp.raise_for_status()
+      r = resp.json()
+    return r['routes'][0]['legs'][0]['steps'] if len(r.get('routes', [])) else []
