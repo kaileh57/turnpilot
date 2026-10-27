@@ -5,8 +5,11 @@ lead distance is the timing lever. Gate 1 (big model, 25 km/h, 2026-10-27) took 
 40 m before the junction and not from 10-20 m; a keep desire goes within max(2.5 s * v, 20 m). Once a desire
 starts it is latched until the maneuver is passed or the timeout: navd's 1 Hz distance carries a few meters of
 noise, and dropping the desire whenever it read past the lead again sent the model a new rising edge each time.
-A keep toward a side where the model sees no lane line drove the car off the road there, so it is dropped. A repeat pulse is a short drop to none, long enough
-that modeld (unsynchronized, conflated subscriber) can't miss it.
+A keep toward a side where the model sees no lane line drove the car off the road there, so it is dropped.
+The model forgets a pulse about 5 s after it (the length of its desire history): at junctions where the slow
+approach took longer than that, it planned the turn and then dropped it 10 m out, and a late retry pulse brought
+the turn back at once. So a turn desire is pulsed again every REPULSE_S until the car is through the junction. A
+repeat pulse is a short drop to none, long enough that modeld (unsynchronized, conflated subscriber) can't miss it.
 """
 from openpilot.cereal import log
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, LEFT, TURN
@@ -18,8 +21,9 @@ KEEP_DESIRE_LEAD_S = 2.5
 KEEP_DESIRE_LEAD_MIN_M = 20.
 KEEP_DESIRE_PAST_M = 5.       # a keep desire lasts this far past the maneuver point
 DESIRE_TIMEOUT_S = 15.        # moving time a desire may be held before it is dropped for good
-RETRY_DIST_M = 3.             # one retry pulse if the car gets this close to the junction...
-RETRY_STEER_DEG = 15.         # ...with the steering angle still within this of where it was at the pulse
+REPULSE_S = 4.                # a turn desire pulses again this often...
+REPULSE_PAST_M = 2.           # ...until the car is this far past the junction
+MAX_PULSES = 4
 PULSE_GAP_FRAMES = 3          # frames of none before a repeat pulse
 STANDSTILL_SPEED = 0.3        # m/s
 STANDSTILL_REARM_S = 2.       # stopped this long (a queue, a red light), the pulse goes again once the car moves
@@ -41,10 +45,9 @@ class DesireTiming:
     self.active = False       # a desire is being held for the current maneuver
     self.started = False      # the desire went out for this maneuver: latched until passed or timed out
     self.done = False         # passed or timed out: nothing more for this maneuver
-    self.retried = False
-    self.turned = False       # the steering moved since the pulse: the model took it
+    self.pulses = 0
+    self._since_pulse = 0.
     self._gap = 0
-    self._start_steer = 0.
     self._moving_t = 0.
     self._stopped_t = 0.
 
@@ -87,15 +90,17 @@ class DesireTiming:
         self.done, self.active = True, False
         return Desire.none
 
-    self.turned = self.turned or (self.active and abs(steering_angle_deg - self._start_steer) >= RETRY_STEER_DEG)
-    if self.active and maneuver.kind == TURN and not (self.retried or self.turned) and distance < RETRY_DIST_M:
-      self.retried = True
-      self._gap = PULSE_GAP_FRAMES
+    if self.active and maneuver.kind == TURN:
+      self._since_pulse += dt
+      if self._since_pulse >= REPULSE_S and distance > -REPULSE_PAST_M and self.pulses < MAX_PULSES:
+        self._gap, self._since_pulse = PULSE_GAP_FRAMES, 0.
+        self.pulses += 1
     if self._gap > 0:
       self._gap -= 1
       return Desire.none
 
     if not self.active:
       self.active = self.started = True
-      self._start_steer = steering_angle_deg
+      self.pulses += 1
+      self._since_pulse = 0.
     return desire

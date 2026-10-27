@@ -1,7 +1,7 @@
 from openpilot.cereal import log
 from openpilot.common.realtime import DT_MDL
-from openpilot.selfdrive.turnpilot.desire_timing import (PULSE_GAP_FRAMES, RETRY_DIST_M, STANDSTILL_REARM_S, TURN_DESIRE_LEAD_M,
-                                                         DesireTiming, keep_lead)
+from openpilot.selfdrive.turnpilot.desire_timing import (MAX_PULSES, PULSE_GAP_FRAMES, REPULSE_PAST_M, REPULSE_S, STANDSTILL_REARM_S,
+                                                         TURN_DESIRE_LEAD_M, DesireTiming, keep_lead)
 from openpilot.selfdrive.turnpilot.route_follower import RouteFollower
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd
 
@@ -35,12 +35,12 @@ def rising_edges(trace, desire):
   return edges
 
 
-def test_left_turn_at_25m_sends_turn_left_once():
-  trace = drive([(200., "turn", "left"), (900., "turn", "right")], v=8.)
+def test_left_turn_desire_from_the_lead():
+  trace = drive([(200., "turn", "left"), (900., "turn", "right")], v=12.)
   edges = rising_edges(trace, Desire.turnLeft)
-  assert len(edges) == 1
+  assert len(edges) == 1  # through the junction within REPULSE_S of the pulse
   s, d = edges[0]
-  assert TURN_DESIRE_LEAD_M - 8. * DT_MDL - 1. < d < TURN_DESIRE_LEAD_M  # within a frame of the lead, dead-reckoned
+  assert TURN_DESIRE_LEAD_M - 12. * DT_MDL - 1. < d < TURN_DESIRE_LEAD_M  # within a frame of the lead, dead-reckoned
   assert all(desire == Desire.none for s, d, desire in trace if s < 200. - TURN_DESIRE_LEAD_M - 1.)
   # held through the junction, dropped once navd moves on
   assert all(desire == Desire.turnLeft for s, d, desire in trace if 200. - TURN_DESIRE_LEAD_M + 1. < s < 205.)
@@ -48,19 +48,21 @@ def test_left_turn_at_25m_sends_turn_left_once():
   assert not rising_edges(trace, Desire.turnRight)  # the next turn, 700 m on, isn't reached
 
 
-def test_navd_distance_noise_sends_one_rising_edge():
+def test_navd_distance_noise_adds_no_rising_edges():
   # navd's 1 Hz distance jumps by 3 m either way around the lead: the desire latches on the first crossing
   for maneuver, desire in (("left", Desire.turnLeft), ("slight right", Desire.keepRight)):
-    trace = drive([(200., "turn" if maneuver == "left" else "fork", maneuver), (900., "turn", "right")], v=4., seconds=60.,
-                  noise=lambda i: 3. if (i // 20) % 2 else -3.)
-    assert len(rising_edges(trace, desire)) == 1, maneuver
+    route = [(200., "turn" if maneuver == "left" else "fork", maneuver), (900., "turn", "right")]
+    clean = rising_edges(drive(route, v=4., seconds=60.), desire)
+    noisy = rising_edges(drive(route, v=4., seconds=60., noise=lambda i: 3. if (i // 20) % 2 else -3.), desire)
+    assert len(noisy) == len(clean) == (1 if desire == Desire.keepRight else 3), maneuver
 
 
 def test_consecutive_turns_each_get_a_desire():
   trace = drive([(200., "turn", "left"), (320., "turn", "right"), (2000., "turn", "left")], v=6., seconds=70.)
   left, right = rising_edges(trace, Desire.turnLeft), rising_edges(trace, Desire.turnRight)
-  assert len(left) == 1 and len(right) == 1
+  assert len(left) == 2 and len(right) == 2  # 40 m at 6 m/s is more than REPULSE_S: one repeat each
   assert 320. - TURN_DESIRE_LEAD_M - 1. < right[0][0] < 320. - TURN_DESIRE_LEAD_M + 1.
+  assert all(s < 320. for s, _ in right) and all(s < 200. for s, _ in left)
 
 
 def test_slight_right_exit_sends_keep_right():
@@ -82,12 +84,14 @@ def test_uturn_and_straight_send_nothing():
   assert all(desire == Desire.none for s, d, desire in trace if s < 2900.)
 
 
-def test_single_retry_when_the_car_does_not_turn():
-  trace = drive([(200., "turn", "right"), (900., "turn", "left")], v=6., turns_at=None, seconds=40.)
+def test_turn_desire_pulses_again_until_through_the_junction():
+  # the model forgets a pulse after about 5 s; a slow approach gets a new one every REPULSE_S up to the junction
+  trace = drive([(200., "turn", "right"), (900., "turn", "left")], v=3., turns_at=None, seconds=80.)
   edges = rising_edges(trace, Desire.turnRight)
-  assert len(edges) == 2
-  assert edges[1][1] < RETRY_DIST_M
-  # the drop between the two pulses is long enough for modeld to see it
+  assert len(edges) == MAX_PULSES
+  for (s0, _), (s1, d1) in zip(edges[:-1], edges[1:], strict=True):
+    assert abs((s1 - s0) / 3. - REPULSE_S) < 0.3 and d1 > -REPULSE_PAST_M  # plus the gap
+  # the drop between two pulses is long enough for modeld to see it
   gap = [desire for s, d, desire in trace if edges[0][0] < s < edges[1][0] and desire == Desire.none]
   assert len(gap) == PULSE_GAP_FRAMES
 
@@ -98,7 +102,6 @@ def test_pulse_again_after_a_standstill():
     return 8. if t < 185. / 8. else (0. if t < 185. / 8. + 10. else 5.)
   trace = drive([(200., "turn", "left"), (900., "turn", "right")], seconds=50., speed_profile=speed)
   edges = rising_edges(trace, Desire.turnLeft)
-  assert len(edges) == 2
-  assert abs(edges[1][0] - 185.) < 1.  # the second pulse goes as the car pulls away
+  assert abs(edges[-1][0] - 185.) < 1.  # a pulse goes as the car pulls away
   stopped = [desire for s, d, desire in trace if abs(s - 185.) < 0.5]
   assert stopped.count(Desire.none) >= int((10. - STANDSTILL_REARM_S) / DT_MDL) - 2
