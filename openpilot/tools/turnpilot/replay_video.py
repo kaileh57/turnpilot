@@ -201,9 +201,12 @@ class Panel:
   def draw(self, nv12: np.ndarray, header: str) -> np.ndarray:
     img = cv2.cvtColor(nv12.reshape(self.h * 3 // 2, self.w), cv2.COLOR_YUV2BGR_NV12)
     self.corridor(img)
-    # only tracks matched to this run's detections are drawn, at the measured box: a track the tracker is coasting through a
-    # missed detection is published for the scene logic, but its extrapolated box can drift well off the object
+    # every published track is drawn where it was last measured, not where the tracker has extrapolated it (that drifts well off
+    # the object in a turn). One matched to this run's detections gets a label; one coasting through a missed detection is a
+    # thin outline.
     fresh = [trk for trk in self.tracks if trk.t_seen == self.tracker.last_t]
+    for trk in (trk for trk in self.tracks if trk.t_seen != self.tracker.last_t):
+      cv2.rectangle(img, tuple(int(v) for v in trk.box_seen[:2]), tuple(int(v) for v in trk.box_seen[2:]), COLORS[trk.cls], 1, cv2.LINE_AA)
     seen = np.array([trk.box_seen for trk in fresh]).reshape(-1, 4)
     for x0, y0, x1, y1, _, _ in self.dets:
       if not (np.abs(seen - (x0, y0, x1, y1)).max(axis=1) < 0.01).any():
