@@ -26,7 +26,7 @@ ioreg -p IOService -l -w0 -r -n "custom 8516b768-CLEAN" | grep -c UserClient
 ```
 
 - `python -m openpilot.tools.turnpilot.chestnut_smoke [--hz 20]` loads the big model the way modeld does, then times one packed upload of both 1344x760 frames and `model.run`.
-- `python -m openpilot.tools.turnpilot.gate2_modeld [--frames 600]` runs the real `modeld --demo` against fake os04c10 road and wide cameras. It reports `modelV2.modelExecutionTime`, frame age and frame drops, then checks that chestnut was released.
+- `python -m openpilot.tools.turnpilot.gate2_modeld [--frames 600]` runs the real `modeld --demo` against fake os04c10 road and wide cameras. It reports `modelV2.modelExecutionTime`, frame age and frame drops, then checks that chestnut was released. With `--detector` it sets `TurnPilotEnabled`, so modeld also runs the TurnPilot detector, and reports its time and rate.
 
 ## Sim stack
 

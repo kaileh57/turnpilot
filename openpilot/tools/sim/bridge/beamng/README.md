@@ -85,6 +85,19 @@ OPENPILOT_PREFIX=tpsim python -m openpilot.tools.sim.bridge.beamng.gate1 --junct
 `--list` prints the signalized junctions with legal 90-degree turns. The road graph is read from
 `~/pc_relay/incoming/osm_export/west_coast_usa_graph.json`.
 
+## Gate 3
+
+`gate3.py` stands the Italy mannequin in the ego's lane `--ped-ahead` m ahead on a junction's approach, engages at
+`--speed` and logs at 10 Hz what the driving model (`action.shouldStop`, `desiredAcceleration`, its lead), the detector
+(person boxes and confidence by range), the scene (`turnpilotScene` pedestrians, `inPath`) and turnpilotd's plan did, and
+the final gap from the camera and from the front bumper. It removes the mannequin after every run. For the model alone,
+block turnpilotd and keep `TurnPilotEnabled` set, so modeld still runs the detector and nothing publishes `turnpilotPlan`:
+
+```sh
+BLOCK=turnpilotd OPENPILOT_PREFIX=tpsim openpilot/tools/sim/bridge/beamng/launch_openpilot.sh
+OPENPILOT_PREFIX=tpsim python -m openpilot.tools.sim.bridge.beamng.gate3 --runs 2 --speed 35 --out gate3.json
+```
+
 ## Scenario hooks
 
 `scenario.py` works with any BeamNGpy client: in the bridge process use `world.bng` under `world.bng_lock`, from another
