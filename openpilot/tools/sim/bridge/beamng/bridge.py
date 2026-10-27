@@ -31,6 +31,7 @@ class BeamNGBridge(SimulatorBridge):
     self.auto_engage = engage
     self.set_speed_kph = set_speed_kph
     self.rolling_start_kph = rolling_start_kph
+    self.rolled = False
     self.scenario = scenario
     self.test_run = test_run
     self.engage_t = 0.0
@@ -131,17 +132,21 @@ class BeamNGBridge(SimulatorBridge):
     sm = self.car.sm
     sm.update(0)
     now = time.monotonic()
+    roll_to = self.rolling_start_kph / 3.6 - 0.5
     if sm['selfdriveState'].enabled:
-      self.auto_engage = False
-    elif not self.car.engaged and state.wheel_speed < self.rolling_start_kph / 3.6 - 0.5:
+      self.auto_engage = self.rolled = False
+    elif not self.car.engaged and not self.rolled and state.wheel_speed < roll_to:
       throttle, _ = self.driver_accel.update(ROLLING_START_ACCEL, state.a_long, state.wheel_speed, DT)
       return max(throttle, 0.05)
-    elif not self.car.engaged and sm['selfdriveState'].engageable and now - self.engage_t > 1.0:
-      self.car.engage(state.wheel_speed, self.set_speed_kph)
-      self.engage_t = now
-    elif self.car.engaged and now - self.engage_t > 2.0:
-      self.car.cancel()
-      self.engage_t = now
+    else:
+      # off the gas once rolling, since a pressed pedal blocks engagement; roll again if the car slowed right down
+      self.rolled = state.wheel_speed > roll_to - 2.0
+      if not self.car.engaged and sm['selfdriveState'].engageable and now - self.engage_t > 1.0:
+        self.car.engage(state.wheel_speed, self.set_speed_kph)
+        self.engage_t = now
+      elif self.car.engaged and now - self.engage_t > 2.0:
+        self.car.cancel()
+        self.engage_t = now
     self.driver_accel.reset()
     return 0.0
 

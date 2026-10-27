@@ -115,4 +115,7 @@ Measured on 2026-10-27, game on the PC, bridge on the Mac over the USB4 link:
 - The ETK 800's steering lock (38 degrees) comes from yaw rate at low speed on one street; paramsd learns the rest.
 - The game's IMU has no noise or bias.
 - `--capture` renders a third camera and costs about 8 camera pairs a second.
-- modeld doesn't reconnect to a new VisionIPC server, so restart openpilot (or modeld) when you restart the bridge.
+- modeld doesn't reconnect to a new VisionIPC server. If you run modeld by hand rather than through the manager, restart
+  it whenever you restart the bridge.
+- A teleport resets the car to P; the bridge shifts it back to D, but openpilot raises `wrongGear` in between and
+  disengages, as a real Model 3 would.
