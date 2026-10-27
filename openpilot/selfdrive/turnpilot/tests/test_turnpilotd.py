@@ -134,8 +134,27 @@ def test_detector_unavailable_holds_unprotected_left():
   sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
   for _ in range(int(45. / DT_MDL)):
     plan = sim.step(available=False)
-  assert plan.reason == "detector unavailable" and plan.state == State.holding
+  assert plan.reason == "blind turn: check traffic, press gas" and plan.state == State.holding
   assert 300. - HOLD_LINE_M - 1.5 < sim.s < 300. - HOLD_LINE_M + 1.5 and sim.v < 0.1
+
+
+def test_gas_press_releases_the_blind_hold():
+  sim = Sim([(300., "turn", "left"), (700., "turn", "left"), (1500., "turn", "right")])
+  put, gas = sim.sm.put, [False]
+
+  def put_with_gas(s, msg, valid=True):
+    put(s, car_state(msg.vEgo, msg.steeringAngleDeg, msg.leftBlinker, gas_pressed=gas[0]) if s == 'carState' else msg, valid)
+  sim.sm.put = put_with_gas
+  for _ in range(int(45. / DT_MDL)):
+    plan = sim.step(available=False)
+  assert plan.state == State.holding and sim.v < 0.1
+  gas[0] = True  # the driver checks and taps the gas: a one-frame press
+  sim.step(available=False)
+  gas[0] = False
+  for _ in range(int(60. / DT_MDL)):
+    plan = sim.step(available=False, steer=90. if abs(sim.s - 300.) < 8. else 0.)
+  # turned, and the next turn across traffic holds again
+  assert plan.state == State.holding and 700. - HOLD_LINE_M - 1.5 < sim.s < 700. - HOLD_LINE_M + 1.5 and sim.v < 0.1
 
 
 def test_pedestrian_in_path_stops_then_goes():

@@ -73,13 +73,14 @@ def model_v2(lanes_left=0, lanes_right=0, lane_change_state='off', **kwargs):
   return msg.as_reader().modelV2
 
 
-def car_state(v_ego=10., steering_angle_deg=0., left_blinker=False, right_blinker=False):
+def car_state(v_ego=10., steering_angle_deg=0., left_blinker=False, right_blinker=False, gas_pressed=False):
   msg = messaging.new_message('carState')
   cs = msg.carState
   cs.vEgo = float(v_ego)
   cs.steeringAngleDeg = float(steering_angle_deg)
   cs.leftBlinker = left_blinker
   cs.rightBlinker = right_blinker
+  cs.gasPressed = gas_pressed
   return msg.as_reader().carState
 
 

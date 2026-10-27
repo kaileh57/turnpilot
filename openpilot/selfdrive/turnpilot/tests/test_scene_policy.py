@@ -1,15 +1,17 @@
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot.hooks import plan_accel
 from openpilot.selfdrive.turnpilot.route_follower import NOMINAL_ANGLE_DEG, Maneuver, classify
-from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP, NO_SPEED_CAP, PED_STOP_GAP_M, scene_policy
+from openpilot.selfdrive.turnpilot.scene_policy import (ACCEL_CAP_JERK, BLIND_TURN_REASON, HOLD_LINE_M, NO_ACCEL_CAP, NO_SPEED_CAP,
+                                                        PED_STOP_GAP_M, SCENE_SETTLE_S, STOP_DECEL, ScenePolicy, scene_policy)
 from openpilot.selfdrive.turnpilot.tests.synthetic import scene
 
 LEFT_TURN = Maneuver(*classify("turn", "left"), "turn", "left", NOMINAL_ANGLE_DEG["left"])
 RIGHT_TURN = Maneuver(*classify("turn", "right"), "turn", "right", NOMINAL_ANGLE_DEG["right"])
 
 
-def ped(x, y, vx=0., vy=0., in_path=False):
-  return {'cls': 'pedestrian', 'x': x, 'y': y, 'vx': vx, 'vy': vy, 'inPath': in_path}
+def ped(x, y, vx=0., vy=0., in_path=False, **fields):
+  """fields: more TrackedObject fields, e.g. age (hits) and conf; scene() makes it a confirmed track otherwise."""
+  return {'cls': 'pedestrian', 'x': x, 'y': y, 'vx': vx, 'vy': vy, 'inPath': in_path, **fields}
 
 
 def car(x, y, vx=0., vy=0.):
@@ -86,8 +88,182 @@ def test_oncoming_car_holds_unprotected_left():
 
 def test_detector_unavailable():
   d = policy([car(60., 5., vx=-12.)], available=False, maneuver=LEFT_TURN, distance=15., v_ego=4.)
-  assert d.holding and d.reason == "detector unavailable"
+  assert d.holding and d.reason == BLIND_TURN_REASON
   d = policy(available=False, maneuver=RIGHT_TURN, distance=15., v_ego=4.)
   assert not d.holding and d.reason == "detector unavailable" and d.speed_cap == NO_SPEED_CAP
   d = policy(available=False)
   assert not d.holding and d.reason == "detector unavailable"
+
+
+def drive(sp, frames, v, s, objects_at, available=True, maneuver=None, maneuver_at=None, maneuver_id=0, gas=lambda t: False,
+          accel_min=-3.5):
+  """A point-mass car under a ScenePolicy for `frames` frames from speed v at s; objects_at(s, t) gives the objects.
+  Returns (v, s, decisions)."""
+  decisions = []
+  for k in range(frames):
+    t = k * DT_MDL
+    sc = scene(objects_at(s, t), available(t) if callable(available) else available)
+    distance = maneuver_at - s if maneuver_at is not None else 1000.
+    d = sp.update(sc.objects, sc.available, maneuver, distance, v, maneuver_id=maneuver_id, gas_pressed=gas(t))
+    decisions.append(d)
+    a = max(min(plan_accel(d.accel_cap, d.speed_cap, v), 0.5), accel_min)
+    if d.should_stop:
+      a = min(a, -1.)
+    v = max(v + a * DT_MDL, 0.)
+    s += v * DT_MDL
+  return v, s, decisions
+
+
+def test_blind_turn_holds_with_the_prompt_reason_until_gas():
+  # what releases the hold today: the scene coming back, or rolling past the hold line faster than COMMIT_SPEED
+  sp = ScenePolicy()
+  v, s, ds = drive(sp, int(60. / DT_MDL), 10., 0., lambda s, t: (), available=False, maneuver=LEFT_TURN, maneuver_at=150.)
+  assert v < 0.1 and abs(150. - HOLD_LINE_M - s) < 1.5
+  assert ds[-1].should_stop and ds[-1].reason == BLIND_TURN_REASON
+  # one frame of gas releases it at once, and it stays released when the gas is lifted
+  v, s, ds = drive(sp, int(20. / DT_MDL), v, s, lambda s, t: (), available=False, maneuver=LEFT_TURN, maneuver_at=150.,
+                   gas=lambda t: t < DT_MDL)
+  assert not any(d.holding for d in ds) and s > 150.
+  # the next turn across traffic holds again
+  _, _, ds = drive(sp, int(30. / DT_MDL), 10., 0., lambda s, t: (), available=False, maneuver=LEFT_TURN, maneuver_at=150.,
+                   maneuver_id=1)
+  assert ds[-1].should_stop and ds[-1].reason == BLIND_TURN_REASON
+
+
+def test_gas_releases_the_hold_past_the_line():
+  # crept past the hold line under COMMIT_SPEED on the gas, then lifted: the one-frame policy stops hard inside the junction
+  d = policy(available=False, maneuver=LEFT_TURN, distance=HOLD_LINE_M - 2., v_ego=1.5)
+  assert d.should_stop or d.accel_cap < -STOP_DECEL
+  sp = ScenePolicy()
+  d = sp.update([], False, LEFT_TURN, HOLD_LINE_M - 2., 1.5, maneuver_id=3, gas_pressed=True)
+  assert not d.holding
+  d = sp.update([], False, LEFT_TURN, HOLD_LINE_M - 2.1, 1.5, maneuver_id=3, gas_pressed=False)
+  assert not d.holding and d.accel_cap == NO_ACCEL_CAP
+
+
+def test_gas_releases_only_the_junction_hold_in_force():
+  sp = ScenePolicy()
+  # gas long before the junction (the hold isn't engaged yet) releases nothing
+  d = sp.update([], False, LEFT_TURN, 200., 10., maneuver_id=0, gas_pressed=True)
+  assert not d.holding
+  d = sp.update([], False, LEFT_TURN, 15., 4., maneuver_id=0)
+  assert d.holding and d.reason == BLIND_TURN_REASON
+  # gas never releases a pedestrian in the path
+  sc = scene([ped(12., 0.2, in_path=True)])
+  for _ in range(3):
+    d = sp.update(sc.objects, True, LEFT_TURN, 15., 4., maneuver_id=0, gas_pressed=True)
+  assert d.holding and d.reason == "pedestrian in path"
+
+
+def test_scene_must_settle_before_it_clears_a_far_side_turn():
+  # a detector that only manages a run now and then makes the scene blink on for half a second: no release between
+  sp = ScenePolicy()
+  blinking = lambda t: (t % 2.) < 0.5  # noqa: E731
+  _, _, ds = drive(sp, int(40. / DT_MDL), 10., 0., lambda s, t: (), available=blinking, maneuver=LEFT_TURN, maneuver_at=150.)
+  assert ds[-1].should_stop and all(d.holding for d in ds[-int(10. / DT_MDL):])
+  # back for good: released after SCENE_SETTLE_S, and an oncoming car seen at once holds at once
+  ds = [sp.update([], True, LEFT_TURN, HOLD_LINE_M + 0.5, 0., maneuver_id=0) for _ in range(int(2. / DT_MDL))]
+  settled = next(i for i, d in enumerate(ds) if not d.holding)
+  assert abs(settled * DT_MDL - SCENE_SETTLE_S) < 2 * DT_MDL
+  sp = ScenePolicy()
+  sc = scene([car(60., 5., vx=-12.)])
+  assert sp.update(sc.objects, True, LEFT_TURN, 15., 4., maneuver_id=0).reason == "waiting for oncoming"
+
+
+def test_far_false_positive_is_not_in_the_path():
+  # 150 m out, a 2-hit track drifting toward the lane: was a stop at 145 m, -3.1 m/s^2 at 30 m/s
+  d = policy([ped(150., -3., vy=2.5, age=2, conf=0.45)], v_ego=30.)
+  assert not d.holding and d.accel_cap == NO_ACCEL_CAP
+  assert policy([ped(30., -3., vy=2.5)]).reason == "pedestrian in path"  # walking in close up still counts
+
+
+def test_unconfirmed_track_brakes_on_the_curve_only():
+  weak = policy([ped(45., 0.2, in_path=True, age=2, conf=0.45)], v_ego=30.)
+  assert weak.holding and weak.accel_cap == NO_ACCEL_CAP
+  assert plan_accel(weak.accel_cap, weak.speed_cap, 30.) >= -STOP_DECEL - 1e-6
+  strong = policy([ped(45., 0.2, in_path=True, age=5, conf=0.6)], v_ego=30.)
+  assert strong.accel_cap < -5.
+  # a stop the curve can make needs no confirmation
+  d = policy([ped(40., 0.2, in_path=True, age=2, conf=0.45)], v_ego=10.)
+  assert d.accel_cap == NO_ACCEL_CAP and d.speed_cap < 10.
+
+
+def test_accel_cap_ramps_in_and_confirmation_sticks():
+  sp = ScenePolicy()
+  caps = []
+  for k in range(12):
+    conf = 0.7 if k < 2 else 0.5  # confirmed on the first frame, then its confidence dips: still confirmed
+    sc = scene([ped(30. - 0.5 * k, 0.2, in_path=True, age=5 + k, conf=conf)])
+    caps.append(sp.update(sc.objects, True, None, 1000., 15.).accel_cap)
+  assert caps[0] == -STOP_DECEL - ACCEL_CAP_JERK * DT_MDL
+  assert all(0. <= a - b <= ACCEL_CAP_JERK * DT_MDL + 1e-6 for a, b in zip(caps, caps[1:], strict=False))
+  assert caps[-1] < -3.5
+  # and it eases at once
+  assert sp.update([], True, None, 1000., 15.).accel_cap == NO_ACCEL_CAP
+
+
+def test_closed_loop_stop_with_growing_evidence():
+  # gate 3: the mannequin in the lane, tracked from about 55 m at 35 km/h on 2 hits, conf 0.5-0.85
+  sp, x_ped = ScenePolicy(), 55.
+
+  def mannequin(s, t):
+    return (ped(x_ped - s, 0.1, in_path=True, age=2 + int(t / 0.1), conf=min(0.5 + t, 0.85)),)
+
+  v, s, ds = drive(sp, int(20. / DT_MDL), 9.7, 0., mannequin)
+  assert v == 0. and ds[-1].should_stop
+  assert 0. < x_ped - s < PED_STOP_GAP_M + 2.
+
+
+def test_cyclist_riding_away_is_followed():
+  # a person 60 m ahead riding away at 6 m/s, closing at 25 m/s: a moving lead, not a wall
+  moving = policy([ped(60., 0.2, vx=6., in_path=True)], v_ego=25.)
+  standing = policy([ped(60., 0.2, in_path=True)], v_ego=25.)
+  assert moving.reason == "following pedestrian" and not moving.should_stop
+  assert moving.accel_cap > standing.accel_cap and moving.speed_cap > standing.speed_cap
+  sp = ScenePolicy()
+  v, s, ds = drive(sp, int(30. / DT_MDL), 25., 0., lambda s, t: (ped(60. + 6. * t - s, 0.2, vx=6., in_path=True),))
+  gap = 60. + 6. * 30. - s
+  assert not any(d.should_stop for d in ds) and abs(v - 6.) < 0.5 and PED_STOP_GAP_M < gap < PED_STOP_GAP_M + 6. * 3.
+
+
+def test_rider_on_a_moving_two_wheeler_is_not_a_pedestrian():
+  rider = ped(20., 0.2, vx=1.5, in_path=True, camera='road', box=[0.48, 0.40, 0.52, 0.55])
+  bike = {'cls': 'cyclist', 'x': 20., 'y': 0.2, 'vx': 6., 'vy': 0., 'camera': 'road', 'box': [0.47, 0.47, 0.53, 0.58]}
+  assert policy([rider], v_ego=10.).holding  # alone, a person moving away
+  assert not policy([rider, bike], v_ego=10.).holding  # on a moving bicycle: the driving model's lead
+  # someone pushing a bike, a bike standing beside a person, or a bike in the other camera: still a pedestrian
+  assert policy([rider, bike | {'vx': 1.2}], v_ego=10.).holding
+  assert policy([rider, bike | {'box': [0.60, 0.47, 0.66, 0.58]}], v_ego=10.).holding
+  assert policy([rider, bike | {'camera': 'wide'}], v_ego=10.).holding
+
+
+# turnpilotScene at BeamNG (-311, 337), rlog 00000012--39e37873b0--1, plan 22.20-23.75 s: a wide camera false positive the
+# crosswalk rule held a right turn on. (t, age, conf, x, y, vx, vy) every 50 ms, None where it wasn't published, and the
+# car's (distance to the maneuver point, vEgo).
+BEAMNG_FALSE_WALKER = (
+  [(22.20 + 0.05 * i, 2, 0.63, 9.9 - 0.1 * i, -10.1 + 0.05 * i, -0.43, 1.83) for i in range(7)] +
+  [(22.55 + 0.05 * i, 3, 0.51, 9.6 - 0.02 * i, -10.0 + 0.04 * i, 0.41, 1.17) for i in range(11)] +
+  [None] * 4 +
+  [(23.30 + 0.05 * i, 4, 0.42, 9.8, -10.8 - 0.01 * i, 0.73, -0.15) for i in range(10)])
+
+
+def test_beamng_crosswalk_false_positive_does_not_hold():
+  sp = ScenePolicy()
+  for k, row in enumerate(BEAMNG_FALSE_WALKER):
+    distance, v = 0.1 - 1.5 * k / len(BEAMNG_FALSE_WALKER), 1.9 - 1.5 * k / len(BEAMNG_FALSE_WALKER)
+    objects = [] if row is None else [ped(*row[3:5], vx=row[5], vy=row[6], age=row[1], conf=row[2], camera='wide')]
+    sc = scene(objects)
+    assert sp.update(sc.objects, True, RIGHT_TURN, distance, v, maneuver_id=0).reason != "pedestrian in crosswalk"
+    assert policy(objects, maneuver=RIGHT_TURN, distance=distance, v_ego=v).reason != "pedestrian in crosswalk"
+
+
+def test_steady_walker_holds_sporadic_one_does_not():
+  def run(hit_every_s, frames):
+    sp, d = ScenePolicy(), None
+    for k in range(frames):
+      sc = scene([ped(23., -6., age=2 + int(k * DT_MDL / hit_every_s), conf=0.7 if k < 30 else 0.45)])
+      d = sp.update(sc.objects, True, RIGHT_TURN, 20., 5., maneuver_id=0)
+    return d
+  assert run(0.1, 10).reason == "pedestrian in crosswalk"  # on every 10 Hz run: holds within half a second...
+  assert run(0.1, 60).reason == "pedestrian in crosswalk"  # ...and keeps holding when its confidence dips
+  assert run(0.6, 100).reason != "pedestrian in crosswalk"  # 6 hits, but one every 0.6 s

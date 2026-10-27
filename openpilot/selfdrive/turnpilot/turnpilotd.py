@@ -13,7 +13,7 @@ from openpilot.selfdrive.turnpilot.desire_timing import DesireTiming
 from openpilot.selfdrive.turnpilot.lane_planner import OPENPILOT_SIGNALS_BRANDS, LanePlanner, lane_change_window, model_lanes_from_msg
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, TURN, RouteFollower
 from openpilot.selfdrive.turnpilot.scene.tracker import SceneTracker, default_yaw_rate
-from openpilot.selfdrive.turnpilot.scene_policy import NO_ACCEL_CAP, scene_policy
+from openpilot.selfdrive.turnpilot.scene_policy import NO_ACCEL_CAP, ScenePolicy
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, turn_speed_cap
 
 State = custom.TurnpilotPlan.State
@@ -29,6 +29,7 @@ class TurnPilot:
     self.follower = RouteFollower()
     self.desires = DesireTiming()
     self.lanes = LanePlanner()
+    self.scene = ScenePolicy()
 
   def update(self, sm, scene, enabled: bool, shadow: bool, driver_signals: bool = True, right_hand_traffic: bool = True):
     """A turnpilotPlan message from sm's carState, navInstruction and modelV2, and a TurnpilotScene."""
@@ -57,7 +58,7 @@ class TurnPilot:
     plan.laneChange, plan.signalPrompt, lane_reason = self.lanes.update(
       maneuver, rf.distance, lanes, model.meta.laneChangeState, v_ego, cs.leftBlinker, cs.rightBlinker, objects,
       driver_signals, right_hand_traffic, DT_MDL)
-    decision = scene_policy(objects, available, maneuver, rf.distance, v_ego, right_hand_traffic)
+    decision = self.scene.update(objects, available, maneuver, rf.distance, v_ego, right_hand_traffic, rf.maneuver_id, cs.gasPressed)
     plan.accelCap = decision.accel_cap
     plan.speedCap = min(decision.speed_cap, turn_speed_cap(maneuver, rf.distance, v_ego, right_hand_traffic))
     plan.shouldStop = decision.should_stop
