@@ -309,6 +309,10 @@ class TestPlaces(OpenpilotTestCase):
       return url, b'<a href="/place?foo=1&amp;coordinate=39.25%2C-86.75">'
     assert places.resolve_apple_maps(short, page) == {"latitude": 39.25, "longitude": -86.75, "name": ""}
 
+    def elsewhere(url):
+      return "https://evil.example/x", b"ll=1.5,2.5"
+    assert places.resolve_apple_maps(short, elsewhere) is None
+
     def boom(url):
       raise OSError("offline")
     assert places.resolve_apple_maps(short, boom) is None

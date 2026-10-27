@@ -133,7 +133,9 @@ def resolve_apple_maps(url: str, get=fetch) -> dict | None:
     final, body = get(url)
   except Exception:
     return place
-  if urllib.parse.urlsplit(final).hostname == APPLE_HOST and (found := parse_apple_maps(final)) and "latitude" in found:
+  if urllib.parse.urlsplit(final).hostname != APPLE_HOST:  # a redirect off Apple's host isn't trusted for anything
+    return place
+  if (found := parse_apple_maps(final)) and "latitude" in found:
     return found
   m = re.search(rb"[?&;](?:ll|coordinate)=(-?\d+\.\d+)(?:,|%2C)(-?\d+\.\d+)", body)
   if m and valid_latlon(float(m[1]), float(m[2])):
