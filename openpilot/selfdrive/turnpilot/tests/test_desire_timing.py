@@ -8,14 +8,14 @@ from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd
 Desire = log.Desire
 
 
-def drive(maneuvers, v=8., seconds=40., lines=(True, True), turns_at=8., speed_profile=None):
+def drive(maneuvers, v=8., seconds=40., lines=(True, True), turns_at=8., speed_profile=None, noise=None):
   """Drive along a route; the car steers into a turn once it is turns_at m from it (None: never turns).
-  Returns [(s, distance, desire)] per frame."""
+  noise(i) m is added to the position navd sees on frame i. Returns [(s, distance, desire)] per frame."""
   navd, rf, dt_ = FakeNavd(maneuvers), RouteFollower(), DesireTiming()
   s, out = 0., []
   for i in range(int(seconds / DT_MDL)):
     v_now = speed_profile(i * DT_MDL) if speed_profile else v
-    instr = navd.update(s)
+    instr = navd.update(s + (noise(i) if noise else 0.))
     rf.update(instr, instr is not None, True, v_now, DT_MDL)
     steer = 0.
     if turns_at is not None and rf.upcoming is not None and rf.distance < turns_at:
@@ -46,6 +46,14 @@ def test_left_turn_at_25m_sends_turn_left_once():
   assert all(desire == Desire.turnLeft for s, d, desire in trace if 200. - TURN_DESIRE_LEAD_M + 1. < s < 205.)
   assert all(desire != Desire.turnLeft for s, d, desire in trace if s > 230.)
   assert not rising_edges(trace, Desire.turnRight)  # the next turn, 700 m on, isn't reached
+
+
+def test_navd_distance_noise_sends_one_rising_edge():
+  # navd's 1 Hz distance jumps by 3 m either way around the lead: the desire latches on the first crossing
+  for maneuver, desire in (("left", Desire.turnLeft), ("slight right", Desire.keepRight)):
+    trace = drive([(200., "turn" if maneuver == "left" else "fork", maneuver), (900., "turn", "right")], v=4., seconds=60.,
+                  noise=lambda i: 3. if (i // 20) % 2 else -3.)
+    assert len(rising_edges(trace, desire)) == 1, maneuver
 
 
 def test_consecutive_turns_each_get_a_desire():

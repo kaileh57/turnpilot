@@ -1,8 +1,10 @@
 """Desire timing: which desire to send the driving model for the next maneuver, and when.
 
 modeld feeds the model only the rising edge of a desire, so the desire is held through the maneuver and the
-lead distance is the timing lever. The hackathon's working timing: a turn desire within about 25 m of the
-junction, a keep desire within max(2.5 s * v, 20 m). A keep toward a side where the model sees no lane line
+lead distance is the timing lever. Gate 1 (big model, 25 km/h, 2026-10-27) took 90-degree turns from a pulse
+40 m before the junction and not from 10-20 m; a keep desire goes within max(2.5 s * v, 20 m). Once a desire
+starts it is latched until the maneuver is passed or the timeout: navd's 1 Hz distance carries a few meters of
+noise, and dropping the desire whenever it read past the lead again sent the model a new rising edge each time. A keep toward a side where the model sees no lane line
 drove the car off the road there, so it is dropped. A repeat pulse is a short drop to none, long enough that
 modeld (unsynchronized, conflated subscriber) can't miss it.
 """
@@ -11,7 +13,7 @@ from openpilot.selfdrive.turnpilot.route_follower import KEEP, LEFT, TURN
 
 Desire = log.Desire
 
-TURN_DESIRE_LEAD_M = 25.      # tune in the sim
+TURN_DESIRE_LEAD_M = 40.      # gate 1's best lead on the big model
 KEEP_DESIRE_LEAD_S = 2.5
 KEEP_DESIRE_LEAD_MIN_M = 20.
 KEEP_DESIRE_PAST_M = 5.       # a keep desire lasts this far past the maneuver point
@@ -37,6 +39,7 @@ class DesireTiming:
 
   def _reset(self):
     self.active = False       # a desire is being held for the current maneuver
+    self.started = False      # the desire went out for this maneuver: latched until passed or timed out
     self.done = False         # passed or timed out: nothing more for this maneuver
     self.retried = False
     self.turned = False       # the steering moved since the pulse: the model took it
@@ -62,12 +65,12 @@ class DesireTiming:
       return Desire.none
 
     if maneuver.kind == TURN:
-      want = distance < TURN_DESIRE_LEAD_M
+      want = self.started or distance < TURN_DESIRE_LEAD_M
     else:
       if distance < -KEEP_DESIRE_PAST_M:
         self.done, self.active = True, False
         return Desire.none
-      want = distance < keep_lead(v_ego) and (keep_left_ok if maneuver.side == LEFT else keep_right_ok)
+      want = self.started or (distance < keep_lead(v_ego) and (keep_left_ok if maneuver.side == LEFT else keep_right_ok))
     if not want:
       self.active = False
       return Desire.none
@@ -93,6 +96,6 @@ class DesireTiming:
       return Desire.none
 
     if not self.active:
-      self.active = True
+      self.active = self.started = True
       self._start_steer = steering_angle_deg
     return desire
