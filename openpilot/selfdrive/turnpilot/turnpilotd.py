@@ -19,6 +19,7 @@ from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, turn_speed_ca
 State = custom.TurnpilotPlan.State
 
 APPROACH_M = 150.  # a turn or keep this close (or inside its lane change window) is being approached
+NO_LONG_REASON = "openpilot longitudinal is off"
 
 
 class TurnPilot:
@@ -86,6 +87,23 @@ class TurnPilot:
       plan.state = State.following
     return msg
 
+  def plan(self, sm, scene, enabled: bool, shadow: bool, *args, long_control: bool, **kwargs):
+    """update(), but a disabled plan while openpilot doesn't control speed (on a Tesla, without alpha longitudinal):
+    its speed caps would do nothing there, and the turn desires would go out at whatever speed stock ACC holds."""
+    if enabled and not long_control:
+      self.reset()
+      return disabled_plan(shadow, NO_LONG_REASON)
+    return self.update(sm, scene, enabled, shadow, *args, **kwargs)
+
+
+def disabled_plan(shadow: bool, reason: str):
+  """A plan nothing acts on: no desire, no lane change, no limits."""
+  msg = messaging.new_message('turnpilotPlan')
+  plan = msg.turnpilotPlan
+  plan.state, plan.shadow, plan.reason = State.disabled, shadow, reason
+  plan.accelCap, plan.speedCap = NO_ACCEL_CAP, NO_SPEED_CAP
+  return msg
+
 
 def driver_signals_for(params) -> bool:
   """True unless the car's port signals for openpilot's lane changes; unknown cars prompt the driver."""
@@ -93,6 +111,12 @@ def driver_signals_for(params) -> bool:
   if cp_bytes is None:
     return True
   return messaging.log_from_bytes(cp_bytes, car.CarParams).brand not in OPENPILOT_SIGNALS_BRANDS
+
+
+def long_control_for(params) -> bool:
+  """CarParams.openpilotLongitudinalControl; False until card has written CarParams."""
+  cp_bytes = params.get("CarParams")
+  return cp_bytes is not None and messaging.log_from_bytes(cp_bytes, car.CarParams).openpilotLongitudinalControl
 
 
 def main():
@@ -107,6 +131,7 @@ def main():
   tracker = None
   enabled = shadow = False
   driver_signals, right_hand_traffic = True, True
+  long_control = False
   while True:
     sm.update(0)
     if sm.frame % int(1. / DT_MDL) == 0:
@@ -114,6 +139,7 @@ def main():
       shadow = params.get_bool("TurnPilotShadowMode")
       right_hand_traffic = not params.get_bool("IsRhdDetected")
       driver_signals = driver_signals_for(params)
+      long_control = long_control_for(params)
 
     scene_msg = messaging.new_message('turnpilotScene')
     if tracker is None and sm.seen['deviceState'] and sm.seen['narrowRoadCameraState']:
@@ -125,7 +151,7 @@ def main():
       tracker.fill_scene(scene_msg.turnpilotScene)
     pm.send('turnpilotScene', scene_msg)
 
-    msg = tp.update(sm, scene_msg.as_reader().turnpilotScene, enabled, shadow, driver_signals, right_hand_traffic)
+    msg = tp.plan(sm, scene_msg.as_reader().turnpilotScene, enabled, shadow, driver_signals, right_hand_traffic, long_control=long_control)
     msg.valid = sm.all_checks(['carState', 'modelV2'])
     pm.send('turnpilotPlan', msg)
     rk.keep_time()

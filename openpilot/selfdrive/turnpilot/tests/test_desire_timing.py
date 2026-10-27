@@ -38,13 +38,13 @@ def rising_edges(trace, desire):
 
 
 def test_left_turn_desire_from_the_lead():
-  trace = drive([(200., "turn", "left"), (900., "turn", "right")], v=12.)
+  trace = drive([(200., "turn", "left"), (900., "turn", "right")], v=9.)
   edges = rising_edges(trace, Desire.turnLeft)
   assert len(edges) == 2 and 0. < edges[1][1] < ENTRY_M  # the pulse at the lead, and the one for the turn itself
   s, d = edges[0]
-  assert TURN_DESIRE_LEAD_M - 12. * DT_MDL - 1. < d < TURN_DESIRE_LEAD_M  # within a frame of the lead, dead-reckoned
+  assert TURN_DESIRE_LEAD_M - 9. * DT_MDL - 1. < d < TURN_DESIRE_LEAD_M  # within a frame of the lead, dead-reckoned
   assert all(desire == Desire.none for s, d, desire in trace if s < 200. - TURN_DESIRE_LEAD_M - 1.)
-  # held into the junction (the car turns 8 m out, at 86 deg/s), cleared once it has turned 80 degrees
+  # held into the junction (the car turns 8 m out, at 64 deg/s), cleared once it has turned 80 degrees
   held = [desire for s, d, desire in trace if 200. - TURN_DESIRE_LEAD_M + 1. < s < 202.]
   assert held.count(Desire.turnLeft) == len(held) - PULSE_GAP_FRAMES  # but for the drop before the entry pulse
   assert [desire for s, d, desire in trace if 202. < s < 210.].count(CLEAR_DESIRE) == CLEAR_FRAMES
@@ -78,6 +78,21 @@ def test_slight_right_exit_sends_keep_right():
   assert len(edges) == 1
   assert keep_lead(v) - v * 1.1 < edges[0][1] <= keep_lead(v)
   assert not rising_edges(trace, Desire.turnRight)
+
+
+def test_no_turn_pulse_at_road_speed():
+  # 12 m/s to 25 m out, then 8: the pulse waits for the car to slow, and goes at once when it has
+  def slower(t):
+    return 12. if t < 175. / 12. else 8.
+  edges = rising_edges(drive([(200., "turn", "left"), (900., "turn", "right")], seconds=30., speed_profile=slower), Desire.turnLeft)
+  assert edges and 24. < edges[0][1] < 25.5
+  # a pulse already out is held when the car speeds up, rather than dropped and sent again
+  def faster(t):
+    return 8. if t < 165. / 8. else 12.
+  trace = drive([(200., "turn", "left"), (900., "turn", "right")], seconds=30., speed_profile=faster, turns_at=None)
+  assert len(rising_edges(trace, Desire.turnLeft)) == 1
+  assert all(desire == Desire.turnLeft for s, d, desire in trace if 166. < s < 200.)
+  # a keep goes at any speed: test_slight_right_exit_sends_keep_right drives at 25 m/s
 
 
 def test_keep_suppressed_without_lane_line_on_that_side():

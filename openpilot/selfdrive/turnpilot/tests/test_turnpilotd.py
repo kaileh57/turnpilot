@@ -1,4 +1,5 @@
 """turnpilotd closed loop: synthetic navd, model and scene around a point-mass car that follows the plan's limits."""
+from opendbc.car.structs import car
 from openpilot.cereal import custom, log
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot.hooks import plan_accel
@@ -7,7 +8,7 @@ from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_state, model_v2, nav_instruction, scene
 from openpilot.selfdrive.turnpilot.desire_timing import TURN_DESIRE_LEAD_M
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, V_TURN_MIN
-from openpilot.selfdrive.turnpilot.turnpilotd import TurnPilot
+from openpilot.selfdrive.turnpilot.turnpilotd import NO_LONG_REASON, TurnPilot, long_control_for
 
 State = custom.TurnpilotPlan.State
 LaneChange = custom.TurnpilotPlan.LaneChange
@@ -30,10 +31,10 @@ class FakeSM:
 
 
 class Sim:
-  def __init__(self, maneuvers, cruise=13., nav_lanes=None, model_lanes=(0, 0), shadow=False, driver_signals=False):
+  def __init__(self, maneuvers, cruise=13., nav_lanes=None, model_lanes=(0, 0), shadow=False, driver_signals=False, long_control=True):
     self.navd, self.tp, self.sm = FakeNavd(maneuvers, nav_lanes), TurnPilot(), FakeSM()
     self.s, self.v, self.cruise, self.t = 0., cruise, cruise, 0.
-    self.model_lanes, self.shadow, self.driver_signals = model_lanes, shadow, driver_signals
+    self.model_lanes, self.shadow, self.driver_signals, self.long_control = model_lanes, shadow, driver_signals, long_control
     self.trace = []
 
   def step(self, objects=(), available=True, steer=0., blinker=False):
@@ -43,7 +44,8 @@ class Sim:
       self.sm.put('navInstruction', instr)
     self.sm.put('carState', car_state(self.v, steer, left_blinker=blinker))
     self.sm.put('modelV2', model_v2(*self.model_lanes))
-    plan = self.tp.update(self.sm, scene(objects, available), True, self.shadow, self.driver_signals).as_reader().turnpilotPlan
+    plan = self.tp.plan(self.sm, scene(objects, available), True, self.shadow, self.driver_signals,
+                        long_control=self.long_control).as_reader().turnpilotPlan
     a = min(plan_accel(plan.accelCap, plan.speedCap, self.v), (self.cruise - self.v) / 2., 1.5)
     if plan.shouldStop:
       a = min(a, -1.)
@@ -80,6 +82,18 @@ def test_disabled_and_no_route():
   sm.put('navInstruction', nav_instruction(100., valid=False), valid=False)
   plan = TurnPilot().update(sm, scene(available=False), True, False).as_reader().turnpilotPlan
   assert plan.state == State.noRoute and not plan.routeValid
+
+
+def test_nothing_without_openpilot_longitudinal():
+  # stock ACC holds the speed: the caps would do nothing, and a turn desire would go out at road speed
+  sim = Sim([(300., "turn", "left"), (1500., "turn", "right")], cruise=15., nav_lanes={0: THREE_LANES_LEFT_TURN},
+            model_lanes=(2, 0), long_control=False)
+  sim.run(30., turn_at=300.)
+  assert sim.s > 320.
+  for _, _, plan in sim.trace:
+    assert plan.state == State.disabled and plan.reason == NO_LONG_REASON
+    assert (plan.desire, plan.laneChange, plan.signalPrompt) == (Desire.none, LaneChange.none, LaneChange.none)
+    assert (plan.accelCap, plan.speedCap, plan.shouldStop) == (NO_ACCEL_CAP, NO_SPEED_CAP, False)
 
 
 def test_left_turn_drive():
@@ -190,3 +204,15 @@ def test_shadow_computes_the_same_plan():
     d0.pop('shadow', None)
     d1.pop('shadow', None)
     assert d0 == d1
+
+
+class FakeParams(dict):
+  def get(self, key):
+    return super().get(key)
+
+
+def test_long_control_from_car_params():
+  assert not long_control_for(FakeParams())  # card hasn't written CarParams yet
+  for long_control in (False, True):
+    cp = car.CarParams.new_message(openpilotLongitudinalControl=long_control)
+    assert long_control_for(FakeParams(CarParams=cp.to_bytes())) == long_control

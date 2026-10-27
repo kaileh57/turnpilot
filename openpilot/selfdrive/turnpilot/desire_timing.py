@@ -21,6 +21,9 @@ junction (navd past it) once the car has turned CLEAR_MIN_DEG, or anywhere withi
 nominal angle (80 degrees for a left or right).
 Short of CLEAR_MIN_DEG it waits: in H2's single-pulse runs, with the pulse gone at 5-16 degrees the model gave up
 3 turns of 3, and at 25-42 degrees it finished 9 of 10 on its own (the one it gave up was at 32).
+No turn pulse starts above TURN_DESIRE_SPEED_MAX: the turn speed cap has the car at 6.9 m/s by the lead, and faster
+than that something else holds the speed (the driver's foot), so the model would turn from road speed. A pulse already
+out is held, since dropping it and sending it again would be a new rising edge. A keep goes at any speed.
 """
 import math
 
@@ -40,6 +43,7 @@ ENTRY_M = 10.                 # ...and once more this far before the junction (n
 ENTRY_GAP_S = 1.5
 TURN_STARTED_DEG = 15.        # ...until the car has turned this far toward the maneuver
 MAX_PULSES = 5
+TURN_DESIRE_SPEED_MAX = 10.   # m/s: no turn pulse starts faster than this
 PULSE_GAP_FRAMES = 3          # frames of none before a repeat pulse
 STANDSTILL_SPEED = 0.3        # m/s
 STANDSTILL_REARM_S = 2.       # stopped this long (a queue, a red light), the pulse goes again once the car moves
@@ -156,7 +160,7 @@ class DesireTiming:
       entry = not self.entry and distance < ENTRY_M and self._since_pulse >= ENTRY_GAP_S
       self.entry = self.entry or distance < ENTRY_M
       if (entry or (self._since_pulse >= REPULSE_S and distance > ENTRY_M)) and self.turned_deg < TURN_STARTED_DEG and \
-         self.pulses < MAX_PULSES:
+         self.pulses < MAX_PULSES and v_ego <= TURN_DESIRE_SPEED_MAX:
         self._gap, self._since_pulse = PULSE_GAP_FRAMES, 0.
         self.pulses += 1
     if self._gap > 0:
@@ -164,6 +168,8 @@ class DesireTiming:
       return Desire.none
 
     if not self.active:
+      if maneuver.kind == TURN and v_ego > TURN_DESIRE_SPEED_MAX:
+        return Desire.none
       self.active = self.started = True
       self.pulses += 1
       self._since_pulse = 0.
