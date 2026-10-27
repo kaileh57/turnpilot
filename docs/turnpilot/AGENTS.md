@@ -30,6 +30,9 @@ The goal is a destination-to-destination drive with zero disengagements in a rea
   - Run Python with `PYTHONPATH=$PWD`, so `import openpilot` resolves to your worktree.
   - The submodules (`opendbc_repo`, `msgq_repo`, `tinygrad_repo`, `panda`, `rednose_repo`, `teleoprtc_repo`) aren't checked out there. Symlink them from the repo root if you need them, for example `ln -s /Users/kaileh57/Projects/turnpilot/opendbc_repo opendbc_repo`, but never commit the symlinks.
   - Add files by explicit path. Never use `git add -A` or `git add .` in a worktree.
+  - `git status` fails on the symlinked submodules; use `git status --short --ignore-submodules=all`.
+  - Tests that touch Params or msgq need the built libraries. Symlink `openpilot/common/libparams_c.dylib` from the repo root (it's gitignored), and run pytest as `python -m pytest` from the worktree root.
+- The main checkout's `msgq_repo` carries an uncommitted macOS patch (poll tick 10 ms to 1 ms, `openpilot/tools/turnpilot/msgq-macos-poll.patch`). Without it, the sim stack on the Mac lags and won't engage reliably. Never run `git submodule update` in the main checkout. If the patch is lost, reapply it and rebuild with scons.
 - Tests: follow the style of upstream's existing tests next to the code you touch. Add the missing test tools to the repo venv with `uv pip install --python /Users/kaileh57/Projects/turnpilot/.venv/bin/python pytest`.
 - Commits: work on your own branch (`tp/<task>`), commit as you go, and end every commit message with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Don't push, merge, or touch the `turnpilot` branch. The integrator merges.
 
@@ -39,6 +42,9 @@ There's one of each piece of hardware, and two users at once break things:
 
 - Chestnut eGPU: a tinygrad USB device on the Mac, opened by one process at a time.
 - BeamNG.tech on the Windows PC, at `192.168.137.1:25252` with BeamNGpy 1.36. The PC agent, piston, keeps it running. Connect with `BeamNGpy('192.168.137.1', 25252)` and `open(launch=False)`. Always disconnect cleanly, and never close or quit the game.
+  - Drive it through the bridge in `openpilot/tools/sim/bridge/beamng/`; its README has the launch commands, gate 1 and the scenario hooks.
+  - If the game stops answering for more than 2 minutes, write `~/pc_relay/incoming/piston_restart.md` (what you saw and when) and say so in your report. piston checks for that file and relaunches the game on the same address with the `user_stock` folder; its crash notes are in `~/pc_relay/incoming/piston_log.md`.
+  - The PC has little free RAM. Keep to the road and wide cameras plus at most one 1280x720 chase camera.
 
 ## Files from the PC (`~/pc_relay/incoming/`)
 
