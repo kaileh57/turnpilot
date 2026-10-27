@@ -17,7 +17,7 @@ import numpy as np
 from beamngpy import BeamNGpy, Scenario, Vehicle
 from beamngpy.sensors import AdvancedIMU, Electrics
 
-from openpilot.tools.sim.bridge.beamng import frame
+from openpilot.tools.sim.bridge.beamng import frame, scenario
 from openpilot.tools.sim.bridge.beamng.cameras import MOUNT, CameraRig
 from openpilot.tools.sim.bridge.beamng.tesla import GEAR_D, GEAR_N, GEAR_P, GEAR_R
 from openpilot.tools.sim.lib.common import SimulatorState, World, vec3
@@ -37,8 +37,12 @@ class BeamNGConfig:
   # ETK 800: a 4.67 m long, 2.0 m wide (with mirrors), 1.39 m tall midsize sedan, against the Model 3's 4.69, 2.09 and 1.44 m
   model: str = "etk800"
   steer_lock_deg: float = 38.0  # etk800 road wheel angle at full steering input (510 deg at the wheel), from yaw rate on WCUSA
-  spawn_pos: tuple = (-717.121, 101.0, 118.675)  # a public road in downtown west_coast_usa
-  spawn_rot: tuple = (0.0, 0.0, 0.3826834, 0.9238795)
+  # downtown west_coast_usa, eastbound in the right-hand lane, 140 m of straight two-way road before the signalised junction
+  # group_80_81_82_83 (gate1's default approach). The (-717.1, 101, 118.7) pose from the PC agent sits in the left lane
+  # facing oncoming traffic, 20 m from a junction.
+  spawn_pos: tuple = (-908.82, 659.67, 112.25)
+  spawn_rot: tuple = (0.0, 0.0, -0.7068525, 0.7073609)
+  green: bool = True  # force every traffic signal green and hold it (nav runs don't test the model on lights)
   reload: bool = False  # reload the scenario even if ours is already loaded (a load takes about a minute)
   camera_update: float = 0.02  # s; below the game's frame time, so both cameras render on every frame
   camera_poll: float = 0.04  # s between polls of both cameras; each poll costs game frame time (sweep: 0.04 gives 20 pairs/s)
@@ -153,6 +157,8 @@ class BeamNGWorld(World):
       if cfg.lean:
         self.bng.ui.hide_hud()
         self.bng.settings.set_particles_enabled(False)
+      if cfg.green and cfg.level == 'west_coast_usa':
+        scenario.all_green(self.bng)
       self.bng.vehicles.teleport('ego', cfg.spawn_pos, cfg.spawn_rot)
     ego.ai.set_mode('disabled')
     ego.set_shift_mode('realistic_automatic')
@@ -166,10 +172,13 @@ class BeamNGWorld(World):
     while not self.stop.is_set():
       t0 = time.monotonic()
       s, th, br = self.ctrl
+      ctrl = {"type": "Control", "steering": s, "throttle": th, "brake": br}
+      if self.el is not None and self.el.get('gear') != 'D':
+        ctrl["gear"] = BEAMNG_GEAR_D  # a teleport resets the car to P: the Model 3 stays in D
       try:
         with self.vlock:
           conn = self.ego.connection
-          rc = conn.send({"type": "Control", "steering": s, "throttle": th, "brake": br})
+          rc = conn.send(ctrl)
           re = conn.send(req)
           rc.ack("Controlled")
           el = self.electrics.decode_response(re.recv("SensorData")["data"]["electrics"])

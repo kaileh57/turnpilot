@@ -32,6 +32,7 @@ def parse_args(add_args=None):
   p.add_argument('--camera-update', type=float, default=d.camera_update, help='BeamNG camera requested update time, s')
   p.add_argument('--camera-poll', type=float, default=d.camera_poll, help='period between polls of both cameras, s')
   p.add_argument('--no-lean', action='store_true', help='keep the HUD and particles on')
+  p.add_argument('--signals', action='store_true', help="leave the traffic signals running (default: all green and held)")
   p.add_argument('--capture', default='', help='record the chase view to this mp4')
   p.add_argument('--duration', type=float, default=0.0, help='quit after this many seconds (0: run until q or Ctrl-C)')
   p.add_argument('--no-keyboard', action='store_true')
@@ -41,7 +42,7 @@ def parse_args(add_args=None):
 def config_from_args(args) -> BeamNGConfig:
   return BeamNGConfig(host=args.host, port=args.port, level=args.level, model=args.model, spawn_pos=args.spawn, spawn_rot=args.rot,
                       reload=args.reload, camera_update=args.camera_update, camera_poll=args.camera_poll, lean=not args.no_lean,
-                      capture=args.capture)
+                      green=not args.signals, capture=args.capture)
 
 
 def main():
@@ -55,13 +56,23 @@ def main():
   signal.signal(signal.SIGINT, stop)
   signal.signal(signal.SIGTERM, stop)
 
-  if sys.stdin.isatty() and not args.no_keyboard and not args.duration:
-    from openpilot.tools.sim.lib.keyboard_ctrl import keyboard_poll_thread
-    keyboard_poll_thread(q)
-  elif args.duration:
+  if args.duration:
     t_end = time.monotonic() + args.duration
     while p.is_alive() and time.monotonic() < t_end:
       time.sleep(0.2)
+    stop()
+  elif args.no_keyboard:
+    pass
+  elif sys.stdin.isatty():
+    from openpilot.tools.sim.lib.keyboard_ctrl import keyboard_poll_thread
+    keyboard_poll_thread(q)
+  else:
+    # scripted: one command per line on stdin, e.g. cruise_up, cruise_cancel, blinker_left, quit
+    for line in sys.stdin:
+      if line.strip():
+        q.put(control_cmd_gen(line.strip()))
+      if line.strip() == "quit" or not p.is_alive():
+        break
     stop()
   p.join()
 

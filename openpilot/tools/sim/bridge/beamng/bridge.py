@@ -108,6 +108,7 @@ class BeamNGBridge(SimulatorBridge):
       state.is_engaged = self.car.engaged
 
       if not scenario_done:
+        self.rk_frame = rk.frame
         scenario_done = bool(self.scenario(self))
 
       if self.world.exit_event.is_set():

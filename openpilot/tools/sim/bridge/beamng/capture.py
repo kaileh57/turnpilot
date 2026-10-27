@@ -21,7 +21,7 @@ class ChaseCapture:
       self.cam = Camera("tp_chase", bng, vehicle, requested_update_time=1.0 / FPS, pos=CHASE_POS, dir=CHASE_DIR, up=(0, 0, 1),
                         resolution=(CW, CH), field_of_view_y=55, near_far_planes=(0.1, 1000.0), is_using_shared_memory=False,
                         is_render_annotations=False, is_render_depth=False, is_render_instance=False)
-    self.stream = CameraStream(host, port, ["tp_chase"], 1.0 / (2 * FPS), size=(CW, CH))
+    self.stream = CameraStream(host, port, ["tp_chase"], 1.0 / FPS, size=(CW, CH))  # every poll costs game frame time
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
       raise RuntimeError("capture needs ffmpeg on PATH")

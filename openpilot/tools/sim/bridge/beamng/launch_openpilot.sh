@@ -15,6 +15,11 @@ if [[ "$CI" ]]; then
   export BLOCK="${BLOCK},ui"
 fi
 
+# msgq needs the prefix directory to exist (macOS keeps msgq in /tmp)
+if [[ -n "$OPENPILOT_PREFIX" ]]; then
+  mkdir -p "/tmp/msgq_$OPENPILOT_PREFIX"
+fi
+
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 OPENPILOT_ROOT="${OPENPILOT_ROOT:-$DIR/../../../../..}"
 cd "$OPENPILOT_ROOT"
