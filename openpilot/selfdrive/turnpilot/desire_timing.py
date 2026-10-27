@@ -45,9 +45,9 @@ class DesireTiming:
     self._stopped_t = 0.
 
   def update(self, maneuver, distance: float, maneuver_id: int, passed: bool, v_ego: float,
-             steering_angle_deg: float, lane_line_left: bool, lane_line_right: bool, dt: float) -> int:
+             steering_angle_deg: float, keep_left_ok: bool, keep_right_ok: bool, dt: float) -> int:
     """The desire to publish. maneuver is RouteFollower.upcoming (None when there is none);
-    lane_line_left/right: the model sees the ego lane's line on that side."""
+    keep_left_ok/keep_right_ok: the model sees a lane line and road that way (lane_planner.ModelLanes)."""
     if maneuver_id != self.maneuver_id:
       self.maneuver_id = maneuver_id
       self._reset()
@@ -65,8 +65,7 @@ class DesireTiming:
       if distance < -KEEP_DESIRE_PAST_M:
         self.done, self.active = True, False
         return Desire.none
-      line = lane_line_left if maneuver.side == LEFT else lane_line_right
-      want = distance < keep_lead(v_ego) and line
+      want = distance < keep_lead(v_ego) and (keep_left_ok if maneuver.side == LEFT else keep_right_ok)
     if not want:
       self.active = False
       return Desire.none
