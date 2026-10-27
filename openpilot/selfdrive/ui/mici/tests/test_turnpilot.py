@@ -1,6 +1,7 @@
 from openpilot.cereal import log, messaging
 from openpilot.common.test import OpenpilotTestCase
-from openpilot.selfdrive.ui.lib.turnpilot import active_plan, signal_prompt, status_text
+from openpilot.selfdrive.turnpilot.scene_policy import BLIND_TURN_REASON
+from openpilot.selfdrive.ui.lib.turnpilot import active_plan, driver_prompt, signal_prompt, status_text
 
 
 def plan(**fields):
@@ -72,13 +73,26 @@ class TestTurnPilotOnroad(OpenpilotTestCase):
     assert signal_prompt(None, car_state()) == ''
 
   def test_prompt_alert(self):
-    assert self.tp.prompt_alert(plan(state='laneChange'), car_state()) is None
-    alert = self.tp.prompt_alert(plan(state='laneChange', signalPrompt='right'), car_state())
+    assert self.tp.prompt_alert(plan(state='laneChange'), car_state(), True) is None
+    alert = self.tp.prompt_alert(plan(state='laneChange', signalPrompt='right'), car_state(), True)
     assert alert.text1 == 'Signal right'
     assert alert.status == log.SelfdriveState.AlertStatus.userPrompt
     assert alert.alert_type.startswith('preLaneChangeRight/')  # upstream's turn signal icon on that side
-    shadow = self.tp.prompt_alert(plan(state='laneChange', signalPrompt='left', shadow=True), car_state())
+    shadow = self.tp.prompt_alert(plan(state='laneChange', signalPrompt='left', shadow=True), car_state(), False)
     assert shadow.text2 == 'shadow mode'
+
+  def test_blind_turn_prompt(self):
+    # held at the hold line of a turn across traffic the scene can't see: check traffic, press the gas
+    blind = plan(state='holding', reason=BLIND_TURN_REASON, shouldStop=True)
+    assert driver_prompt(blind, car_state(), True) == 'gas'
+    alert = self.tp.prompt_alert(blind, car_state(), True)
+    assert (alert.text1, alert.text2) == ('Check traffic', 'then press gas to turn')
+    assert alert.status == log.SelfdriveState.AlertStatus.userPrompt
+    # not while the driver drives, in shadow mode, or for a hold the gas doesn't release
+    assert driver_prompt(blind, car_state(), False) == ''
+    assert driver_prompt(plan(state='holding', reason=BLIND_TURN_REASON, shadow=True), car_state(), True) == ''
+    assert driver_prompt(plan(state='holding', reason='pedestrian in path'), car_state(), True) == ''
+    assert driver_prompt(plan(state='laneChange', signalPrompt='left'), car_state(), True) == 'left'
 
   def test_active_plan(self):
     p = plan(state='turning')

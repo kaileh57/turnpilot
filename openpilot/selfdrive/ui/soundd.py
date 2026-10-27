@@ -10,7 +10,7 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.utils import retry
 from openpilot.common.swaglog import cloudlog
-from openpilot.selfdrive.ui.lib.turnpilot import active_plan, signal_prompt
+from openpilot.selfdrive.ui.lib.turnpilot import active_plan, driver_prompt
 
 from openpilot.system import micd
 from openpilot.common.hardware import HARDWARE
@@ -161,15 +161,15 @@ class Soundd:
       self.selfdrive_timeout_alert = False
 
   def turnpilot_prompt_alert(self, sm, new_alert):
-    """TurnPilot's signal prompt is drawn by the UI in place of an alert, so it chimes here: once each time it appears.
+    """TurnPilot's prompts are drawn by the UI in place of an alert, so they chime here: once each time one appears.
 
     TurnPilotEnabled needs no check, turnpilotd publishes a disabled plan when it's off."""
     ss = sm['selfdriveState']
-    side = signal_prompt(active_plan(sm, True), sm['carState']) if ss.alertSize == AlertSize.none else ''
-    if not side:
+    prompt = driver_prompt(active_plan(sm, True), sm['carState'], ss.enabled) if ss.alertSize == AlertSize.none else ''
+    if not prompt:
       self.turnpilot_prompt = ''
-    elif side != self.turnpilot_prompt and new_alert == AudibleAlert.none and self.current_alert == AudibleAlert.none:
-      self.turnpilot_prompt = side
+    elif prompt != self.turnpilot_prompt and new_alert == AudibleAlert.none and self.current_alert == AudibleAlert.none:
+      self.turnpilot_prompt = prompt
       return AudibleAlert.prompt
     return new_alert
 

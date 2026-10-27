@@ -1,5 +1,6 @@
 """What TurnPilot shows, from turnpilotPlan and carState. No raylib here: soundd uses it for the prompt's chime."""
 from openpilot.cereal import custom, log
+from openpilot.selfdrive.turnpilot.scene_policy import BLIND_TURN_REASON
 
 State = custom.TurnpilotPlan.State
 Desire = log.Desire
@@ -30,6 +31,17 @@ def signal_prompt(plan, car_state) -> str:
   if (side == 'left' and not car_state.leftBlinker) or (side == 'right' and not car_state.rightBlinker):
     return side
   return ''
+
+
+def hold_prompt(plan, engaged: bool) -> bool:
+  """True while the plan holds the car before a turn across traffic it can't see, for the driver to check and press the
+  gas. Only engaged and not in shadow mode, where the hold is what stops the car."""
+  return plan is not None and engaged and not plan.shadow and plan.state == State.holding and plan.reason == BLIND_TURN_REASON
+
+
+def driver_prompt(plan, car_state, engaged: bool) -> str:
+  """What the driver is asked to do: 'left' or 'right' to signal, 'gas' to check traffic and go, else ''."""
+  return signal_prompt(plan, car_state) or ('gas' if hold_prompt(plan, engaged) else '')
 
 
 def status_text(plan, engaged: bool) -> tuple[str, str]:
