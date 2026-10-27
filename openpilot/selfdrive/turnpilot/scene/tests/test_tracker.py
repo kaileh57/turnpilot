@@ -150,3 +150,21 @@ class TestSceneTracker(OpenpilotTestCase):
     assert x[-1] == PATH_X
     np.testing.assert_allclose(np.interp(20.0, x, y), -0.8, atol=0.05)
     assert y[-1] < np.interp(30.0, x, y) < 0
+
+  def test_turning_ego_stationary_pedestrian(self):
+    # we turn left at 0.3 rad/s and 5 m/s past a pedestrian standing still; with the model's yaw rate removed it stays
+    # still over the ground, where ignoring the turn would show it crossing at about 3 m/s
+    omega, v, world = 0.3, 5.0, np.array([12.0, 4.0])
+    msg = messaging.new_message('modelV2')
+    msg.modelV2.orientationRate.z = [-omega]  # the model's z is down
+    model = msg.as_reader().modelV2
+    for i in range(12):
+      t = i * DT
+      psi = omega * t
+      pos = v / omega * np.array([np.sin(psi), 1 - np.cos(psi)])
+      c, s = np.cos(psi), np.sin(psi)
+      x, y = np.array([[c, s], [-s, c]]) @ (world - pos)
+      det = detections(self.tracker, 'road', 10 + t, [(PERSON, float(x), float(y), 0.8)], i)
+      tracks = self.tracker.update(det, self.cal, car_state(v), model, now=10 + t)
+    assert len(tracks) == 1 and tracks[0].x is not None
+    assert np.hypot(*tracks[0].x[2:]) < 0.7

@@ -110,6 +110,15 @@ def range_noise(xy: np.ndarray) -> np.ndarray:
   return rot @ np.diag([along ** 2, across ** 2]) @ rot.T
 
 
+def default_yaw_rate(car_state, model_v2) -> float:
+  """rad/s, left positive. The driving model's own yaw rate when there is a modelV2 (its z is down, so right positive):
+  many ports, Tesla among them, never set carState.yawRate, and a missing yaw rate makes everything beside the road
+  look like it's crossing in a turn. On the demo route, -orientationRate.z tracks the Ford's carState.yawRate (r 0.97)."""
+  if model_v2 is not None and len(model_v2.orientationRate.z):
+    return -float(model_v2.orientationRate.z[0])
+  return float(car_state.yawRate) if car_state is not None else 0.0
+
+
 def predicted_path(model_v2) -> tuple[np.ndarray, np.ndarray]:
   """(x, y left) of the path ahead to PATH_X: modelV2.position, carried on along its last heading past its end, or
   straight ahead when there's no model path or it's too short to have a heading."""
@@ -249,7 +258,7 @@ class SceneTracker:
     """detections: the latest TurnpilotDetections, new or not (None before the first). calibration: extrinsicsCalibration,
     upstream's name for liveCalibration. car_state: CarState, for vEgo. model_v2: the path for inPath, else straight ahead.
     now: the caller's clock in s, for staleness (default time.monotonic()). yaw_rate: rad/s, left positive (default
-    carState.yawRate). Returns the tracks to publish."""
+    default_yaw_rate()). Returns the tracks to publish."""
     now = time.monotonic() if now is None else now
     key = (str(detections.camera), detections.frameId, detections.timestampEof) if detections is not None else None
     if key is not None and key != self.last_key and detections.timestampEof > 0:
@@ -257,7 +266,7 @@ class SceneTracker:
       t = detections.timestampEof * 1e-9
       v_ego = float(car_state.vEgo) if car_state is not None else 0.0
       if yaw_rate is None:
-        yaw_rate = float(car_state.yawRate) if car_state is not None else 0.0
+        yaw_rate = default_yaw_rate(car_state, model_v2)
       camera = 'wide' if str(detections.camera) == 'wide' else 'road'
       for trk in self.tracks:
         self.predict(trk, t, v_ego, yaw_rate)
