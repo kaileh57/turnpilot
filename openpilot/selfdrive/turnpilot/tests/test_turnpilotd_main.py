@@ -53,8 +53,9 @@ class Stop(BaseException):
 
 
 class LoopSM:
-  """What turnpilotd's main loop reads from its SubMaster. modelV2 raises for the first frames."""
-  def __init__(self, failing_frames):
+  """What turnpilotd's main loop reads from its SubMaster. modelV2 raises for the first frames, and the input checks
+  pass on the frames checks(frame) says."""
+  def __init__(self, failing_frames, checks):
     self.data = {'carState': car_state(10.), 'carControl': car_control(), 'modelV2': model_v2(),
                  'navInstruction': nav_instruction(0., valid=False)}
     for service in ('deviceState', 'narrowRoadCameraState', 'extrinsicsCalibration'):
@@ -62,7 +63,7 @@ class LoopSM:
     self.updated = dict.fromkeys(self.data, False)
     self.valid = dict.fromkeys(self.data, True)
     self.seen = {'deviceState': True, 'narrowRoadCameraState': True, 'turnpilotDetections': False}
-    self.frame, self.failing_frames = -1, failing_frames
+    self.frame, self.failing_frames, self.checks = -1, failing_frames, checks
 
   def update(self, timeout):
     self.frame += 1
@@ -73,11 +74,11 @@ class LoopSM:
     return self.data.get(s)
 
   def all_checks(self, services):
-    return True
+    return self.checks(self.frame)
 
 
-def run_main(frames, failing_frames, tracker=None):
-  sent, sm = [], LoopSM(failing_frames)
+def run_main(frames, failing_frames=0, tracker=None, checks=lambda frame: True):
+  sent, sm = [], LoopSM(failing_frames, checks)
   pm = mock.MagicMock()
   pm.send.side_effect = lambda s, msg: sent.append((s, msg.as_reader()))
   rk = mock.MagicMock()
@@ -89,7 +90,7 @@ def run_main(frames, failing_frames, tracker=None):
        mock.patch.object(turnpilotd, 'DEVICE_CAMERAS', mock.MagicMock()), \
        mock.patch.object(turnpilotd, 'log_error') as log_error, pytest.raises(Stop):
     turnpilotd.main()
-  plans = [msg.turnpilotPlan for s, msg in sent if s == 'turnpilotPlan']
+  plans = [msg for s, msg in sent if s == 'turnpilotPlan']
   scenes = [msg.turnpilotScene for s, msg in sent if s == 'turnpilotScene']
   return plans, scenes, [c.args[0] for c in log_error.call_args_list]
 
@@ -97,6 +98,7 @@ def run_main(frames, failing_frames, tracker=None):
 def test_plan_failure_publishes_a_disabled_plan_and_goes_on():
   plans, scenes, errors = run_main(frames=10, failing_frames=4)
   assert len(plans) == len(scenes) == 10
+  plans = [p.turnpilotPlan for p in plans]
   assert all(p.state == State.disabled and p.reason == turnpilotd.ERROR_REASON and p.desire == 0 for p in plans[:4])
   assert all(p.state == State.noRoute for p in plans[4:])
   assert errors == ["turnpilotd.scene_failed", "turnpilotd.plan_failed"] * 4  # the tracker reads modelV2 too
@@ -107,5 +109,17 @@ def test_scene_failure_publishes_an_empty_scene_and_goes_on():
   tracker.update.side_effect = RuntimeError("synthetic failure")
   plans, scenes, errors = run_main(frames=5, failing_frames=0, tracker=tracker)
   assert len(plans) == len(scenes) == 5
-  assert not any(s.available for s in scenes) and all(p.state == State.noRoute for p in plans)
+  assert not any(s.available for s in scenes) and all(p.turnpilotPlan.state == State.noRoute for p in plans)
   assert errors == ["turnpilotd.scene_failed"] * 5
+
+
+def test_a_bad_input_frame_keeps_the_plan_valid():
+  # a plan invalid for one frame would drop its desire for that frame, and modeld would take it coming back as a pulse
+  plans, _, _ = run_main(frames=40, checks=lambda frame: frame != 20)
+  assert all(p.valid for p in plans)
+  # inputs failing for 15 frames: invalid from the PLAN_INPUT_GRACE_FRAMES-th, valid again once they pass
+  plans, _, _ = run_main(frames=40, checks=lambda frame: not 10 <= frame < 25)
+  assert [i for i, p in enumerate(plans) if not p.valid] == list(range(10 + turnpilotd.PLAN_INPUT_GRACE_FRAMES - 1, 25))
+  # and invalid from the start until the inputs first pass
+  plans, _, _ = run_main(frames=5, checks=lambda frame: frame >= 3)
+  assert [p.valid for p in plans] == [False, False, False, True, True]

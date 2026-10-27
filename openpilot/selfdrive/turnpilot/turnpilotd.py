@@ -28,6 +28,10 @@ APPROACH_M = 150.  # a turn or keep this close (or inside its lane change window
 NO_LONG_REASON = "openpilot longitudinal is off"
 ERROR_REASON = "TurnPilot error"
 ERROR_LOG_PERIOD_S = 10.  # s between logged exceptions from one place, so one that fails every frame doesn't flood the log
+# the plan is invalid once carState or modelV2 have failed their checks this many frames in a row (0.5 s at 20 Hz, as
+# hooks.PLAN_MAX_AGE_S), not at the first: a plan invalid for one frame drops its desire for that frame, and modeld takes
+# the desire coming back as a new pulse
+PLAN_INPUT_GRACE_FRAMES = 10
 
 
 class ErrorLog:
@@ -171,6 +175,7 @@ def main():
   enabled = shadow = False
   driver_signals, right_hand_traffic = True, True
   long_control = False
+  invalid_frames = PLAN_INPUT_GRACE_FRAMES
   while True:
     sm.update(0)
     if sm.frame % int(1. / DT_MDL) == 0:
@@ -195,7 +200,8 @@ def main():
     pm.send('turnpilotScene', scene_msg)
 
     msg = tp.plan(sm, scene_msg.as_reader().turnpilotScene, enabled, shadow, driver_signals, right_hand_traffic, long_control=long_control)
-    msg.valid = sm.all_checks(['carState', 'modelV2'])
+    invalid_frames = 0 if sm.all_checks(['carState', 'modelV2']) else invalid_frames + 1
+    msg.valid = invalid_frames < PLAN_INPUT_GRACE_FRAMES
     pm.send('turnpilotPlan', msg)
     rk.keep_time()
 
