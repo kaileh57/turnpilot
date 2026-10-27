@@ -13,6 +13,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import Longi
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, should_stop
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
+from openpilot.selfdrive.turnpilot.hooks import active_plan, plan_accel
 from openpilot.common.swaglog import cloudlog
 
 J_CRUISE_VALS = [1.6, 1.2, 0.8, 0.6]
@@ -106,6 +107,9 @@ class LongitudinalPlanner:
     candidates = [(output_a_target_mpc, self.mpc.source, output_should_stop_mpc),
                   (self.a_cruise, LongitudinalPlanSource.cruise, cruise_should_stop),
                   (output_a_target_e2e, LongitudinalPlanSource.e2e, output_should_stop_e2e)]
+    tp = active_plan(sm)
+    if tp is not None:  # TurnPilot's turn speed and scene limits, reported as a cruise limit
+      candidates.append((plan_accel(tp.accelCap, tp.speedCap, v_ego), LongitudinalPlanSource.cruise, tp.shouldStop))
 
     output_a_target, self.mpc.source, _ = min(candidates, key=lambda c: c[0])
     self.output_should_stop = any(should_stop for _, _, should_stop in candidates)
