@@ -212,6 +212,11 @@ class RouteDrive:
       json.dump({"route": self.plan[0].name, "runs": self.results}, f, indent=1)
     self.phase = "next"
 
+  def quit(self, b):
+    if self.phase in ("settle", "route", "drive"):
+      self.end_run(b, "quit")
+    self.finish(b)
+
   def finish(self, b):
     if self.traffic:
       with b.world.bng_lock:  # never leave AI cars in the shared game

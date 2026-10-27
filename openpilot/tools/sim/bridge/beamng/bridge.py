@@ -135,6 +135,9 @@ class BeamNGBridge(SimulatorBridge):
       self.started.value = True
       rk.keep_time()
 
+    if not scenario_done and hasattr(self.scenario, 'quit'):
+      self.scenario.quit(self)  # a scenario cut short (quit, SIGTERM) still saves what it has and cleans up
+
   def engage_step(self, state: BeamNGState, dt: float) -> float:
     """Engage like a driver: with a rolling start, press the gas up to that speed first (the driving model holds a car
     that stands on an empty road: its standstill accel stays under drive_helpers.should_stop's 0.1), then pull the stalk
