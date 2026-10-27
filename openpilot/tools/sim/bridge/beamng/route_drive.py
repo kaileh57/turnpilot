@@ -89,6 +89,7 @@ class RouteDrive:
       self.sm = messaging.SubMaster(['selfdriveState', 'onroadEvents', 'navInstruction', 'turnpilotPlan', 'carState'])
       if self.traffic:
         with b.world.bng_lock:
+          scenario.remove_traffic(b.world.bng)  # leftovers from a session that died
           scenario.spawn_traffic(b.world.bng, self.traffic)
         print(f"route_drive: {self.traffic} traffic cars spawned", flush=True)
       self.phase, self.t_end, self.t0 = "next", time.monotonic(), time.monotonic()
@@ -224,6 +225,23 @@ def main():
   except KeyboardInterrupt:
     q.put(control_cmd_gen("quit"))
     p.join()
+  finally:
+    if args.traffic:
+      remove_traffic_after(bargs.host, bargs.port)
+
+
+def remove_traffic_after(host, port):
+  """Traffic cars out of the shared game even when the bridge died before finish()."""
+  from beamngpy import BeamNGpy
+  try:
+    game = BeamNGpy(host, port).open(launch=False)
+    try:
+      scenario.remove_traffic(game)
+      print("route_drive: traffic removed after the bridge", flush=True)
+    finally:
+      game.disconnect()
+  except Exception as e:
+    print(f"route_drive: traffic removal failed: {e!r}", flush=True)
 
 
 if __name__ == "__main__":
