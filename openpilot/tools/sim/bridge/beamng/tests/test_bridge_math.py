@@ -69,6 +69,18 @@ class TestAccelController:
     th, br = c.update(-0.5, 0.1, 0.01)
     assert th == 0 and br > 0  # standstill hold
 
+  def test_surge_lets_go_of_the_windup(self):
+    # the car falls behind a +0.7 request for 3 s (a tight turn), then surges once out of it
+    c = AccelController()
+    v = 4.0
+    for _ in range(300):
+      th_wound, _ = c.update(0.7, v, 0.01, -1.0)
+      v -= 0.01
+    ff = 0.7 * 0.22 + 0.004 * v
+    assert th_wound > ff + 0.5  # the PI asks for far more than the request needs
+    th, _ = c.update(0.7, v, 0.01, 3.0)
+    assert th < ff + 0.01  # measured 3 m/s^2 on a 0.7 request: back to the feedforward
+
 
 def test_beamng_quat_matches_heading_quat():
   for heading in (0., 0.7, math.pi / 2, 2.5, math.pi, -2.0):

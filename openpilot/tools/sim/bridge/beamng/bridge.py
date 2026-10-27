@@ -115,7 +115,7 @@ class BeamNGBridge(SimulatorBridge):
       else:
         steer = -steer_in * MANUAL_STEER_DEG
       if self.car.long_active() and gas == 0.0 and brake == 0.0:
-        throttle, brake_out = self.accel.update(self.car.accel_cmd, state.wheel_speed, dt)
+        throttle, brake_out = self.accel.update(self.car.accel_cmd, state.wheel_speed, dt, state.a_long)
       else:
         self.accel.reset()
         throttle, brake_out = gas, brake
