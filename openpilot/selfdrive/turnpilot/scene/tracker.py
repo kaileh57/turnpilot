@@ -37,11 +37,19 @@ MAX_AGE_S = 1.5          # it's dropped after this
 # the car's own motion, for this long instead of releasing the stop.
 CLOSE_HOLD_M = 8.0
 CLOSE_HOLD_S = 3.0
+CLOSE_HOLD_MIN_HITS = 4  # matched detections before a track earns that hold; a 2-3 hit blip gets the normal MAX_COAST_S
 STALE_S = 0.5            # no new detections for this long makes the scene unavailable
 CORRIDOR_HALF_WIDTH = 1.5  # m either side of the predicted path
 PATH_X = 50.             # m: objects up to this far ahead can be in the path
 MIN_MODEL_PATH_X = 10.   # m: a model path shorter than this (stopped, crawling) reads as straight ahead
 PERSON_HEIGHT = 1.7      # m: a pedestrian's range is the nearer of the ground and height estimates (hidden feet read far)
+# A person box that can't be a standing person is dropped, not tracked. Thresholds come from the public demo route (comma four)
+# and the BeamNG rlogs.
+MIN_PERSON_ASPECT = 1.0  # box h/w: the overpass pillar and bush read 0.45-0.52, real pedestrians 1.8-3.8, the cyclist (a person
+                         # box) 1.39-1.64
+MAX_PERSON_GROUND_HEIGHT = 12.  # m, ground range x box height / focal length: pedestrians with visible feet read 1.5-2.8 m, the
+                                # cyclist, whose box ends a few px under the horizon, 7.6-9.8 m, the pillar 14-33 m. No lower bound:
+                                # there's no example of a too-short person box to set one from
 ACCEL_STD = 3.0          # m/s^2, the filter's process noise
 VEL_STD0 = 5.0           # m/s, a new track's velocity uncertainty
 
@@ -83,6 +91,7 @@ class Measurement:
   cls: int
   xy: np.ndarray | None = None   # ground position (x forward, y left), None when it can't be ranged
   R: np.ndarray | None = None    # its covariance
+  plausible: bool = True         # False for a person box that can't be a standing person; update() drops those
 
 
 @dataclass
@@ -156,6 +165,9 @@ class SceneTracker:
   def measure(self, det, camera: str, calibration) -> Measurement:
     box = np.array([det.x0, det.y0, det.x1, det.y1], dtype=np.float64)
     m = Measurement(box, float(det.conf), int(det.cls))
+    if m.cls == PERSON and box[3] - box[1] < MIN_PERSON_ASPECT * (box[2] - box[0]):
+      m.plausible = False
+      return m
     if calibration is None or len(calibration.rpyCalib) != 3:
       return m
     wide_euler = list(calibration.wideFromDeviceEuler) if camera == 'wide' and len(calibration.wideFromDeviceEuler) == 3 else None
@@ -167,6 +179,9 @@ class SceneTracker:
     m.xy = np.array(xy)
     if m.cls == PERSON and box[3] > box[1]:
       rng, rng_h = float(np.hypot(*m.xy)), PERSON_HEIGHT * lens.f / (box[3] - box[1])
+      if rng * (box[3] - box[1]) / lens.f > MAX_PERSON_GROUND_HEIGHT:
+        m.plausible = False
+        return m
       if rng_h < rng:
         m.xy = m.xy * rng_h / rng
     m.R = range_noise(m.xy)
@@ -275,7 +290,7 @@ class SceneTracker:
       camera = 'wide' if str(detections.camera) == 'wide' else 'road'
       for trk in self.tracks:
         self.predict(trk, t, v_ego, yaw_rate)
-      meas = [self.measure(d, camera, calibration) for d in detections.detections if int(d.cls) in OBJECT_CLASS]
+      meas = [m for m in (self.measure(d, camera, calibration) for d in detections.detections if int(d.cls) in OBJECT_CLASS) if m.plausible]
       pairs, unmatched = self.associate(meas, camera)
       for i, j in pairs:
         self.correct(self.tracks[i], meas[j], camera, t)
@@ -296,8 +311,8 @@ class SceneTracker:
 
   @staticmethod
   def hold_s(trk: Track) -> float:
-    """How long a track is kept after its last match: longer for a pedestrian close in the path."""
-    close = trk.cls == PERSON and trk.in_path and trk.x is not None and trk.x[0] < CLOSE_HOLD_M
+    """How long a track is kept after its last match: longer for a pedestrian close in the path who was matched enough times."""
+    close = trk.cls == PERSON and trk.in_path and trk.x is not None and trk.x[0] < CLOSE_HOLD_M and trk.hits >= CLOSE_HOLD_MIN_HITS
     return CLOSE_HOLD_S if close else MAX_COAST_S
 
   def published(self) -> list[Track]:

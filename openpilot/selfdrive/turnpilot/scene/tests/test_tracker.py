@@ -1,3 +1,5 @@
+from unittest import mock
+
 import numpy as np
 
 from openpilot.cereal import messaging
@@ -5,7 +7,8 @@ from openpilot.common.test import OpenpilotTestCase
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.detector.decoder import CAR, PERSON, fill_detections
 from openpilot.selfdrive.turnpilot.scene.ranging import calib_from_view
-from openpilot.selfdrive.turnpilot.scene.tracker import CLOSE_HOLD_S, MAX_COAST_S, PATH_X, SceneTracker, predicted_path
+from openpilot.selfdrive.turnpilot.scene import tracker as tracker_module
+from openpilot.selfdrive.turnpilot.scene.tracker import CLOSE_HOLD_MIN_HITS, CLOSE_HOLD_S, MAX_COAST_S, PATH_X, SceneTracker, predicted_path
 
 CAMS = DEVICE_CAMERAS[('mici', 'os04c10')]
 RPY, WIDE_EULER, HEIGHT = [0.0, 0.03, 0.01], [0.0, 0.005, -0.003], 1.3
@@ -13,10 +16,31 @@ DT = 0.15  # the detector's period at every 3rd model frame
 SIZES = {PERSON: (0.6, 1.7), CAR: (1.8, 1.5)}  # width, height in m
 
 
-def calibration():
+# the public demo route (5beb9b58bd12b691/0000010a--a51155e496, a comma four): its calibration at 860-913 s, and detections of it
+# as the road camera published them (route s, conf, x0 y0 x1 y1), in the detector's 20 Hz
+DEMO_CALIBRATION = ([-0.00024, 0.16399, 0.00554], WIDE_EULER, 1.348)
+# the overpass pillar and bush the detector calls a person: h/w 0.46-0.50, cut off by the frame's top, 9.5 m by height, 90-180 m
+# by ground contact (a 15-30 m tall person)
+PILLAR = [(859.95, 0.47, (285, 0, 697, 200)), (860.10, 0.38, (283, 0, 697, 203)), (860.15, 0.47, (278, 0, 700, 201)),
+          (860.20, 0.39, (275, 0, 701, 201)), (860.30, 0.45, (269, 0, 701, 203)), (860.35, 0.51, (268, 0, 699, 203)),
+          (860.40, 0.39, (258, 0, 698, 206)), (860.45, 0.57, (253, 0, 699, 206)), (860.50, 0.59, (243, 0, 696, 207))]
+# a cyclist, 30 m away, on a rising road (YOLO says person): h/w 1.39-1.64, the box ends 3-11 px under the horizon, so the
+# ground contact reads 150-170 m and the box 7.6-9.8 m tall
+CYCLIST = [(876.85, 0.50, (969, 136, 1012, 201)), (876.90, 0.43, (968, 135, 1015, 200)), (876.95, 0.40, (979, 140, 1023, 202)),
+           (877.20, 0.39, (999, 136, 1037, 200))]
+# a pedestrian standing at the curb, 28 m away: h/w 3.1-3.7, 2.3-2.6 m tall by ground contact
+CURB_PEDESTRIAN = [(875.50, 0.58, (850, 150, 881, 246)), (875.55, 0.66, (857, 150, 884, 247)), (875.60, 0.43, (862, 153, 889, 248)),
+                   (875.65, 0.66, (865, 155, 893, 248)), (875.70, 0.51, (869, 144, 897, 245))]
+# a pedestrian walking across the road, 26 m away: h/w 2.0-2.3, 2.2-2.3 m tall
+CROSSWALK_PEDESTRIAN = [(912.45, 0.84, (356, 154, 401, 255)), (912.50, 0.81, (323, 159, 372, 256)), (912.55, 0.84, (289, 155, 340, 256)),
+                        (912.60, 0.86, (254, 154, 305, 256)), (912.65, 0.81, (216, 154, 269, 257))]
+
+
+def calibration(demo=False):
   msg = messaging.new_message('extrinsicsCalibration')
   cal = msg.extrinsicsCalibration
-  cal.rpyCalib, cal.wideFromDeviceEuler, cal.height = RPY, WIDE_EULER, [HEIGHT]
+  rpy, wide, height = DEMO_CALIBRATION if demo else (RPY, WIDE_EULER, HEIGHT)
+  cal.rpyCalib, cal.wideFromDeviceEuler, cal.height = rpy, wide, [height]
   return msg.as_reader().extrinsicsCalibration
 
 
@@ -42,6 +66,16 @@ def detections(tracker, camera: str, t: float, objects, frame_id=0):
   msg = messaging.new_message('turnpilotDetections')
   fill_detections(msg.turnpilotDetections, rows, frame_id, int(t * 1e9), camera, 0.005)
   return msg.as_reader().turnpilotDetections
+
+
+def feed_demo(tracker, rows):
+  """Recorded person detections of the demo route, one per road camera frame; returns the published tracks after the last."""
+  cal, tracks = calibration(demo=True), []
+  for i, (t, conf, bx) in enumerate(rows):
+    msg = messaging.new_message('turnpilotDetections')
+    fill_detections(msg.turnpilotDetections, np.array([[*bx, conf, PERSON]], dtype=np.float32), i, int(t * 1e9), 'road', 0.005)
+    tracks = tracker.update(msg.as_reader().turnpilotDetections, cal, car_state(10.0), now=t)
+  return tracks
 
 
 def nearest_track(tracks, x, y):
@@ -137,6 +171,35 @@ class TestSceneTracker(OpenpilotTestCase):
     assert trk['in_path'] and trk['x'][0] < 6.0 - 0.5 * (CLOSE_HOLD_S - 0.5)  # carried along with the car's motion
     later = self.run_frames(3, lambda t: [], v_ego=1.0, t0=10.0 + len(history) * DT)
     assert later[-1] == {}
+
+  def test_close_hold_needs_matched_detections(self):
+    # a pedestrian in the path at 6.5 m that stops being detected: the long hold is for one matched at least CLOSE_HOLD_MIN_HITS
+    # times, so a 2-3 hit blip is released after MAX_COAST_S like anything else
+    for hits in (CLOSE_HOLD_MIN_HITS - 1, CLOSE_HOLD_MIN_HITS):
+      self.tracker = SceneTracker(CAMS, 'mici')
+
+      def objects(t, hits=hits):
+        return [(PERSON, 6.5, 0.2, 0.8)] if t < hits * DT - 1e-6 else []
+      history = self.run_frames(hits + int((MAX_COAST_S + 0.4) / DT), objects)
+      assert len(history[hits - 1]) == (hits >= 2)  # published from its 2nd detection on
+      assert len(history[-1]) == (hits >= CLOSE_HOLD_MIN_HITS)
+
+  def test_pillar_and_bush_are_not_a_pedestrian(self):
+    # both checks drop it, and each alone does: the box is wider than tall, and 90-180 m of ground contact under a 9.5 m person's height
+    assert feed_demo(SceneTracker(CAMS, 'mici'), PILLAR) == []
+    for off in ({'MAX_PERSON_GROUND_HEIGHT': np.inf}, {'MIN_PERSON_ASPECT': 0.0}):
+      tracker = SceneTracker(CAMS, 'mici')
+      with mock.patch.multiple(tracker_module, **off):
+        assert feed_demo(tracker, PILLAR) == [] and tracker.tracks == []
+    # with both off it was a pedestrian track less than 10 m ahead (in the path, with the driving model's path)
+    with mock.patch.multiple(tracker_module, MAX_PERSON_GROUND_HEIGHT=np.inf, MIN_PERSON_ASPECT=0.0):
+      tracks = feed_demo(SceneTracker(CAMS, 'mici'), PILLAR)
+    assert len(tracks) == 1 and tracks[0].x[0] < 10.0
+
+  def test_real_pedestrians_and_cyclist_stay(self):
+    for rows in (CURB_PEDESTRIAN, CYCLIST, CROSSWALK_PEDESTRIAN):
+      tracks = feed_demo(SceneTracker(CAMS, 'mici'), rows)
+      assert len(tracks) == 1 and tracks[0].cls == PERSON and tracks[0].hits == len(rows)
 
   def test_far_pedestrian_out_of_view_is_dropped(self):
     def objects(t):
