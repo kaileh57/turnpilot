@@ -48,8 +48,12 @@ def spawn_traffic(bng, amount: int = 8, parked: int = 0):
   bng.traffic.spawn(max_amount=amount, police_ratio=0.0, extra_amount=0, parked_amount=parked)
 
 
-def stop_traffic(bng):
+def remove_traffic(bng, keep=('ego',)):
+  """Stop the traffic AI and delete every vehicle but ours (a stopped traffic vehicle stays where it is)."""
   bng.traffic.stop(stop=True)
+  for vid in bng.vehicles.get_current_info(include_config=False):
+    if vid not in keep:
+      lua(bng, f"local o = scenetree.findObject('{vid}') if o then o:delete() end")
 
 
 def _ped_pose(x, y, z, heading):

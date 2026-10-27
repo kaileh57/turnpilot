@@ -26,6 +26,7 @@ TESLA_STEER_RATIO = 12.0  # opendbc's Model 3; the game car is presented with th
 GRAVITY = 9.81
 GEARS = {"P": GEAR_P, "R": GEAR_R, "N": GEAR_N, "D": GEAR_D}
 BEAMNG_GEAR_D = 2  # vehicle.control(gear=) index of D in realistic_automatic
+TELEPORT_JUMP = 2.0  # m between 100 Hz IMU readings
 
 
 @dataclass
@@ -220,6 +221,8 @@ class BeamNGWorld(World):
         readings = list(readings.values())
       latest = sorted((r for r in readings if 'dirX' in r and (not history or r['time'] > history[-1]['time'])), key=lambda r: r['time'])
       if latest:
+        if history and np.linalg.norm(np.subtract(latest[0]['pos'], history[-1]['pos'])) > TELEPORT_JUMP:
+          history.clear()  # a teleport: don't difference across it, or the IMU reads a 30 rad/s spin
         history.extend(latest)
         self.pose = Pose(history, latest)
       time.sleep(max(0.0, 0.02 - (time.monotonic() - t0)))
@@ -266,6 +269,8 @@ class BeamNGWorld(World):
   def teleport(self, pos, rot_quat):
     with self.bng_lock:
       self.bng.vehicles.teleport('ego', pos, rot_quat)
+    with self.vlock:  # a teleport resets the car to P
+      self.ego.control(gear=BEAMNG_GEAR_D)
 
   def close(self, reason: str = ""):
     if self.stop.is_set():

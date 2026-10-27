@@ -68,7 +68,8 @@ OPENPILOT_PREFIX=tpsim python -m openpilot.tools.sim.bridge.beamng.gate1 --junct
 
 `scenario.py` works with any BeamNGpy client: in the bridge process use `world.bng` under `world.bng_lock`, from another
 script open a second client. It can teleport the ego, read its pose, spawn BeamNG traffic, spawn and move the Italy
-mannequin (the only human-shaped stock asset) as a pedestrian prop, and force or release traffic signals.
+mannequin (the only human-shaped stock asset) as a pedestrian prop, remove the traffic again, and force or release
+traffic signals.
 `BeamNGBridge(scenario=...)` runs a callable in the bridge loop at 100 Hz; gate1 is the example.
 
 ## Check it without openpilot
