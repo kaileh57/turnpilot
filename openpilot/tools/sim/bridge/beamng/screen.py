@@ -25,9 +25,12 @@ AFTER_M = 70.
 def lane_offset(graph: RoadGraph, p, heading: float, side: int, z_ref: float) -> tuple[float, float]:
   """(meters right of the road graph's centreline, z) for the lane a maneuver to `side` leaves from. Of the roads
   along the heading near p, the one nearest z_ref (the junction's height): tunnels and bridges cross the town."""
-  near = sorted(graph.links.items(), key=lambda kv: float(np.linalg.norm(
-    (graph.pos[kv[0][0]][:2] + graph.pos[kv[0][1]][:2]) / 2 - p)))[:8]
-  near = [kv for kv in near if float(np.linalg.norm((graph.pos[kv[0][0]][:2] + graph.pos[kv[0][1]][:2]) / 2 - p)) < 40.]
+  def seg_dist(kv):
+    a, b = graph.pos[kv[0][0]][:2], graph.pos[kv[0][1]][:2]
+    ab = b - a
+    t = float(np.clip(np.dot(p - a, ab) / max(float(np.dot(ab, ab)), 1e-9), 0., 1.))
+    return float(np.linalg.norm(p - (a + t * ab)))
+  near = [kv for kv in graph.links.items() if seg_dist(kv) < 12.]
   near.sort(key=lambda kv: abs(float(graph.pos[kv[0][0]][2]) - z_ref))
   for (a, b), _link in near:
     d = graph.pos[b][:2] - graph.pos[a][:2]
