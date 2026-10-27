@@ -303,7 +303,8 @@ def main(demo=False):
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry"] + (["chestnutGpuState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
   sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState",
-                  "carControl", "controlsState", "lateralDelay"])
+                  "carControl", "controlsState", "lateralDelay", "turnpilotPlan"],
+                 ignore_alive=["turnpilotPlan"], ignore_avg_freq=["turnpilotPlan"], ignore_valid=["turnpilotPlan"])
 
   publish_state = PublishState()
   params = Params()
@@ -370,6 +371,10 @@ def main(demo=False):
 
     sm.update(0)
     desire = DH.desire
+    # TurnPilot: nav turn desires go in while DesireHelper is idle (a nav lane change goes through DesireHelper)
+    tp = sm['turnpilotPlan']
+    if desire == log.Desire.none and sm.alive['turnpilotPlan'] and not tp.shadow:
+      desire = tp.desire
     is_rhd = sm["driverMonitoringState"].isRHD
     frame_id = sm["narrowRoadCameraState"].frameId
     v_ego = max(sm["carState"].vEgo, 0.)
