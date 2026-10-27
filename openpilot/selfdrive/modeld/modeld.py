@@ -297,10 +297,20 @@ def main(demo=False):
   params.put_bool("ChestnutLoading", False)
   cloudlog.warning(f"models loaded in {time.monotonic() - st:.1f}s, modeld starting")
 
+  # TurnPilot: YOLO26 after modelV2, on the frames already uploaded; None (TurnPilotEnabled off, no pkl) changes nothing
+  detector = None
+  if params.get_bool("TurnPilotEnabled"):
+    try:
+      from openpilot.selfdrive.turnpilot.detector.modeld_detector import load as load_detector
+      detector = load_detector(model, vipc_client_main.width, vipc_client_main.height, main_wide_camera, use_extra_client)
+    except Exception:
+      cloudlog.exception("turnpilot detector failed to load")
+
   config_realtime_process(7, 54)
 
   # messaging
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry"] + (["chestnutGpuState"] if CHESTNUT else [])
+  pub_socks += ["turnpilotDetections"] if detector is not None else []
   pm = PubMaster(pub_socks)
   sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState",
                   "carControl", "controlsState", "lateralDelay", "turnpilotPlan"],
@@ -465,6 +475,9 @@ def main(demo=False):
       pm.send('drivingModelData', drivingdata_send)
       pm.send('cameraOdometry', posenet_send)
     last_vipc_frame_id = meta_main.frame_id
+
+    if detector is not None and model_output is not None:
+      detector.step(pm, model, model_execution_time, prev_action.desiredCurvature, desire, [meta_main, meta_extra])
 
 if __name__ == "__main__":
   try:
