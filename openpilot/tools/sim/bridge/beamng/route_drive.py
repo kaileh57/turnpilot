@@ -159,6 +159,9 @@ class RouteDrive:
       self.disengagements.append(d)
       self.dis_t = t
       print(f"route_drive: DISENGAGED {json.dumps(d)}", flush=True)
+      if "excessiveActuation" in ev:  # latched until selfdrived restarts: nothing engages again this session
+        self.end_run(b, "excessive actuation")
+        return
     self.enabled_prev = enabled
     if not enabled and self.dis_t is not None and t - self.dis_t > REENGAGE_WAIT and not b.auto_engage:
       b.auto_engage = True  # the driver takes it again and engages
