@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Gate 2: run the real modeld against fake 1344x760 os04c10 cameras and measure modelV2.modelExecutionTime.
+
+It publishes the minimal inputs modeld needs (road and wide frames, camera states, deviceState pc,
+carState, extrinsicsCalibration), starts modeld --demo in its own OPENPILOT_PREFIX, collects modelV2,
+then stops modeld and checks that chestnut is released. Nothing else may hold chestnut while it runs.
+  python -m openpilot.tools.turnpilot.gate2_modeld [--frames 600]
+"""
+import argparse
+import os
+import signal
+import subprocess
+import sys
+import time
+
+import numpy as np
+
+from openpilot.cereal import messaging
+from openpilot.common.params import Params
+from openpilot.common.prefix import OpenpilotPrefix
+from openpilot.common.realtime import Ratekeeper
+from openpilot.tools.turnpilot.fake_cameras import FakeCameras, gray_nv12
+
+WARMUP = 20
+
+
+def chestnut_user_clients() -> int:
+  out = subprocess.run(["/usr/sbin/ioreg", "-p", "IOService", "-l", "-w0", "-r", "-n", "custom 8516b768-CLEAN"],
+                       capture_output=True, text=True).stdout
+  return out.count("UserClient")
+
+
+def pct(a, q):
+  return float(np.percentile(a, q))
+
+
+def run(n_frames: int, timeout: float) -> int:
+  cams = FakeCameras()
+  pm = messaging.PubMaster(['deviceState', 'carState', 'extrinsicsCalibration'])
+  model_sock = messaging.sub_sock('modelV2', conflate=False)
+  gpu_sock = messaging.sub_sock('chestnutGpuState', conflate=False)
+  params = Params()
+  params.remove("ChestnutRetry")
+
+  modeld = subprocess.Popen([sys.executable, "-m", "openpilot.selfdrive.modeld.modeld", "--demo"])
+  road, wide = gray_nv12(seed=0), gray_nv12(seed=1)
+  msgs, gpu_msgs, sent_at_first = [], 0, None
+  rk = Ratekeeper(20, print_delay_threshold=None)
+  st = time.monotonic()
+  try:
+    while len(msgs) < WARMUP + n_frames and time.monotonic() - st < timeout and modeld.poll() is None:
+      cams.send(road, wide)
+      if rk.frame % 10 == 0:
+        ds = messaging.new_message('deviceState', valid=True)
+        ds.deviceState.deviceType = "pc"
+        pm.send('deviceState', ds)
+      if rk.frame % 5 == 0:
+        cal = messaging.new_message('extrinsicsCalibration', valid=True)
+        cal.extrinsicsCalibration.rpyCalib = [0., 0., 0.]
+        cal.extrinsicsCalibration.calStatus = "calibrated"
+        pm.send('extrinsicsCalibration', cal)
+      cs = messaging.new_message('carState', valid=True)
+      pm.send('carState', cs)
+
+      for m in messaging.drain_sock(model_sock):
+        if not msgs:
+          sent_at_first = cams.frame_id
+          print(f"first modelV2 after {time.monotonic() - st:.1f} s, big={m.modelV2.big}", flush=True)
+        msgs.append(m)
+      gpu_msgs += len(messaging.drain_sock(gpu_sock))
+      rk.keep_time()
+    chestnut_active = params.get("ChestnutActive")
+  finally:
+    modeld.send_signal(signal.SIGINT)
+    try:
+      modeld.wait(15)
+    except subprocess.TimeoutExpired:
+      modeld.kill()
+      modeld.wait()
+
+  if len(msgs) < WARMUP + n_frames:
+    print(f"FAIL: got {len(msgs)} modelV2 messages, wanted {WARMUP + n_frames}")
+    return 1
+
+  meas = msgs[WARMUP:]
+  ex = np.array([m.modelV2.modelExecutionTime for m in meas]) * 1e3
+  age = np.array([(m.logMonoTime - m.modelV2.timestampEof) for m in meas]) / 1e6
+  drop = np.array([m.modelV2.frameDropPerc for m in meas])
+  ids = np.array([m.modelV2.frameId for m in meas])
+  gaps = int(np.sum(np.diff(ids) - 1))
+  big = all(m.modelV2.big for m in meas)
+  sent = cams.frame_id - sent_at_first
+  print(f"modelV2.big all True: {big}  ChestnutActive: {chestnut_active}  chestnutGpuState msgs: {gpu_msgs}")
+  print(f"modelExecutionTime over {len(ex)} frames: median {np.median(ex):.2f} ms, p95 {pct(ex, 95):.2f} ms, " +
+        f"p99 {pct(ex, 99):.2f} ms, max {ex.max():.2f} ms")
+  print(f"frame age (modelV2 logMonoTime - frame eof): median {np.median(age):.2f} ms, p95 {pct(age, 95):.2f} ms")
+  print(f"frame drop: frameId gaps {gaps} of {ids[-1] - ids[0] + 1}, frameDropPerc max {drop.max():.2f}, " +
+        f"modelV2 {len(msgs)} for {sent} frames sent since the first output")
+  print(f"modeld exit code {modeld.returncode}, chestnut user clients after exit: {chestnut_user_clients()}")
+  return 0 if big and chestnut_active else 1
+
+
+def main():
+  parser = argparse.ArgumentParser()
+  parser.add_argument('--frames', type=int, default=600)
+  parser.add_argument('--timeout', type=float, default=240.)
+  args = parser.parse_args()
+  with OpenpilotPrefix(os.environ.get("OPENPILOT_PREFIX", "gate2")):
+    sys.exit(run(args.frames, args.timeout))
+
+
+if __name__ == "__main__":
+  main()
