@@ -36,6 +36,7 @@ def parse_args(add_args=None):
   p.add_argument('--no-lean', action='store_true', help='keep the HUD and particles on')
   p.add_argument('--signals', action='store_true', help="leave the traffic signals running (default: all green and held)")
   p.add_argument('--capture', default='', help='record the chase view to this mp4')
+  p.add_argument('--capture-fps', type=float, default=d.capture_fps, help='chase view frame rate (each render costs camera pairs)')
   p.add_argument('--restore-on-exit', action='store_true',
                  help='on exit, set the shared game back: signals running, HUD and particles on, the light as it was')
   p.add_argument('--duration', type=float, default=0.0, help='quit after this many seconds (0: run until q or Ctrl-C)')
@@ -46,7 +47,8 @@ def parse_args(add_args=None):
 def config_from_args(args) -> BeamNGConfig:
   return BeamNGConfig(host=args.host, port=args.port, level=args.level, model=args.model, spawn_pos=args.spawn, spawn_rot=args.rot,
                       reload=args.reload, camera_update=args.camera_update, camera_poll=args.camera_poll, lean=not args.no_lean,
-                      green=not args.signals, capture=args.capture, restore=args.restore_on_exit)
+                      green=not args.signals, capture=args.capture, capture_fps=args.capture_fps,
+                      restore=args.restore_on_exit)
 
 
 def main():

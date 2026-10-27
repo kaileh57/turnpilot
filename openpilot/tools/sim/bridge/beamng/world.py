@@ -48,6 +48,7 @@ class BeamNGConfig:
   camera_poll: float = 0.03  # s between polls of both cameras; the game answers once a frame, so polls beyond its fps wait
   lean: bool = True  # hide the HUD and particles: more game frames, so more camera frames
   capture: str = ""  # mp4 path for the chase view (capture.py)
+  capture_fps: float = 10.0
   restore: bool = False  # on exit, undo the global game changes above (signals, HUD, particles, light): the game is shared
 
 
@@ -90,7 +91,7 @@ class BeamNGWorld(World):
                          log=log)
     if cfg.capture:
       from openpilot.tools.sim.bridge.beamng.capture import ChaseCapture
-      self.capture = ChaseCapture(self.bng, self.bng_lock, self.ego, cfg.host, cfg.port, cfg.capture, log=log)
+      self.capture = ChaseCapture(self.bng, self.bng_lock, self.ego, cfg.host, cfg.port, cfg.capture, log=log, fps=cfg.capture_fps)
 
     self.threads += [threading.Thread(target=self.vehicle_loop, name="bng_vehicle", daemon=True),
                      threading.Thread(target=self.imu_loop, name="bng_imu", daemon=True)]
