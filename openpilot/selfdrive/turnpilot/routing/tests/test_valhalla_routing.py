@@ -14,8 +14,8 @@ import numpy as np
 
 from openpilot.selfdrive.navigation.navd import RouteEngine
 from openpilot.selfdrive.navigation.route import local_meters
-from openpilot.selfdrive.turnpilot.routing.guidance import approach_lanes, fill_guidance, upcoming_maneuvers
-from openpilot.selfdrive.turnpilot.routing.valhalla import ValhallaSource
+from openpilot.selfdrive.turnpilot.routing.guidance import MAX_MANEUVERS, approach_lanes, fill_guidance, upcoming_maneuvers
+from openpilot.selfdrive.turnpilot.routing.valhalla_source import ValhallaSource
 
 ROOT = Path(__file__).parents[5]
 BUILD_TILES = ROOT / 'tools/turnpilot/build_valhalla_tiles.sh'
@@ -26,6 +26,10 @@ INDIANA_TILES = Path('~/turnpilot_data/valhalla/indiana').expanduser()
 # Two public-road points in the 4506-node public component of west_coast_usa (OSM nodes 1014 and 8131), (longitude, latitude).
 # Private service roads are destination_only there, so the readiness check kept route endpoints on public roads.
 NORTH_WEST, SOUTH_EAST = (-86.17128968, 39.78649561), (-86.14482423, 39.7580146)
+# The route between them, measured on tiles built from the export: (metres, steps) by the start's bearing. Bearings 90 and 180 give
+# the longer route, none, 0 and 270 the shorter one.
+ROUTE_WITH_BEARING_90, ROUTE_WITHOUT = (6762, 13), (6389, 10)
+DISTANCE_TOLERANCE = 10  # m
 
 try:
   HAVE_VALHALLA = importlib.util.find_spec('valhalla') is not None
@@ -110,9 +114,8 @@ class TestWestCoastUSA(unittest.TestCase):
 
   def test_route(self):
     steps = ValhallaSource(self.tiles).route(NORTH_WEST, SOUTH_EAST, None, 'en')
-    # The readiness check found 6389 m and 10 maneuvers for this pair, and the roads here have no names and no ramps.
-    self.assertTrue(5000 < sum(s['distance'] for s in steps) < 9000)
-    self.assertGreaterEqual(len(steps), 5)
+    self.assertAlmostEqual(sum(s['distance'] for s in steps), ROUTE_WITHOUT[0], delta=DISTANCE_TOLERANCE)
+    self.assertEqual(len(steps), ROUTE_WITHOUT[1])
     self.assertEqual([steps[0]['maneuver']['type'], steps[-1]['maneuver']['type']], ['depart', 'arrive'])
     self.assertEqual(steps[0]['driving_side'], 'right')
     self.assertLess(meters_between(steps[0]['geometry']['coordinates'][0], NORTH_WEST), 30)
@@ -126,7 +129,11 @@ class TestWestCoastUSA(unittest.TestCase):
 
   def test_bearing_picks_the_direction(self):
     source = ValhallaSource(self.tiles)
-    for bearing in (None, 0, 90, 180, 270):
+    for bearing, (distance, count) in ((90, ROUTE_WITH_BEARING_90), (None, ROUTE_WITHOUT)):
+      steps = source.route(NORTH_WEST, SOUTH_EAST, bearing, None)
+      self.assertAlmostEqual(sum(s['distance'] for s in steps), distance, delta=DISTANCE_TOLERANCE, msg=bearing)
+      self.assertEqual(len(steps), count, bearing)
+    for bearing in (0, 180, 270):  # the other headings still reach the destination
       steps = source.route(NORTH_WEST, SOUTH_EAST, bearing, None)
       self.assertTrue(5000 < sum(s['distance'] for s in steps) < 9000, bearing)
 
@@ -139,6 +146,7 @@ class TestWestCoastUSA(unittest.TestCase):
     engine.calculate_route(SOUTH_EAST)
     self.assertIsNotNone(engine.route)
     steps = engine.route
+    self.assertEqual(len(steps), ROUTE_WITH_BEARING_90[1])  # the engine's start bearing is 90
     path = np.concatenate(engine.route_geometry)
     sent = lambda service: [call.args[1] for call in pm.send.call_args_list if call.args[0] == service]  # noqa: E731
     engine.send_route()
@@ -159,7 +167,7 @@ class TestWestCoastUSA(unittest.TestCase):
         self.assertLessEqual(distance, last_distance + 1)  # and closes in on the maneuver
       previous, last_distance = step_idx, distance
       maneuvers = instruction.navInstruction.allManeuvers
-      self.assertEqual(len(maneuvers), len(steps) - 1 - step_idx)
+      self.assertEqual(len(maneuvers), min(len(steps) - 1 - step_idx, MAX_MANEUVERS))
       self.assertEqual([m.distance for m in maneuvers], sorted(m.distance for m in maneuvers))
       visited.append(step_idx)
     # Every step was driven, up to the arrival, which is only entered by driving past the destination.

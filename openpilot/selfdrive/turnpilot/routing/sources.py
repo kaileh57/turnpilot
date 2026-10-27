@@ -1,10 +1,11 @@
 """Where navd gets its route from: Mapbox online, or Valhalla on local tiles."""
+import math
 from typing import Protocol
 
 import requests
 
 from openpilot.common.swaglog import cloudlog
-from openpilot.selfdrive.turnpilot.routing.valhalla import ValhallaSource, tiles_usable
+from openpilot.selfdrive.turnpilot.routing.valhalla_source import ValhallaSource, tiles_usable
 
 
 class RouteSource(Protocol):
@@ -33,7 +34,7 @@ class MapboxSource:
       'alternatives': 'false',
       'language': language,
     }
-    if bearing is not None:
+    if bearing is not None and math.isfinite(bearing):  # a GPS fix without a heading can report NaN
       params['bearings'] = f"{(bearing + 360) % 360:.0f},90;"
 
     coords_str = ';'.join(f'{lon},{lat}' for lon, lat in (start, destination))
@@ -47,28 +48,62 @@ class MapboxSource:
     return r['routes'][0]['legs'][0]['steps'] if len(r['routes']) else []
 
 
+def source_mode(mode) -> str:
+  """'auto', 'mapbox' or 'valhalla' from the TurnPilotRouteSource param; anything else is auto."""
+  mode = (mode or 'auto').strip().lower()
+  if mode not in ('auto', 'mapbox', 'valhalla'):
+    cloudlog.warning(f"unknown TurnPilotRouteSource {mode!r}, using auto")
+    return 'auto'
+  return mode
+
+
 def select_source(mode, tiles) -> str:
   """'mapbox' or 'valhalla' from the TurnPilotRouteSource and TurnPilotValhallaTiles params."""
-  mode = (mode or 'auto').strip().lower()
-  if mode in ('mapbox', 'valhalla'):
-    return mode
+  mode = source_mode(mode)
   if mode != 'auto':
-    cloudlog.warning(f"unknown TurnPilotRouteSource {mode!r}, using auto")
+    return mode
   return 'valhalla' if tiles_usable(tiles) else 'mapbox'
 
 
+class FallbackSource:
+  """In auto mode: Valhalla's route, or Mapbox's when Valhalla fails or finds none, as for a destination outside its tiles."""
+
+  def __init__(self, valhalla: ValhallaSource, mapbox: MapboxSource):
+    self.valhalla, self.mapbox = valhalla, mapbox
+
+  def route(self, start, destination, bearing, language):
+    try:
+      steps = self.valhalla.route(start, destination, bearing, language)
+      if len(steps):
+        return steps
+      cloudlog.warning("valhalla found no route, trying mapbox")
+    except Exception:
+      cloudlog.exception("valhalla failed to route, trying mapbox")
+    return self.mapbox.route(start, destination, bearing, language)
+
+
 class RouteSources:
-  """The route source the params ask for, with the Valhalla source kept between requests."""
+  """The route source the params ask for, with the Valhalla source kept between requests.
+  An explicit 'valhalla' is strict: it fails where Valhalla can't route, so a sim never quietly drives Mapbox's real roads."""
 
   def __init__(self, mapbox: MapboxSource):
     self.mapbox = mapbox
     self.valhalla = None
+    self.fallback = None
     self.tiles = None
 
   def get(self, params) -> RouteSource:
     tiles = params.get('TurnPilotValhallaTiles')
-    if select_source(params.get('TurnPilotRouteSource'), tiles) == 'mapbox':
+    mode = source_mode(params.get('TurnPilotRouteSource'))
+    if select_source(mode, tiles) == 'mapbox':
       return self.mapbox
     if self.valhalla is None or tiles != self.tiles:
-      self.valhalla, self.tiles = ValhallaSource(tiles), tiles
-    return self.valhalla
+      try:
+        self.valhalla, self.tiles = ValhallaSource(tiles), tiles
+        self.fallback = FallbackSource(self.valhalla, self.mapbox)
+      except Exception:
+        if mode == 'valhalla':
+          raise
+        cloudlog.exception("valhalla tiles do not load, using mapbox")
+        return self.mapbox
+    return self.valhalla if mode == 'valhalla' else self.fallback
