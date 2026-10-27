@@ -26,7 +26,7 @@ from openpilot.tools.sim.bridge.beamng.cameras import MOUNT
 from openpilot.tools.sim.bridge.beamng.gate1 import CANCEL_WAIT, pick_turn
 from openpilot.tools.sim.bridge.beamng.roadgraph import RoadGraph
 from openpilot.tools.sim.bridge.beamng.run_bridge import config_from_args, parse_args
-from openpilot.tools.sim.bridge.beamng.scenario import ego_pose, heading_quat, remove_pedestrian, spawn_pedestrian
+from openpilot.tools.sim.bridge.beamng.scenario import ego_pose, heading_quat, move_pedestrian, remove_pedestrian, spawn_pedestrian
 from openpilot.tools.sim.bridge.common import control_cmd_gen
 
 PED = "tp_gate3_ped"
@@ -37,6 +37,9 @@ STOPPED_SPEED = 0.2  # m/s
 STOPPED_HOLD = 3.0   # s at standstill ends a run
 PERSON = 0
 DEFAULT_FRONT_M = 2.3  # ref node to the ETK 800's front bumper, if the bounding box isn't available
+# the road graph's lane centre can sit in a parking lane, away from where the model drives: once the car is driving, the
+# mannequin moves sideways onto the car's own line, while it's still farther than the detector sees (about 60 m)
+PLACE_AT = 90.0
 
 
 class Gate3:
@@ -52,10 +55,10 @@ class Gate3:
     b.world.teleport(pos, heading_quat(heading))
     ped_xy, _ = self.turn.spawn(self.approach - self.ped_ahead)
     with b.world.bng_lock:
-      z = spawn_pedestrian(b.world.bng, PED, ped_xy[0], ped_xy[1], heading=heading + math.pi, z_hint=pos[2] + 3.0)
+      z = spawn_pedestrian(b.world.bng, PED, ped_xy[0], ped_xy[1], heading=heading + math.pi, z_hint=ped_xy[2] + 3.0)
     self.ped = np.array([ped_xy[0], ped_xy[1], z])
     self.heading = heading
-    self.t0, self.phase, self.engaged_t, self.stopped_since = time.monotonic(), "settle", None, None
+    self.t0, self.phase, self.engaged_t, self.stopped_since, self.placed = time.monotonic(), "settle", None, None, None
     self.rows, self.dets, self.disengaged, self.offsets = [], [], False, None
     print(f"gate3 run {self.run + 1}/{self.runs}: mannequin {self.ped_ahead:.0f} m ahead at {self.ped.round(1).tolist()}", flush=True)
 
@@ -128,6 +131,17 @@ class Gate3:
 
     if not enabled:
       self.disengaged = True
+    if self.placed is None and along < PLACE_AT:
+      right = np.array([math.sin(self.heading), -math.cos(self.heading)])
+      self.placed = float(np.dot(pos - self.ped[:2], right))
+      self.ped[:2] += self.placed * right
+      with b.world.bng_lock:
+        move_pedestrian(b.world.bng, PED, *self.ped.tolist(), self.heading + math.pi)
+      print(f"gate3: mannequin moved {self.placed:+.2f} m (right positive) onto the car's line", flush=True)
+    hv = np.array([s.velocity.x, s.velocity.y])
+    hv = hv / np.linalg.norm(hv) if np.linalg.norm(hv) > 1.0 else h
+    d = self.ped[:2] - pos
+    y_true = float(hv[0] * d[1] - hv[1] * d[0])  # the mannequin's offset from the car's axis, left positive
     if b.rk_frame % 10 == 0:
       self.sm.update(0)
       mv, plan, scene = self.sm['modelV2'], self.sm['turnpilotPlan'], self.sm['turnpilotScene']
@@ -136,6 +150,7 @@ class Gate3:
       ped = min(peds, key=lambda o: o.x, default=None)
       self.rows.append({
         't': round(now - self.t0, 2), 'v': round(s.wheel_speed, 2), 'cam_gap': round(cam_gap, 2), 'bumper_gap': round(bumper_gap, 2),
+        'ped_y_true': round(y_true, 2),
         'enabled': bool(enabled), 'model_stop': bool(mv.action.shouldStop), 'model_accel': round(mv.action.desiredAcceleration, 2),
         'lead_prob': round(lead.prob, 2) if lead else None, 'lead_x': round(lead.x[0], 1) if lead and len(lead.x) else None,
         'plan_alive': bool(self.sm.alive['turnpilotPlan']), 'plan_accel_cap': round(plan.accelCap, 2), 'plan_speed_cap': round(plan.speedCap, 2),
@@ -169,7 +184,7 @@ class Gate3:
     res = {
       'run': self.run + 1, 'end': reason, 'disengaged': self.disengaged, 'speed_kph': self.speed_kph,
       'final_cam_gap_m': round(cam_gap, 2), 'final_bumper_gap_m': round(bumper_gap, 2),
-      'max_v': max((r['v'] for r in rows), default=None), 'offsets_cam_front_m': [round(x, 2) for x in self.offsets or (0, 0)],
+      'max_v': max((r['v'] for r in rows), default=None), 'moved_m': self.placed, 'offsets_cam_front_m': [round(x, 2) for x in self.offsets or (0, 0)],
       'model_should_stop_first': first(lambda r: r['model_stop']),
       'model_brake_first': first(lambda r: r['model_accel'] < -1.0),
       'model_min_accel': min((r['model_accel'] for r in rows), default=None),
