@@ -13,3 +13,6 @@ openpilot/selfdrive/modeld/models/big_*_tinygrad.pkl filter=lfs diff=lfs merge=l
 
 openpilot/selfdrive/car/tests/test_models_segs.txt filter=lfs diff=lfs merge=lfs -text
 openpilot/common/hardware/comma/updater filter=lfs diff=lfs merge=lfs -text
+
+# TurnPilot assets are plain git blobs, not LFS (the LFS endpoint is comma's read-only Hugging Face repo)
+openpilot/selfdrive/turnpilot/** -filter -diff -merge -text
