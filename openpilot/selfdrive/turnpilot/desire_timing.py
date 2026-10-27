@@ -27,6 +27,8 @@ out is held, since dropping it and sending it again would be a new rising edge. 
 Nor does any desire go out while openpilot isn't steering (carControl.latActive): modeld would not feed it to the
 model, and a pulse, repeat or timeout spent then is lost. Once openpilot engages, a fresh pulse goes, unless the driver
 has turned the car TURN_STARTED_DEG toward a turn meanwhile.
+When a new route replaces the maneuver (RouteFollower.replaced), a turn pulse the car hasn't started turning on is
+cleared at once: the old junction may be just ahead, and the pulse would turn the car there.
 """
 import math
 
@@ -95,12 +97,15 @@ class DesireTiming:
 
   def update(self, maneuver, distance: float, maneuver_id: int, passed: bool, v_ego: float,
              steering_angle_deg: float, keep_left_ok: bool, keep_right_ok: bool, dt: float, yaw_rate: float = 0.,
-             lat_active: bool = True) -> int:
+             lat_active: bool = True, replaced: bool = False) -> int:
     """The desire to publish, CLEAR_DESIRE once a turn is done. maneuver is RouteFollower.upcoming (None when there is
     none); keep_left_ok/keep_right_ok: the model sees a lane line and road that way (lane_planner.ModelLanes);
-    yaw_rate: rad/s, left positive; lat_active: carControl.latActive."""
+    yaw_rate: rad/s, left positive; lat_active: carControl.latActive; replaced: RouteFollower.replaced."""
     if maneuver_id != self.maneuver_id:
-      self._turn_over()
+      if replaced and self.side and self.turned_deg < TURN_STARTED_DEG:
+        self._clear()
+      else:
+        self._turn_over()
     if self._pending is not None:
       self._pending[0] += math.degrees(yaw_rate * dt) * self._pending[1]
       self._pending[2] += dt

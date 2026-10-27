@@ -250,3 +250,36 @@ def test_turn_desire_cleared_with_openpilot_off():
   assert Desire.turnLeft in out and out.count(CLEAR_DESIRE) == CLEAR_FRAMES
   i = out.index(CLEAR_DESIRE)
   assert abs((i * DT_MDL - 5.) * yaw * 57.3 - (90. - CLEAR_MARGIN_DEG)) < 2.
+
+
+
+def drive_into_new_route(marked: bool, v=7.):
+  """A left at 300 m, pulsed from its lead; 25 m before it a new route arrives that starts with a left 284 m on, after
+  one invalid instruction from navd (marked) or none. Returns the switch point and [(s, distance, desire)] per frame."""
+  navd, rf, dt_ = FakeNavd([(300., "turn", "left"), (900., "turn", "right")]), RouteFollower(), DesireTiming()
+  s, switch, trace = 0., None, []
+  for _ in range(int(90. / DT_MDL)):
+    if switch is None and 300. - s < 25.:
+      switch, navd = s, FakeNavd([(s + 284., "turn", "left"), (s + 900., "turn", "right")])
+      instr, updated, valid = nav_instruction(0., valid=False), marked, False
+      navd.frame = int(marked)  # the new route's first instruction a second after the invalid one, or now
+    else:
+      instr = navd.update(s)
+      updated, valid = instr is not None, True
+    rf.update(instr, updated, valid, v, DT_MDL)
+    trace.append((s, rf.distance, dt_.update(rf.upcoming, rf.distance, rf.maneuver_id, rf.passed, v, 0., True, True, DT_MDL,
+                                             replaced=rf.replaced)))
+    s += v * DT_MDL
+  return switch, trace
+
+
+def test_new_route_clears_the_old_turn_at_once():
+  # the old pulse is cleared at once, and the next goes at the new left's lead, not at 284, 260 or 220 m
+  for marked in (False, True):
+    switch, trace = drive_into_new_route(marked)
+    assert any(desire == Desire.turnLeft for s, _, desire in trace if s < switch), marked
+    cleared = [s for s, _, desire in trace if desire == CLEAR_DESIRE]
+    assert len(cleared) == CLEAR_FRAMES and switch <= cleared[0] < switch + 2., marked
+    after = [(d, desire) for s, d, desire in trace if s > switch]
+    assert all(desire != Desire.turnLeft for d, desire in after if d > TURN_DESIRE_LEAD_M), marked
+    assert any(desire == Desire.turnLeft for d, desire in after if d < TURN_DESIRE_LEAD_M), marked

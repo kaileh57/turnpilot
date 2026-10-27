@@ -311,6 +311,18 @@ class TestRouteEngine(unittest.TestCase):
     self.engine.update()
     self.assertEqual(sent(), 2)
 
+  def test_new_route_is_marked_by_an_invalid_instruction(self):
+    # TurnPilot: a new route can start with a maneuver like the old one's, so one invalid instruction goes between them
+    valid = lambda: [call.args[1].valid for call in self.pm.send.call_args_list if call.args[0] == 'navInstruction']  # noqa: E731
+    self.sm.frame = 1
+    with patch('requests.get', return_value=self.response):
+      self.engine.update()
+      self.values['NavDestination'] = {'latitude': 0, 'longitude': 0.003}
+      self.engine.recompute_hold = 0
+      self.engine.update()
+      self.engine.update()
+    self.assertEqual(valid(), [True, False, True])
+
   def test_maneuvers_and_rerouting(self):
     self.load_route()
     self.engine.last_position = (0, 0.001)  # 111 m off route: reroute after a few consecutive misses

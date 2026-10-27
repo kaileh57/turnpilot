@@ -49,6 +49,7 @@ class RouteEngine:
     self.step_idx = None
     self.route = None
     self.route_geometry = None  # an (n, 2) array of (longitude, latitude) per step
+    self.route_count = 0  # TurnPilot: routes calculated, so a replaced route is told apart from the one it replaces
 
     self.recompute_hold = 0
     self.reroute_counter = 0
@@ -65,10 +66,15 @@ class RouteEngine:
     if source is not None:
       gps = self.sm[source]
       self.last_position, self.last_bearing = (gps.longitude, gps.latitude), gps.bearingDeg
-    route = self.route
+    route, route_count = self.route, self.route_count
     try:
       self.recompute_route(gps_ok=source is not None)
-      self.send_instruction()
+      if route is not None and self.route is not None and self.route_count != route_count:
+        # TurnPilot: one invalid instruction between two routes, so no maneuver (and its turn desire) carries over to
+        # a new route that starts with one of the same type
+        self.pm.send('navInstruction', messaging.new_message('navInstruction', valid=False))
+      else:
+        self.send_instruction()
     except Exception:
       cloudlog.exception("navd.failed_to_compute")
     # mapsd dedupes repeats, so a periodic resend is how a restarted mapsd gets the route
@@ -109,6 +115,7 @@ class RouteEngine:
       steps = self.sources.get(self.params).route(self.last_position, destination, self.last_bearing, lang)
       if len(steps):
         self.route = steps
+        self.route_count += 1
         self.route_geometry = [np.array(step['geometry']['coordinates'], dtype=np.float64).reshape((-1, 2)) for step in self.route]
         self.step_idx = 0
       else:

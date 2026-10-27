@@ -2,7 +2,7 @@
 from opendbc.car.structs import car
 from openpilot.cereal import custom, log
 from openpilot.common.realtime import DT_MDL
-from openpilot.selfdrive.turnpilot.hooks import plan_accel
+from openpilot.selfdrive.turnpilot.hooks import CLEAR_DESIRE, plan_accel
 from openpilot.selfdrive.turnpilot.lane_planner import lane_change_window
 from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP, ONCOMING_TTA_S, PED_STOP_GAP_M
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_control, car_state, model_v2, nav_instruction, scene
@@ -138,6 +138,22 @@ def test_turn_desire_waits_for_openpilot_to_steer():
   edges = rising(sim.trace, 'desire', Desire.turnLeft)
   assert edges and 280. < edges[0] < 281.
   assert all(plan.desire == Desire.none for s, _, plan in sim.trace if s < 280.)
+
+
+def test_destination_change_drops_the_old_turn():
+  # a new destination from the phone 25 m before a left, whose route starts with a left 284 m on: the old pulse is
+  # cleared at once, the car speeds up again, and the next pulse waits for the new left's lead
+  sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
+  switch = None
+  for _ in range(int(80. / DT_MDL)):
+    if switch is None and sim.distance() < 25.:
+      switch = sim.s
+      sim.navd = FakeNavd([(switch + 284., "turn", "left"), (switch + 1500., "turn", "right")])
+    sim.step()
+  after = [(s, v, plan) for s, v, plan in sim.trace if s > switch]
+  assert next(s for s, _, plan in after if plan.desire == CLEAR_DESIRE) < switch + 2.
+  assert all(plan.desire != Desire.turnLeft for _, _, plan in after if plan.maneuverDistance > TURN_DESIRE_LEAD_M)
+  assert any(plan.desire == Desire.turnLeft for _, _, plan in after) and max(v for _, v, _ in after) > 12.
 
 
 def test_oncoming_car_holds_unprotected_left():

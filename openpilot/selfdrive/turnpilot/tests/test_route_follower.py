@@ -87,3 +87,31 @@ def test_arrived():
   assert not rf.arrived
   rf.update(nav_instruction(10., "arrive", "right"), True, True, 5., DT_MDL)
   assert rf.arrived
+
+
+def test_new_route_with_the_same_maneuver_is_a_new_maneuver():
+  # a destination set from the phone 30 m before a left, whose route starts with a left 284 m on
+  rf = RouteFollower()
+  rf.update(nav_instruction(30.), True, True, 7., DT_MDL)
+  first = rf.maneuver_id
+  rf.update(nav_instruction(284.), True, True, 7., DT_MDL)
+  assert rf.maneuver_id != first and rf.replaced and not rf.passed
+  rf.update(None, False, True, 7., DT_MDL)
+  assert not rf.replaced  # for the one update
+  # navd marking the new route: one invalid instruction between the two
+  rf = RouteFollower()
+  rf.update(nav_instruction(30.), True, True, 7., DT_MDL)
+  first = rf.maneuver_id
+  rf.update(nav_instruction(30., valid=False), True, False, 7., DT_MDL)
+  assert rf.maneuver_id != first and rf.replaced and rf.upcoming is None
+  rf.update(nav_instruction(35.), True, True, 7., DT_MDL)
+  assert rf.upcoming is not None and not rf.replaced and not rf.passed
+
+
+def test_moving_on_from_a_sharp_turn_is_not_a_new_route():
+  # navd moves on to the next step's geometry up to 10 m before a sharp turn's end: the left was passed
+  rf = RouteFollower()
+  rf.update(nav_instruction(8.), True, True, 4., DT_MDL)
+  first = rf.maneuver_id
+  rf.update(nav_instruction(300.), True, True, 4., DT_MDL)
+  assert rf.maneuver_id != first and rf.passed and not rf.replaced
