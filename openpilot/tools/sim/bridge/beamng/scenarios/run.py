@@ -338,11 +338,14 @@ def main():
     p.join()
   finally:
     if ui is not None:
-      ui.send_signal(signal.SIGINT)  # SIGINT lets ffmpeg finish the mp4
       try:
-        ui.wait(timeout=30)
+        ui.wait(timeout=3)  # a Ctrl-C reached it too and it is closing its mp4: don't interrupt that
       except subprocess.TimeoutExpired:
-        ui.kill()
+        ui.send_signal(signal.SIGINT)  # SIGINT lets the recorder finish the mp4
+        try:
+          ui.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+          ui.kill()
     sweep_game(bargs.host, bargs.port)  # the bridge process may have died before its own cleanup
   print(f"results: {os.path.join(run_dir, 'result.json')}")
 
