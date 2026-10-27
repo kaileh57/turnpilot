@@ -28,7 +28,7 @@ On rungs 2 to 4, keep your hands on the wheel and a foot over the brake. Hands-o
 ## Before every drive
 
 1. The comma is on the phone's hotspot. The phone is on the same hotspot.
-2. Run preflight from a laptop on the hotspot: `python3 -m openpilot.selfdrive.turnpilot.preflight`. No FAIL lines. The WARN line appears only on rungs 2 to 4.
+2. Over SSH from a laptop on the hotspot, run `cd /data/openpilot` and then `python3 -m openpilot.selfdrive.turnpilot.preflight`. No FAIL lines. The WARN line appears only on rungs 2 to 4.
 3. Open the TurnPilot page on the phone and set the destination. The page shows the next maneuver and its distance.
 4. The TurnPilot row on the page shows `(shadow)` on rung 1. If it says Not running, stop and run preflight again.
 5. Write down the time the car turned on. Each time it turns on, the comma starts a new route, and that time finds it later.
