@@ -123,6 +123,39 @@ moves the mannequin sideways onto the car's own line at 90 m, beyond the detecto
 - With turnpilotd and no route, the scene tracks it in the path from 41 to 55 m and the car stops 3.5 to 3.6 m from the
   camera (2.0 m from the bumper), short of the 5 m target, and holds.
 
+## Routed drives
+
+`route_drive.py` drives a route from `routes.py` with the whole stack: navd routing on Valhalla tiles built from the
+road-graph export, turnpilotd, the detector in modeld and turnpilot_web. The bridge plays the driver. It sets each
+leg's destination through turnpilot_web's `/api/destination`, as the phone app does, pulls away and engages, and
+signals when turnpilotd prompts for a nav lane change (`driver.py`; the Tesla port can't signal). It engages again
+after a disengagement and logs the events behind it, and it brakes at the destination. One bridge session runs
+`--runs` drives, and `route_stats.py` turns the session's rlogs into per-run stats. Start openpilot with these
+params set and nothing extra blocked: `NavigationEnabled`, `TurnPilotEnabled`, `TurnPilotRouteSource=valhalla`
+and `TurnPilotValhallaTiles=~/turnpilot_data/valhalla/west_coast_usa`.
+
+```sh
+python -m openpilot.tools.sim.bridge.beamng.route_drive --route loop --runs 3 --out loop.json --no-keyboard < /dev/null
+python -m openpilot.tools.sim.bridge.beamng.route_stats loop.json   # writes loop_stats.json
+```
+
+`--traffic N` spawns N BeamNG traffic cars and removes them at the end, even if the bridge dies. `--capture f.mp4
+--capture-fps 5` records the chase view. A loop needs more than one leg, because on this map one leg from a start
+back near itself never has more than a few turns.
+
+A full drive stops telling you anything at its first missed turn, since the reroute goes elsewhere. `--screen` runs
+one short drive per turn and keep instead (`screen.py`): each starts 130 m before its maneuver in the lane for it,
+ends 70 m past it, and stops early once navd says the car is off the route. Use it to find the junctions a route
+can't use before you drive the route. A collision while engaged latches `Offroad_ExcessiveActuation` in selfdrived,
+and nothing engages again until selfdrived restarts. route_drive stops the session there, and `--start-at N`
+resumes the plan on a new stack.
+
+`route_stats.py` reads every route navd published (`navRoute`). A route whose end moved is a new leg, and any other
+new route is a reroute. It places the route's turns and keeps from the first `navInstruction` after the route
+(`allManeuvers`). A maneuver counts as attempted once the car reaches it along the route, and as taken once the car
+is 30 m past it and still on the route. It also counts disengagements with their `onroadEvents`, TurnPilot holds
+with their reasons, desire pulses and lane changes.
+
 ## Scenario hooks
 
 `scenario.py` works with any BeamNGpy client: in the bridge process use `world.bng` under `world.bng_lock`, from another
