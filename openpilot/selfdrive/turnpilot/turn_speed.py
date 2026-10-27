@@ -6,8 +6,10 @@ speed. The target speed comes from a lateral accel limit on the corner's radius,
 under 25 km/h, with a braking curve back to where the turn desire goes out. That is the speed the big model took
 gate 1's turns from (a pulse 40 m out at 6.9 m/s, after which the model slows itself to about 4.5 m/s for the turn).
 Braking on to a geometric 4-5 m/s before the pulse put the car at the junction 6 s after it, by which time the
-model had dropped the desire and drove straight on (four junctions of four, 2026-10-27). The planner turns the cap
-into an accel with a 1 s time constant, so the car trails the curve; the curve leads the car by 2 s.
+model had dropped the desire and drove straight on (four junctions of four, 2026-10-27). Past the pulse a second
+curve brings a junction turn down to the 4.3 m/s gate 1's model chose by itself 15 m out: at junctions where the
+model planned the turn but held 7 m/s, it gave the turn up or stopped at the corner. The planner turns the cap into
+an accel with a 1 s time constant, so the car trails the curve; the curve leads the car by 2 s.
 """
 import math
 
@@ -20,6 +22,8 @@ A_DECEL = 1.5           # m/s^2 braking curve into the corner
 V_TURN_MIN = 6.9        # m/s (25 km/h), gate 1's speed at the pulse
 V_TURN_MAX = 15.0
 LAG_S = 2.0             # s the curve leads the car
+V_CORNER = 4.3          # m/s a junction turn slows to by CORNER_M before the junction (gate 1's model, by itself)
+CORNER_M = 15.
 CORNER_TANGENT_M = 8.0  # m from the corner's start to the junction center, turning to the curb side
 FAR_SIDE_TANGENT_M = 12.0  # turning across the junction (left where traffic keeps right) is a wider arc
 
@@ -41,5 +45,8 @@ def turn_speed_cap(maneuver, distance: float, v_ego: float, right_hand_traffic: 
     return NO_SPEED_CAP  # ramps and forks: braking on the main road is wrong, and the model follows the ramp's curve
   curb_side = (maneuver.side == LEFT) != right_hand_traffic
   v_turn = turn_target_speed(maneuver.angle_deg, curb_side)
-  d = max(distance - TURN_DESIRE_LEAD_M - max(v_ego, 0.) * LAG_S, 0.)
-  return min(math.sqrt(v_turn ** 2 + 2. * A_DECEL * d), NO_SPEED_CAP)
+  lag = max(v_ego, 0.) * LAG_S
+  cap = math.sqrt(v_turn ** 2 + 2. * A_DECEL * max(distance - TURN_DESIRE_LEAD_M - lag, 0.))
+  if maneuver.kind == TURN and maneuver.angle_deg >= 90.:
+    cap = min(cap, math.sqrt(V_CORNER ** 2 + 2. * A_DECEL * max(distance - CORNER_M - lag / 2., 0.)))
+  return min(cap, NO_SPEED_CAP)

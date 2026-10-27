@@ -4,7 +4,8 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot.desire_timing import TURN_DESIRE_LEAD_M
 from openpilot.selfdrive.turnpilot.route_follower import NOMINAL_ANGLE_DEG, Maneuver, classify
 from openpilot.selfdrive.turnpilot.hooks import plan_accel
-from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, V_TURN_MAX, V_TURN_MIN, turn_speed_cap, turn_target_speed
+from openpilot.selfdrive.turnpilot.turn_speed import (CORNER_M, NO_SPEED_CAP, V_CORNER, V_TURN_MAX, V_TURN_MIN, turn_speed_cap,
+                                                      turn_target_speed)
 
 
 def maneuver(mtype, modifier):
@@ -22,7 +23,7 @@ def test_target_speeds():
 
 
 def test_which_maneuvers_are_capped():
-  assert turn_speed_cap(maneuver("turn", "right"), 0., 4.) == V_TURN_MIN
+  assert turn_speed_cap(maneuver("turn", "right"), 0., 4.) == V_CORNER
   assert turn_speed_cap(maneuver("turn", "slight left"), 0., 4.) < 10.
   assert turn_speed_cap(maneuver("off ramp", "slight right"), 0., 25.) == NO_SPEED_CAP
   assert turn_speed_cap(maneuver("fork", "left"), 0., 25.) == NO_SPEED_CAP
@@ -35,20 +36,22 @@ def test_which_maneuvers_are_capped():
 
 def test_braking_curve():
   m = maneuver("turn", "right")
-  v_turn = turn_speed_cap(m, 0., 0.)
-  assert math.isclose(turn_speed_cap(m, 100. + TURN_DESIRE_LEAD_M, 0.), math.sqrt(v_turn ** 2 + 2 * 1.5 * 100.))
+  assert math.isclose(turn_speed_cap(m, 100. + TURN_DESIRE_LEAD_M, 0.), math.sqrt(V_TURN_MIN ** 2 + 2 * 1.5 * 100.))
   assert turn_speed_cap(m, 300., 15.) > 25.  # far out it doesn't bite
 
 
 def test_car_reaches_turn_speed_by_the_desire():
   for modifier in ("right", "left"):
     m = maneuver("turn", modifier)
-    v_turn = turn_speed_cap(m, 0., 0.)
     d, v, min_a = 300., 15., 0.
-    while d > TURN_DESIRE_LEAD_M:
+    at_desire = None
+    while d > CORNER_M:
       a = min(plan_accel(10., turn_speed_cap(m, d, v), v), 0.)  # the car would hold its speed otherwise
       min_a = min(min_a, a)
       v = max(v + a * DT_MDL, 0.)
       d -= v * DT_MDL
-    assert v < v_turn + 0.25, modifier
+      if at_desire is None and d < TURN_DESIRE_LEAD_M:
+        at_desire = v
+    assert V_TURN_MIN - 0.5 < at_desire < V_TURN_MIN + 0.25, modifier  # gate 1's speed when the desire goes out
+    assert v < V_CORNER + 0.5, modifier                                  # and its own turn speed by the corner
     assert min_a > -1.6, modifier
