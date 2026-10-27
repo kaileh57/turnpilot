@@ -181,8 +181,9 @@ Results on 2026-10-27, big model on the chestnut, 20 camera pairs a second, set 
   or 2 (one just after the left at (-601, 221), where the car had turned on into the curb).
 - `short2` (3 turns, 550 m) on the final code: arrived with no disengagement, no gas tap and no hold in 3 of 4
   runs. The fourth took all 3 turns and then stopped 50 m short of the destination, on the divided road.
-- The chase capture halves the camera rate, to 11-13 pairs a second at `--capture-fps 5` and at 2, and the first
-  turn of `short2` failed at that rate. The demo run was recorded without the chase capture.
+- The chase capture cuts the camera rate to 11-13 pairs a second at `--capture-fps` 5, 2 and 1 alike (bridge alone
+  at 1: 12.8 to 14.0), so the cost is the third camera's existence, not its frame rate. The first turn of `short2`
+  failed at that rate, and the demo run was recorded without the chase capture.
 - Per-run stats are in `~/turnpilot-artifacts/phase2/h2/*_stats.json` and `stats_table.txt`.
 
 ## Scenario hooks

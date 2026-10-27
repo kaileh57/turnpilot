@@ -1,5 +1,6 @@
 """Chase-view recording for demo videos: a third BeamNG camera behind and above the car, 1280x720 at 10 Hz (or fps), piped to
-ffmpeg. Every chase render costs the driving cameras game frame time: at 10 Hz the pair rate fell to about 12 a second."""
+ffmpeg. The chase camera costs the driving cameras game frame time whatever its rate: with it the pair rate is 11 to
+14 a second at 10, 5, 2 and 1 fps, against 20 without it, which is too low for the model's turns."""
 import shutil
 import subprocess
 import threading
