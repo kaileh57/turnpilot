@@ -32,6 +32,11 @@ GROUND_GATE_FRAC = 0.15  # plus this fraction of the range
 MIN_HITS = 2             # a track is published after this many matched detections
 MAX_COAST_S = 0.5        # and for this long after its last match;
 MAX_AGE_S = 1.5          # it's dropped after this
+# a pedestrian in the path this close can drop out of view (feet below the frame, or YOLO loses a person filling the
+# frame: the BeamNG mannequin at 5.3 m from the camera). The car is stopping for them, so keep them, carried along with
+# the car's own motion, for this long instead of releasing the stop.
+CLOSE_HOLD_M = 8.0
+CLOSE_HOLD_S = 3.0
 STALE_S = 0.5            # no new detections for this long makes the scene unavailable
 CORRIDOR_HALF_WIDTH = 1.5  # m either side of the predicted path
 PATH_X = 50.             # m: objects up to this far ahead can be in the path
@@ -277,7 +282,7 @@ class SceneTracker:
       for j in unmatched:
         if meas[j].conf >= NEW_TRACK_CONF and meas[j].xy is not None:
           self.new_track(meas[j], camera, t)
-      self.tracks = [trk for trk in self.tracks if t - trk.t_seen <= MAX_AGE_S]
+      self.tracks = [trk for trk in self.tracks if t - trk.t_seen <= max(MAX_AGE_S, self.hold_s(trk))]
       self.last_t = t
       self.update_in_path(model_v2)
     self.available = self.last_recv is not None and now - self.last_recv <= STALE_S
@@ -289,10 +294,16 @@ class SceneTracker:
       trk.in_path = bool(trk.x is not None and 0 < trk.x[0] <= PATH_X and
                          abs(trk.x[1] - np.interp(trk.x[0], path_x, path_y)) <= CORRIDOR_HALF_WIDTH)
 
+  @staticmethod
+  def hold_s(trk: Track) -> float:
+    """How long a track is kept after its last match: longer for a pedestrian close in the path."""
+    close = trk.cls == PERSON and trk.in_path and trk.x is not None and trk.x[0] < CLOSE_HOLD_M
+    return CLOSE_HOLD_S if close else MAX_COAST_S
+
   def published(self) -> list[Track]:
     if self.last_t is None:
       return []
-    return [trk for trk in self.tracks if trk.hits >= MIN_HITS and trk.x is not None and self.last_t - trk.t_seen <= MAX_COAST_S]
+    return [trk for trk in self.tracks if trk.hits >= MIN_HITS and trk.x is not None and self.last_t - trk.t_seen <= self.hold_s(trk)]
 
   def fill_scene(self, scene, tracks: list[Track] | None = None) -> None:
     """Fill a TurnpilotScene builder. Unavailable means stale detections, never "nothing there"."""

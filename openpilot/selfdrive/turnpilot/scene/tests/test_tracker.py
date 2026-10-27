@@ -5,7 +5,7 @@ from openpilot.common.test import OpenpilotTestCase
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.detector.decoder import CAR, PERSON, fill_detections
 from openpilot.selfdrive.turnpilot.scene.ranging import calib_from_view
-from openpilot.selfdrive.turnpilot.scene.tracker import PATH_X, SceneTracker, predicted_path
+from openpilot.selfdrive.turnpilot.scene.tracker import CLOSE_HOLD_S, MAX_COAST_S, PATH_X, SceneTracker, predicted_path
 
 CAMS = DEVICE_CAMERAS[('mici', 'os04c10')]
 RPY, WIDE_EULER, HEIGHT = [0.0, 0.03, 0.01], [0.0, 0.005, -0.003], 1.3
@@ -125,6 +125,24 @@ class TestSceneTracker(OpenpilotTestCase):
     np.testing.assert_allclose((car.x, car.y), (25.0, 6.0), atol=0.5)
     assert ped.inPath and not car.inPath
     assert all(0 <= v <= 1 for v in ped.box) and ped.box[2] > ped.box[0] and str(ped.camera) == 'road'
+
+  def test_close_pedestrian_out_of_view_is_kept(self):
+    # stopping for a pedestrian standing in the path: it drops out of view at 6 m while the car still rolls at 1 m/s
+    def objects(t):
+      return [(PERSON, 9.0 - 1.0 * t, 0.2, 0.8)] if t < 3.0 else []
+    history = self.run_frames(int((3.0 + CLOSE_HOLD_S - 0.2) / DT), objects, v_ego=1.0)
+    ids = {tid for tracks in history[2:] for tid in tracks}
+    assert len(ids) == 1 and all(len(tracks) == 1 for tracks in history[2:])
+    trk = history[-1][ids.pop()]
+    assert trk['in_path'] and trk['x'][0] < 6.0 - 0.5 * (CLOSE_HOLD_S - 0.5)  # carried along with the car's motion
+    later = self.run_frames(3, lambda t: [], v_ego=1.0, t0=10.0 + len(history) * DT)
+    assert later[-1] == {}
+
+  def test_far_pedestrian_out_of_view_is_dropped(self):
+    def objects(t):
+      return [(PERSON, 20.0, 0.2, 0.8)] if t < 1.0 else []
+    history = self.run_frames(int((1.0 + MAX_COAST_S + 0.4) / DT), objects)
+    assert len(history[3]) == 1 and history[-1] == {}
 
   def test_no_tracks_above_horizon(self):
     # a box whose bottom is in the sky can't be ranged, so it never starts a track
