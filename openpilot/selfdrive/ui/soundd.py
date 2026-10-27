@@ -10,6 +10,7 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.utils import retry
 from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.ui.lib.turnpilot import active_plan, signal_prompt
 
 from openpilot.system import micd
 from openpilot.common.hardware import HARDWARE
@@ -32,6 +33,7 @@ if HARDWARE.get_device_type() == "tizi":
   VOLUME_BASE = 10
 
 AudibleAlert = log.SelfdriveState.AudibleAlert
+AlertSize = log.SelfdriveState.AlertSize
 CRITICAL_MAX = -1 # internal sound key, not an AudibleAlert
 
 
@@ -76,6 +78,7 @@ class Soundd:
 
     self.selfdrive_timeout_alert = False
     self.pending_stop = False
+    self.turnpilot_prompt = ''
 
     self.spl_filter_weighted = FirstOrderFilter(0, 2.5, FILTER_DT, initialized=False)
 
@@ -148,6 +151,7 @@ class Soundd:
   def get_audible_alert(self, sm):
     if sm.updated['selfdriveState']:
       new_alert = sm['selfdriveState'].alertSound.raw
+      new_alert = self.turnpilot_prompt_alert(sm, new_alert)
       self.update_alert(new_alert)
     elif check_selfdrive_timeout_alert(sm):
       self.update_alert(AudibleAlert.warningImmediate)
@@ -155,6 +159,19 @@ class Soundd:
     elif self.selfdrive_timeout_alert:
       self.update_alert(AudibleAlert.none)
       self.selfdrive_timeout_alert = False
+
+  def turnpilot_prompt_alert(self, sm, new_alert):
+    """TurnPilot's signal prompt is drawn by the UI in place of an alert, so it chimes here: once each time it appears.
+
+    TurnPilotEnabled needs no check, turnpilotd publishes a disabled plan when it's off."""
+    ss = sm['selfdriveState']
+    side = signal_prompt(active_plan(sm, True), sm['carState']) if ss.alertSize == AlertSize.none else ''
+    if not side:
+      self.turnpilot_prompt = ''
+    elif side != self.turnpilot_prompt and new_alert == AudibleAlert.none and self.current_alert == AudibleAlert.none:
+      self.turnpilot_prompt = side
+      return AudibleAlert.prompt
+    return new_alert
 
   def calculate_volume(self, weighted_db):
     volume = ((weighted_db - AMBIENT_DB) / DB_SCALE) * (MAX_VOLUME - MIN_VOLUME) + MIN_VOLUME
@@ -172,7 +189,7 @@ class Soundd:
     import sounddevice as sd
     micd.patch_sounddevice(sd)
 
-    sm = messaging.SubMaster(['selfdriveState', 'soundPressure'])
+    sm = messaging.SubMaster(['selfdriveState', 'soundPressure', 'carState', 'turnpilotPlan'])
 
     with self.get_stream(sd) as stream:
       rk = Ratekeeper(20)

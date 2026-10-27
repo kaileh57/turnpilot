@@ -5,6 +5,7 @@ from openpilot.selfdrive.ui.mici.widgets.button import BigButton, BigToggle, Big
 from openpilot.selfdrive.ui.mici.widgets.dialog import BigDialog, BigInputDialog, BigConfirmationCircleButton
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.layouts.settings.common import restart_needed_callback
+from openpilot.selfdrive.ui.mici.layouts.settings.turnpilot import PairPhoneScroller
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.widgets.ssh_key import SshKeyFetcher
 
@@ -85,6 +86,15 @@ class DeveloperLayoutMici(NavScroller):
                                                     "Braking (AEB).")
     self._navigation_toggle = BigParamControl("navigation (alpha)", "NavigationEnabled",
                                               description="Turn-by-turn navigation with a route map. Set a destination from comma connect.")
+    self._turnpilot_toggle = BigParamControl("turnpilot", "TurnPilotEnabled", toggle_callback=self._on_turnpilot,
+                                             description="Drive the navigation route: turns, lane changes for the route, " +
+                                                         "and holds for pedestrians and oncoming traffic. Turns on navigation.")
+    self._turnpilot_shadow_toggle = BigParamControl("turnpilot shadow mode", "TurnPilotShadowMode",
+                                                    description="TurnPilot plans and shows what it would do, but doesn't act on it.")
+    self._pair_phone_btn = BigButton("pair phone", icon=gui_app.texture("icons_mici/settings/device/phone.png", 85, 64),
+                                     description="Pair a phone to set TurnPilot destinations.")
+    self._pair_phone_btn.set_click_callback(lambda: gui_app.push_widget(PairPhoneScroller()))
+    self._pair_phone_btn.set_enabled(lambda: ui_state.turnpilot_enabled)
     self._debug_mode_toggle = BigParamControl("ui debug mode", "ShowDebugInfo",
                                               toggle_callback=lambda checked: (gui_app.set_show_touches(checked), gui_app.set_show_fps(checked)),
                                               description="Show touch locations and the UI frame rate.")
@@ -99,6 +109,9 @@ class DeveloperLayoutMici(NavScroller):
       self._alpha_long_toggle,
       self._debug_mode_toggle,
       self._navigation_toggle,
+      self._turnpilot_toggle,
+      self._turnpilot_shadow_toggle,
+      self._pair_phone_btn,
     ])
 
     # Toggle lists
@@ -111,10 +124,14 @@ class DeveloperLayoutMici(NavScroller):
       ("AlphaLongitudinalEnabled", self._alpha_long_toggle),
       ("ShowDebugInfo", self._debug_mode_toggle),
       ("NavigationEnabled", self._navigation_toggle),
+      ("TurnPilotEnabled", self._turnpilot_toggle),
+      ("TurnPilotShadowMode", self._turnpilot_shadow_toggle),
     )
     onroad_blocked_toggles = (self._adb_toggle, self._joystick_toggle)
-    release_blocked_toggles = (self._joystick_toggle, self._long_maneuver_toggle, self._lat_maneuver_toggle, self._alpha_long_toggle, self._navigation_toggle)
-    engaged_blocked_toggles = (self._long_maneuver_toggle, self._lat_maneuver_toggle, self._alpha_long_toggle)
+    release_blocked_toggles = (self._joystick_toggle, self._long_maneuver_toggle, self._lat_maneuver_toggle, self._alpha_long_toggle, self._navigation_toggle,
+                               self._turnpilot_toggle, self._turnpilot_shadow_toggle, self._pair_phone_btn)
+    engaged_blocked_toggles = (self._long_maneuver_toggle, self._lat_maneuver_toggle, self._alpha_long_toggle,
+                               self._turnpilot_toggle, self._turnpilot_shadow_toggle)
 
     # Hide non-release toggles on release builds
     for item in release_blocked_toggles:
@@ -189,6 +206,14 @@ class DeveloperLayoutMici(NavScroller):
     ui_state.params.put_bool("LongitudinalManeuverMode", False, block=True)
     self._long_maneuver_toggle.set_checked(False)
     restart_needed_callback()
+
+  def _on_turnpilot(self, state: bool):
+    # BigParamControl writes the param after this callback, so set the flag here and "pair phone" enables at once
+    ui_state.turnpilot_enabled = state
+    # TurnPilot follows navd's route
+    if state:
+      ui_state.params.put_bool("NavigationEnabled", True, block=True)
+      self._navigation_toggle.set_checked(True)
 
   def _on_alpha_long_enabled(self, state: bool):
     def do_toggle(_state: bool):

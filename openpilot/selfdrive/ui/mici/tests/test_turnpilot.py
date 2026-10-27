@@ -1,0 +1,102 @@
+from openpilot.cereal import log, messaging
+from openpilot.common.test import OpenpilotTestCase
+from openpilot.selfdrive.ui.lib.turnpilot import active_plan, signal_prompt, status_text
+
+
+def plan(**fields):
+  msg = messaging.new_message('turnpilotPlan', valid=True)
+  for k, v in fields.items():
+    setattr(msg.turnpilotPlan, k, v)
+  return msg.as_reader().turnpilotPlan
+
+
+def car_state(**fields):
+  msg = messaging.new_message('carState', valid=True)
+  for k, v in fields.items():
+    setattr(msg.carState, k, v)
+  return msg.as_reader().carState
+
+
+class FakeSM:
+  def __init__(self, p, alive=True, valid=True):
+    self.alive = {'turnpilotPlan': alive}
+    self.valid = {'turnpilotPlan': valid}
+    self._plan = p
+
+  def __getitem__(self, service):
+    return self._plan
+
+
+class TestTurnPilotOnroad(OpenpilotTestCase):
+  def setup_method(self):
+    # imported per test: ui_state reads Params at import, which needs the test's prefix
+    from openpilot.selfdrive.ui.mici.onroad import turnpilot
+    from openpilot.selfdrive.ui.mici.layouts.settings.turnpilot import shown_url
+    self.tp = turnpilot
+    self.shown_url = shown_url
+
+  def test_nothing_while_following(self):
+    for state in ('noRoute', 'following', 'approaching'):
+      assert status_text(plan(state=state, reason='detector unavailable'), True) == ('', '')
+    assert status_text(None, True) == ('', '')
+
+  def test_turning(self):
+    assert status_text(plan(state='turning', desire=log.Desire.turnLeft), True) == ('Turning left', '')
+    assert status_text(plan(state='turning', desire=log.Desire.keepRight), True) == ('Keeping right', '')
+    # between desire pulses the maneuver gives the side
+    assert status_text(plan(state='turning', maneuverModifier='sharp right'), True) == ('Turning right', '')
+    assert status_text(plan(state='turning', maneuverModifier='uturn'), True) == ('Turning', '')
+
+  def test_lane_change(self):
+    assert status_text(plan(state='laneChange', laneChange='left'), True) == ('Lane change left', '')
+    assert status_text(plan(state='laneChange', signalPrompt='right'), True) == ('Lane change right', '')
+    assert status_text(plan(state='laneChange'), True) == ('Lane change', '')
+
+  def test_holding_and_arrived(self):
+    assert status_text(plan(state='holding', reason='pedestrian in path'), True) == ('Holding', 'pedestrian in path')
+    assert status_text(plan(state='arrived', reason='car in target lane'), True) == ('Arrived', '')
+
+  def test_shadow(self):
+    assert status_text(plan(state='turning', desire=log.Desire.turnRight, shadow=True), True) == ('Turning right', 'shadow')
+    assert status_text(plan(state='holding', reason='waiting for oncoming', shadow=True), True) == ('Holding', 'shadow: waiting for oncoming')
+    assert status_text(plan(state='following', shadow=True), True) == ('', '')
+
+  def test_signal_prompt(self):
+    p = plan(state='laneChange', signalPrompt='left')
+    assert signal_prompt(p, car_state()) == 'left'
+    assert signal_prompt(p, car_state(rightBlinker=True)) == 'left'
+    assert signal_prompt(p, car_state(leftBlinker=True)) == ''  # signaled: now just "Lane change left"
+    assert signal_prompt(plan(state='laneChange', signalPrompt='right'), car_state(leftBlinker=True)) == 'right'
+    assert signal_prompt(plan(state='laneChange'), car_state()) == ''
+    assert signal_prompt(plan(state='holding', signalPrompt='left'), car_state()) == ''  # the hold is what to show
+    assert signal_prompt(None, car_state()) == ''
+
+  def test_prompt_alert(self):
+    assert self.tp.prompt_alert(plan(state='laneChange'), car_state()) is None
+    alert = self.tp.prompt_alert(plan(state='laneChange', signalPrompt='right'), car_state())
+    assert alert.text1 == 'Signal right'
+    assert alert.status == log.SelfdriveState.AlertStatus.userPrompt
+    assert alert.alert_type.startswith('preLaneChangeRight/')  # upstream's turn signal icon on that side
+    shadow = self.tp.prompt_alert(plan(state='laneChange', signalPrompt='left', shadow=True), car_state())
+    assert shadow.text2 == 'shadow mode'
+
+  def test_active_plan(self):
+    p = plan(state='turning')
+    assert active_plan(FakeSM(p), True) is p
+    assert active_plan(FakeSM(p), False) is None
+    assert active_plan(FakeSM(p, alive=False), True) is None
+    assert active_plan(FakeSM(p, valid=False), True) is None
+    assert active_plan(FakeSM(plan(state='disabled')), True) is None
+
+  def test_status_needs_engaged_unless_shadow(self):
+    # the driver is steering: nothing is holding or turning the car
+    assert status_text(plan(state='holding', reason='pedestrian in path'), False) == ('', '')
+    assert status_text(plan(state='turning', desire=log.Desire.turnLeft), False) == ('', '')
+    # shadow mode is for comparing with what the driver does, so it shows while disengaged
+    assert status_text(plan(state='turning', desire=log.Desire.turnLeft, shadow=True), False) == ('Turning left', 'shadow')
+    # the prompt is a navigation hint, shown either way
+    assert signal_prompt(plan(state='laneChange', signalPrompt='left'), car_state()) == 'left'
+
+  def test_pair_url_without_network(self):
+    assert self.shown_url('http://127.0.0.1:8088/?t=abc') == 'no network'
+    assert self.shown_url('http://172.20.10.2:8088/?t=abc') == 'http://172.20.10.2:8088/?t=abc'
