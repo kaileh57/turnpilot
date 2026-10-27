@@ -309,14 +309,17 @@ def main(demo=False):
   params.put_bool("ChestnutLoading", False)
   cloudlog.warning(f"models loaded in {time.monotonic() - st:.1f}s, modeld starting")
 
-  # TurnPilot: YOLO26 after modelV2, on the frames already uploaded; None (TurnPilotEnabled off, no pkl) changes nothing
+  # TurnPilot: YOLO26 after modelV2, on the frames already uploaded. The host loads it now or once TurnPilotEnabled is set
+  # mid-drive, for the small model too; with it unset or no pkl nothing runs, and None (an import failure) changes nothing
   detector = None
-  if params.get_bool("TurnPilotEnabled"):
-    try:
-      from openpilot.selfdrive.turnpilot.detector.modeld_detector import load as load_detector
-      detector = load_detector(model, vipc_client_main.width, vipc_client_main.height, main_wide_camera, use_extra_client)
-    except Exception:
-      cloudlog.exception("turnpilot detector failed to load")
+  try:
+    from openpilot.selfdrive.turnpilot.detector.modeld_detector import DetectorHost
+    host = DetectorHost(params, vipc_client_main.width, vipc_client_main.height, main_wide_camera, use_extra_client, [model, small_model])
+    if host.check_enabled(time.monotonic()):
+      host.load()
+    detector = host
+  except Exception:
+    cloudlog.exception("turnpilot detector failed to load")
 
   config_realtime_process(7, 54)
 
@@ -500,7 +503,7 @@ def main(demo=False):
     last_vipc_frame_id = meta_main.frame_id
 
     if detector is not None and model_output is not None:
-      detector.step(pm, model, model_execution_time, prev_action.desiredCurvature, desire, [meta_main, meta_extra])
+      detector.step(pm, model, model_execution_time, prev_action.desiredCurvature, desire, [meta_main, meta_extra], sm['carControl'].enabled)
 
 if __name__ == "__main__":
   try:

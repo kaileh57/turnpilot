@@ -90,11 +90,11 @@ class TestModeldDetector(OpenpilotTestCase):
     det.step(pm, det.model_state, STEP_BUDGET_S - 0.007, 0.0, log.Desire.none, [Meta(1), Meta(2)])
     assert len(pm.sent) == 1  # the first frame with room runs, even if it's not on the N-frame grid
 
-  def test_failures_turn_it_off(self):
+  def test_failure_retries_model_switch_turns_it_off(self):
     det, pm = make_detector(), PM()
     det.run.fail = True
     det.step(pm, det.model_state, 0.010, 0.0, log.Desire.none, [Meta(1), Meta(2)])
-    assert not det.enabled and pm.sent == []
+    assert det.enabled and det.failures == 1 and pm.sent == []  # test_detector_recovery.py has the backoff
     det = make_detector()
     det.step(pm, object(), 0.010, 0.0, log.Desire.none, [Meta(1), Meta(2)])  # modeld fell back to the other model
     assert not det.enabled and pm.sent == []
