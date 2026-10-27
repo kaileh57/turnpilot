@@ -1,7 +1,10 @@
 """The lanes and the upcoming maneuvers for navInstruction, read from Mapbox-shaped route steps.
 
 Mapbox and Valhalla (format=osrm) both put the lanes of a maneuver in two places: the sub banner of the step
-before it, within 400 m, and the first intersection of the step that starts with it, from the step's start.
+before it, and the first intersection of the step that starts with it. Valhalla only adds the sub banner for
+the last 400 m of the step, while the intersection has the lanes all along, so the banner comes first (it is
+what Mapbox shows) and the intersection fills in the rest. A lane is active if it can be used for the maneuver,
+and activeDirection is the direction it takes from there.
 """
 
 
