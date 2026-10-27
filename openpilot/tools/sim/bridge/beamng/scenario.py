@@ -61,10 +61,11 @@ def _ped_pose(x, y, z, heading):
   return f"{x}, {y}, {z}, {qx}, {qy}, {qz}, {qw}"
 
 
-def spawn_pedestrian(bng, name: str, x: float, y: float, z: float | None = None, heading: float = 0.0):
+def spawn_pedestrian(bng, name: str, x: float, y: float, z: float | None = None, heading: float = 0.0, z_hint: float = 1000.0):
   """The Italy mannequin as a static prop (a TSStatic with collision, invisible to BeamNG's traffic AI).
-  heading: the way the figure faces. z defaults to the ground under (x, y)."""
-  z = ground_z(bng, x, y) if z is None else z
+  heading: the way the figure faces. z defaults to the first static surface below z_hint at (x, y): pass a z_hint a few
+  metres above the road (the ego's z + 3), or the ray stops on a roof, a tree or a bridge."""
+  z = ground_z(bng, x, y, z_hint) if z is None else z
   lua(bng, f"local o = scenetree.findObject('{name}') if o then o:delete() end " +
            f"o = createObject('TSStatic') o:setField('shapeName', 0, '{PED_SHAPE}') o:setField('collisionType', 0, 'Visible Mesh') " +
            f"o:registerObject('{name}') scenetree.MissionGroup:addObject(o) o:setPosRot({_ped_pose(x, y, z, heading)})")

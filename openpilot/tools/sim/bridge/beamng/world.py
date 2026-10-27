@@ -123,6 +123,7 @@ class BeamNGWorld(World):
     self.electrics = Electrics()
     self.imu_bng = BeamNGpy(cfg.host, cfg.port).open(launch=False)
     with self.bng_lock:
+      self.bng.connection.send({"type": "CloseAdvancedIMU", "name": "tp_imu", "vid": "ego"}).recv()  # one left by a crashed run
       self.imu = AdvancedIMU("tp_imu", self.imu_bng, self.ego, gfx_update_time=0.0, physics_update_time=0.01, pos=MOUNT,
                              dir=(0, -1, 0), up=(0, 0, 1), smoother_strength=1.0, is_send_immediately=False, is_using_gravity=False,
                              is_visualised=False)
