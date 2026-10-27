@@ -4,9 +4,14 @@
 Chase's phone joins nothing: the comma joins the phone's hotspot, and this serves one page on port 8088. The page holds
 no secrets, so / is open. Every /api/ request needs the token in TurnPilotWebToken, as a Bearer header or as the cookie set
 by opening /?t=<token> once.
+It is plain HTTP on every interface, so a connection is served only on a loopback or private address, between two such
+addresses: the hotspot and a home network are, the LTE modem's address is not (unless the carrier hands out a private
+one). The connections handled at once are capped, so a flood can't take a thread each.
 """
 import hmac
+import ipaddress
 import json
+import threading
 import time
 import urllib.parse
 from http.cookies import SimpleCookie
@@ -25,6 +30,7 @@ COOKIE = "tp_token"
 MAX_BODY = 16 * 1024
 REQUEST_TIMEOUT = 10.  # s a client may stall on one socket read or write; Safari opens sockets it never uses
 LOOPBACK = ("127.0.0.1", "::1")
+MAX_CONNECTIONS = 32  # sockets handled at once; past this a new one is closed unanswered. A page opens several at once
 BIND_RETRY_S = 5.  # s between tries to listen: the manager doesn't restart a dead process, and a dead one soft-disables openpilot
 
 
@@ -225,8 +231,36 @@ def make_handler(app: App):
   return type("BoundHandler", (Handler,), {"app": app})
 
 
+def private_address(ip: str) -> bool:
+  """Loopback, link-local or a private network's, not one the internet can reach (nor carrier-grade NAT's 100.64/10)."""
+  try:
+    return ipaddress.ip_address(ip).is_private
+  except ValueError:
+    return False
+
+
 class Server(ThreadingHTTPServer):
   request_queue_size = 64  # the default of 5 resets connections when a page opens several at once
+
+  def __init__(self, *args, **kwargs):
+    self.lock = threading.Lock()
+    self.connections: set = set()  # the sockets being handled
+    super().__init__(*args, **kwargs)
+
+  def verify_request(self, request, client_address) -> bool:
+    """Runs before a handler thread exists; a refused socket is closed unanswered."""
+    if not (private_address(request.getsockname()[0]) and private_address(client_address[0])):
+      return False
+    with self.lock:
+      if len(self.connections) >= MAX_CONNECTIONS:
+        return False
+      self.connections.add(request)
+    return True
+
+  def shutdown_request(self, request):
+    with self.lock:
+      self.connections.discard(request)
+    super().shutdown_request(request)
 
 
 def main():
