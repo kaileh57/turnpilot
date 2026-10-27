@@ -5,6 +5,7 @@ from multiprocessing import Queue
 from openpilot.common.realtime import Ratekeeper
 from openpilot.tools.sim.bridge.common import QueueMessageType, SimulatorBridge
 from openpilot.tools.sim.bridge.beamng.control import AccelController
+from openpilot.tools.sim.bridge.beamng.driver import PromptedDriver
 from openpilot.tools.sim.bridge.beamng.sensors import BeamNGSensors
 from openpilot.tools.sim.bridge.beamng.tesla import SimulatedTesla
 from openpilot.tools.sim.bridge.beamng.world import BeamNGConfig, BeamNGState, BeamNGWorld
@@ -77,6 +78,7 @@ class BeamNGBridge(SimulatorBridge):
     state = self.simulator_state = BeamNGState()
     self.manual = [0.0, 0.0, 0.0]  # steer -1..1 (right positive, like upstream's keyboard), throttle, brake
     self.blinker = (False, False)
+    self.driver = PromptedDriver()
     rk = Ratekeeper(100, print_delay_threshold=None)
     scenario_done = self.scenario is None
     last_print = 0.0
@@ -97,7 +99,8 @@ class BeamNGBridge(SimulatorBridge):
         gas = max(gas, self.engage_step(state, dt))
       state.user_gas, state.user_brake = gas, brake
       state.user_torque_nm = -steer_in * STEER_NM_PER_UNIT
-      state.left_blinker, state.right_blinker = self.blinker
+      nav_left, nav_right = self.driver.update()
+      state.left_blinker, state.right_blinker = self.blinker[0] or nav_left, self.blinker[1] or nav_right
 
       self.sensors.update(state, self.world)
       self.car.update(state)
