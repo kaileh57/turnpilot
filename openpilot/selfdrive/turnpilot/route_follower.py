@@ -25,8 +25,10 @@ NO_ACTION_TYPES = ("depart", "notification", "merge", "roundabout", "rotary", "r
 NOMINAL_ANGLE_DEG = {"slight left": 45., "slight right": 45., "left": 90., "right": 90.,
                      "sharp left": 135., "sharp right": 135., "uturn": 180.}
 
-NEW_MANEUVER_JUMP_M = 10.  # navd's distance jumping up by more than this means it moved on to another maneuver
-PASSED_NEAR_M = 30.        # ...and the maneuver it left was passed if it was this close
+NEW_MANEUVER_JUMP_M = 10.  # navd's distance jumping up by more than this...
+ADVANCE_NEAR_M = 5.        # ...from this close means it moved on to the next maneuver (it advances past -10 m),
+                           # while a jump from further out is GPS noise
+PASSED_NEAR_M = 30.        # a new maneuver means the last one was passed if it was this close
 PASSED_DIST_M = 15.        # dead-reckoned this far past a maneuver navd hasn't advanced from, it counts as passed
 NAV_STALE_S = 3.           # no navInstruction for this long, the route is lost
 ARRIVE_DIST_M = 15.
@@ -121,8 +123,8 @@ class RouteFollower:
     distance = float(instruction.maneuverDistance)
     maneuver = maneuver_from_instruction(instruction)
     prev = self.maneuver
-    new = (not self.valid or prev is None or distance > self.distance + NEW_MANEUVER_JUMP_M or
-           (maneuver.type, maneuver.modifier) != (prev.type, prev.modifier))
+    advanced = self.distance < ADVANCE_NEAR_M and distance > self.distance + NEW_MANEUVER_JUMP_M
+    new = not self.valid or prev is None or advanced or (maneuver.type, maneuver.modifier) != (prev.type, prev.modifier)
     if new:
       if self.valid and self.distance < PASSED_NEAR_M and self._passed_id != self.maneuver_id:
         self.passed = True

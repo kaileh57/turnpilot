@@ -52,6 +52,7 @@ class DesireTiming:
     if maneuver_id != self.maneuver_id:
       self.maneuver_id = maneuver_id
       self._reset()
+      passed = False  # that was the maneuver before this one
     if passed or maneuver is None:
       self.done = self.done or passed
       self.active = False

@@ -45,6 +45,14 @@ def test_passed_when_navd_moves_on():
   assert rf.maneuver.side == RIGHT
 
 
+def test_gps_jump_is_not_a_new_maneuver():
+  rf = RouteFollower()
+  rf.update(nav_instruction(100.), True, True, 10., DT_MDL)
+  first = rf.maneuver_id
+  rf.update(nav_instruction(115.), True, True, 10., DT_MDL)
+  assert rf.maneuver_id == first and not rf.passed and rf.distance == 115.
+
+
 def test_passed_by_dead_reckoning_when_navd_stalls():
   rf = RouteFollower()
   rf.update(nav_instruction(5.), True, True, 10., DT_MDL)

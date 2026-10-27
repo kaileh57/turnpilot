@@ -48,6 +48,13 @@ def test_left_turn_at_25m_sends_turn_left_once():
   assert not rising_edges(trace, Desire.turnRight)  # the next turn, 700 m on, isn't reached
 
 
+def test_consecutive_turns_each_get_a_desire():
+  trace = drive([(200., "turn", "left"), (320., "turn", "right"), (2000., "turn", "left")], v=6., seconds=70.)
+  left, right = rising_edges(trace, Desire.turnLeft), rising_edges(trace, Desire.turnRight)
+  assert len(left) == 1 and len(right) == 1
+  assert 320. - TURN_DESIRE_LEAD_M - 1. < right[0][0] < 320. - TURN_DESIRE_LEAD_M + 1.
+
+
 def test_slight_right_exit_sends_keep_right():
   v = 25.
   trace = drive([(1500., "off ramp", "slight right"), (3000., "turn", "left")], v=v, seconds=70.)

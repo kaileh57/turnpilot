@@ -96,6 +96,16 @@ def test_left_turn_drive():
   assert all(plan.desire == Desire.none for plan in after)
 
 
+def test_consecutive_turns_drive():
+  sim = Sim([(300., "turn", "right"), (420., "turn", "left"), (2000., "turn", "right")])
+  for _ in range(int(60. / DT_MDL)):
+    near = [m for m in (300., 420.) if abs(sim.s - m) < 8.]
+    sim.step(available=True, steer=90. if near else 0.)
+  assert len(rising(sim.trace, 'desire', Desire.turnRight)) == 1
+  assert len(rising(sim.trace, 'desire', Desire.turnLeft)) == 1
+  assert sim.s > 440.
+
+
 def test_oncoming_car_holds_unprotected_left():
   spawn = {}
 
