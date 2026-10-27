@@ -158,6 +158,27 @@ new route is a reroute. It places the route's turns and keeps from the first `na
 is 30 m past it and still on the route. It also counts disengagements with their `onroadEvents`, TurnPilot holds
 with their reasons, desire pulses and lane changes.
 
+Results on 2026-10-27, big model on the chestnut, 20 camera pairs a second, set speed 40 km/h:
+
+- The model forgets a desire pulse about 5 s after it, the length of its desire history: `desireState` falls back
+  5 s after the pulse, and the planned turn goes with it. Gate 1's 40 m lead at 25 km/h fits inside that window. A
+  car slowed for a junction does not: at g62 the model planned the left, dropped it 10 m out and went straight,
+  and a late retry pulse brought the plan back at once. So turnpilotd now pulses on the approach every 3.5 s and
+  once more 10 m out, holds the car at 25 km/h until the first pulse, and slows it to 4.3 m/s by 15 m out.
+  It sends no pulse once the car has turned 15 degrees: a pulse during a right turn turned the car on past the
+  exit road and into the curb.
+- Junctions differ. Screening the first 16 maneuvers of `loop` took 9, and after the fixes 3 of the 7 that had
+  failed. Some junctions stop the car whatever the desire does. On the highway east of the town the model stops
+  under an overpass at (507, 716). At (-30, 423) and (-601, 617) it stops at or just after the turn. At the fork
+  (246, 628) it takes the other branch at 11 m/s. The g62 left is marginal: it was taken in 2 of 2 screening
+  runs and in 0 of 2 full runs that started 150 m before it.
+- A leg that ends on a divided road breaks the next leg. Valhalla snapped the moving car onto the other
+  carriageway, and the route started the wrong way (town14, the DR652/DR666 pair after (-311, 337)).
+- `town15b` (15 maneuvers in 4 legs, every leg ending on a two-way street): 3 runs without traffic, legs 1/4 in
+  each, maneuvers 4/5, 6/7, 6/7 taken, no disengagement. Every run ended stuck in leg 2, at (-706, 131) or just
+  after the left at (-539, 157), with the driver's gas taps unable to move the car. That is a takeover in a car,
+  although no openpilot disengagement was logged.
+
 ## Scenario hooks
 
 `scenario.py` works with any BeamNGpy client: in the bridge process use `world.bng` under `world.bng_lock`, from another
