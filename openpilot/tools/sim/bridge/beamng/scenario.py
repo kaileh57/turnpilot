@@ -1,7 +1,7 @@
 """Scenario hooks for BeamNG.tech: move the ego, spawn traffic and a pedestrian prop, force traffic signals.
 
 Every function takes a BeamNGpy instance. In the bridge process pass world.bng under world.bng_lock; a separate script can
-open its own client (BeamNG.tech accepts several). Positions are BeamNG world metres (x east, y north, z up), headings are
+open its own client (BeamNG.tech accepts several). Positions are BeamNG world meters (x east, y north, z up), headings are
 radians counterclockwise from east.
 """
 import json
@@ -9,8 +9,9 @@ import math
 import os
 
 PED_SHAPE = "/levels/italy/art/shapes/buildings/human_scale_190.dae"  # the only human-shaped stock asset (1.90 m, static)
-SIGNALS_JSON = os.path.join(os.path.dirname(__file__), "wcusa_signals.json")  # signalised junctions on west_coast_usa
+SIGNALS_JSON = os.path.join(os.path.dirname(__file__), "wcusa_signals.json")  # signalized junctions on west_coast_usa
 GREEN, YELLOW, RED = 1, 2, 3  # lightsBasic controller state indices
+LEVEL_TOD = 0.87  # west_coast_usa starts at 08:52 (BeamNG time of day: 0 is noon, 0.5 midnight)
 
 
 def lua(bng, chunk: str, response: bool = False):
@@ -64,7 +65,7 @@ def _ped_pose(x, y, z, heading):
 def spawn_pedestrian(bng, name: str, x: float, y: float, z: float | None = None, heading: float = 0.0, z_hint: float = 1000.0):
   """The Italy mannequin as a static prop (a TSStatic with collision, invisible to BeamNG's traffic AI).
   heading: the way the figure faces. z defaults to the first static surface below z_hint at (x, y): pass a z_hint a few
-  metres above the road (the ego's z + 3), or the ray stops on a roof, a tree or a bridge."""
+  meters above the road (the ego's z + 3), or the ray stops on a roof, a tree or a bridge."""
   z = ground_z(bng, x, y, z_hint) if z is None else z
   lua(bng, f"local o = scenetree.findObject('{name}') if o then o:delete() end " +
            f"o = createObject('TSStatic') o:setField('shapeName', 0, '{PED_SHAPE}') o:setField('collisionType', 0, 'Visible Mesh') " +
@@ -111,6 +112,31 @@ def force_signals(bng, instances, state: int = GREEN, hold: bool = True):
 
 
 def all_green(bng, signals: list[dict] | None = None):
-  """Every signalised junction on west_coast_usa green and held: nav scenarios don't test the model on lights."""
+  """Every signalized junction on west_coast_usa green and held: nav scenarios don't test the model on lights."""
   signals = load_signals() if signals is None else signals
   force_signals(bng, [i for j in signals for i in j['instances']], GREEN)
+
+
+def restore_game(bng, tod: float = LEVEL_TOD, signals: list[dict] | None = None):
+  """Undo the bridge's changes to the shared game: every signal back on its sequence, HUD and particles on, the light
+  at `tod` and running on. The loaded scenario and the ego stay."""
+  signals = load_signals() if signals is None else signals
+  release_signals(bng, [i for j in signals for i in j['instances']])
+  bng.ui.show_hud()
+  bng.settings.set_particles_enabled(True)
+  bng.env.set_tod(tod=tod, play=False)
+
+
+if __name__ == "__main__":
+  import argparse
+  from beamngpy import BeamNGpy
+  ap = argparse.ArgumentParser(description="Restore the shared game after a bridge run that didn't (crash, or no --restore-on-exit).")
+  ap.add_argument('--host', default='192.168.137.1')
+  ap.add_argument('--port', type=int, default=25252)
+  ap.add_argument('--tod', type=float, default=LEVEL_TOD)
+  args = ap.parse_args()
+  game = BeamNGpy(args.host, args.port).open(launch=False)
+  try:
+    restore_game(game, args.tod)
+  finally:
+    game.disconnect()

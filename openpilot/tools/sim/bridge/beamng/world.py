@@ -7,7 +7,6 @@ Connections (BeamNGpy connections are not thread safe, and BeamNG.tech accepts s
   two more       one per camera, in cameras.CameraRig
 The game runs in real time; nothing here steps it. Closing disconnects and removes our sensors, and never quits the game.
 """
-import math
 import threading
 import time
 from collections import deque
@@ -19,14 +18,13 @@ from beamngpy.sensors import AdvancedIMU, Electrics
 
 from openpilot.tools.sim.bridge.beamng import frame, scenario
 from openpilot.tools.sim.bridge.beamng.cameras import MOUNT, CameraRig
+from openpilot.tools.sim.bridge.beamng.pose import Pose, after_last_jump
 from openpilot.tools.sim.bridge.beamng.tesla import GEAR_D, GEAR_N, GEAR_P, GEAR_R
 from openpilot.tools.sim.lib.common import SimulatorState, World, vec3
 
 TESLA_STEER_RATIO = 12.0  # opendbc's Model 3; the game car is presented with this ratio, so paramsd needs no seeding
-GRAVITY = 9.81
 GEARS = {"P": GEAR_P, "R": GEAR_R, "N": GEAR_N, "D": GEAR_D}
 BEAMNG_GEAR_D = 2  # vehicle.control(gear=) index of D in realistic_automatic
-TELEPORT_JUMP = 2.0  # m between 100 Hz IMU readings
 
 
 @dataclass
@@ -38,7 +36,7 @@ class BeamNGConfig:
   # ETK 800: a 4.67 m long, 2.0 m wide (with mirrors), 1.39 m tall midsize sedan, against the Model 3's 4.69, 2.09 and 1.44 m
   model: str = "etk800"
   steer_lock_deg: float = 38.0  # etk800 road wheel angle at full steering input (510 deg at the wheel), from yaw rate on WCUSA
-  # downtown west_coast_usa, eastbound in the right-hand lane, 140 m of straight two-way road before the signalised junction
+  # downtown west_coast_usa, eastbound in the right-hand lane, 140 m of straight two-way road before the signalized junction
   # group_80_81_82_83 (gate1's default approach). The (-717.1, 101, 118.7) pose from the PC agent sits in the left lane
   # facing oncoming traffic, 20 m from a junction.
   spawn_pos: tuple = (-908.82, 659.67, 112.25)
@@ -47,9 +45,10 @@ class BeamNGConfig:
   tod: float = 0.05  # BeamNG time of day, held (0 is noon): 13:12, high sun; the level's 08:52 start blinds an eastbound camera
   reload: bool = False  # reload the scenario even if ours is already loaded (a load takes about a minute)
   camera_update: float = 0.02  # s; below the game's frame time, so both cameras render on every frame
-  camera_poll: float = 0.04  # s between polls of both cameras; each poll costs game frame time (sweep: 0.04 gives 20 pairs/s)
+  camera_poll: float = 0.03  # s between polls of both cameras; the game answers once a frame, so polls beyond its fps wait
   lean: bool = True  # hide the HUD and particles: more game frames, so more camera frames
   capture: str = ""  # mp4 path for the chase view (capture.py)
+  restore: bool = False  # on exit, undo the global game changes above (signals, HUD, particles, light): the game is shared
 
 
 class BeamNGState(SimulatorState):
@@ -61,47 +60,6 @@ class BeamNGState(SimulatorState):
     self.position = vec3(0, 0, 0)
     self.yaw_rate = 0.0  # rad/s, left positive
     self.a_long = 0.0  # m/s^2 along the car
-
-
-class Pose:
-  """AdvancedIMU readings (100 Hz, sim time) turned into what a comma four's IMU and GPS would report."""
-  WINDOW = 0.05  # s of readings to difference for velocity and angular rate
-
-  def __init__(self, history, latest):
-    r1 = history[-1]
-    r0 = next((r for r in reversed(history) if r1['time'] - r['time'] >= self.WINDOW), history[0])
-    self.t_sim = r1['time']
-    self.pos = np.array(r1['pos'])
-    fwd, up, right = (np.array(r1[k]) for k in ('dirX', 'dirY', 'dirZ'))  # sensor axes: X forward, Y up, Z right
-    self.fwd = fwd
-    dt = r1['time'] - r0['time']
-    if dt > 0:
-      self.vel = (self.pos - np.array(r0['pos'])) / dt
-      # world angular velocity from the orientation change: dR/dt = [w]x R
-      R0 = np.array([r0['dirX'], r0['dirY'], r0['dirZ']]).T
-      R1 = np.array([fwd, up, right]).T
-      Wm = (R1 @ R0.T - np.eye(3)) / dt
-      omega = np.array([Wm[2, 1] - Wm[1, 2], Wm[0, 2] - Wm[2, 0], Wm[1, 0] - Wm[0, 1]]) / 2
-    else:
-      self.vel, omega = np.zeros(3), np.zeros(3)
-    acc = np.mean([r['accSmooth'] for r in latest], axis=0)  # kinematic, in sensor axes (is_using_gravity=False)
-    # the car's acceleration for the throttle and brake controller, from its forward speed across the history:
-    # accSmooth bounces with the suspension (single readings of +-3 m/s^2 at a steady speed)
-    t = np.array([r['time'] for r in history])
-    if len(t) >= 6 and t[-1] - t[0] > 0.08:
-      v_fwd = (np.diff(np.array([r['pos'] for r in history]), axis=0) @ fwd) / np.maximum(np.diff(t), 1e-4)
-      self.a_long = float(np.polyfit((t[1:] + t[:-1]) / 2 - t[-1], v_fwd, 1)[0])
-    else:
-      self.a_long = float(acc[0])
-    # an accelerometer reads specific force, a - g; a comma four's sensor axes are (up, left, back), see locationd
-    f = acc + GRAVITY * np.array([fwd[2], up[2], right[2]])
-    self.accel = (float(f[1]), float(-f[2]), float(-f[0]))
-    self.gyro = (float(omega @ up), float(-(omega @ right)), float(-(omega @ fwd)))
-    self.yaw_rate = float(omega @ up)
-
-  @property
-  def bearing(self) -> float:
-    return math.degrees(math.atan2(self.fwd[0], self.fwd[1])) % 360.0  # compass: x east, y north
 
 
 class BeamNGWorld(World):
@@ -117,6 +75,7 @@ class BeamNGWorld(World):
     self.el: dict | None = None
     self.vehicle_rate = 0.0
     self.imu = self.rig = self.capture = None
+    self.tod0 = scenario.LEVEL_TOD
 
     self.bng = BeamNGpy(cfg.host, cfg.port).open(launch=False)
     self.ego = self.setup_scenario()
@@ -127,7 +86,8 @@ class BeamNGWorld(World):
       self.imu = AdvancedIMU("tp_imu", self.imu_bng, self.ego, gfx_update_time=0.0, physics_update_time=0.01, pos=MOUNT,
                              dir=(0, -1, 0), up=(0, 0, 1), smoother_strength=1.0, is_send_immediately=False, is_using_gravity=False,
                              is_visualised=False)
-    self.rig = CameraRig(self.bng, self.bng_lock, self.ego, cfg.host, cfg.port, cfg.camera_update, cfg.camera_poll, log=log)
+    self.rig = CameraRig(self.bng, self.bng_lock, self.ego, cfg.host, cfg.port, self.exit_event, cfg.camera_update, cfg.camera_poll,
+                         log=log)
     if cfg.capture:
       from openpilot.tools.sim.bridge.beamng.capture import ChaseCapture
       self.capture = ChaseCapture(self.bng, self.bng_lock, self.ego, cfg.host, cfg.port, cfg.capture, log=log)
@@ -164,6 +124,7 @@ class BeamNGWorld(World):
         self.bng.scenario.start()
         self.log(f"loaded {cfg.level} in {time.monotonic() - t0:.0f} s")
       self.bng.control.resume()
+      self.tod0 = float(self.bng.env.get_tod()['time'])
       if cfg.lean:
         self.bng.ui.hide_hud()
         self.bng.settings.set_particles_enabled(False)
@@ -222,8 +183,12 @@ class BeamNGWorld(World):
         readings = list(readings.values())
       latest = sorted((r for r in readings if 'dirX' in r and (not history or r['time'] > history[-1]['time'])), key=lambda r: r['time'])
       if latest:
-        if history and np.linalg.norm(np.subtract(latest[0]['pos'], history[-1]['pos'])) > TELEPORT_JUMP:
-          history.clear()  # a teleport: don't difference across it, or the IMU reads a 30 rad/s spin
+        # a teleport, at the seam or inside the batch: don't difference across it, or the IMU reads a 30 rad/s spin
+        seam = list(history)[-1:]
+        k = after_last_jump(seam + latest)
+        if k > 0:
+          history.clear()
+          latest = latest[k - len(seam):]
         history.extend(latest)
         self.pose = Pose(history, latest)
       time.sleep(max(0.0, 0.02 - (time.monotonic() - t0)))
@@ -235,7 +200,9 @@ class BeamNGWorld(World):
     s = float(np.clip(-road_wheel / self.cfg.steer_lock_deg, -1.0, 1.0))
     self.ctrl = (s, float(np.clip(throttle_out, 0, 1)), float(np.clip(brake_out, 0, 1)))
 
-  def read_sensors(self, state: BeamNGState):
+  def read_sensors(self, simulator_state: SimulatorState, /):
+    state = simulator_state
+    assert isinstance(state, BeamNGState)
     pose, el = self.pose, self.el
     if pose is None or el is None:
       return
@@ -293,6 +260,12 @@ class BeamNGWorld(World):
         self.imu.remove()
       except Exception as e:
         self.log(f"imu remove failed: {e!r}")
+      if self.cfg.restore:
+        try:
+          scenario.restore_game(self.bng, self.tod0, scenario.load_signals() if self.cfg.level == 'west_coast_usa' else [])
+          self.log("game restored: signals running, HUD and particles on, time of day back")
+        except Exception as e:
+          self.log(f"game restore failed: {e!r}")
     self.imu_bng.disconnect()
     self.bng.disconnect()  # leaves the game and the scenario running for the next start
     self.exit_event.set()

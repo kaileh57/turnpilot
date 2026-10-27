@@ -75,14 +75,15 @@ def flip_latency(host, port, n=6):
       t_send = time.monotonic()
       turn(k % 2 == 0)
       t_ack = time.monotonic()
-      seen = [None, None]
+      seen: list[tuple[float, int] | None] = [None, None]
       while time.monotonic() - t_send < 3.0 and None in seen:
         for j, c in enumerate(clients):
           buf = c.recv(10)
           if buf is not None and seen[j] is None and abs(mean(c, buf) - base[j]) > 12:
             seen[j] = (time.monotonic(), c.frame_id)
-      if None not in seen:
-        out.append((t_ack - t_send, seen[0][0] - t_ack, seen[0][1] - seen[1][1]))
+      road, wide = seen
+      if road is not None and wide is not None:
+        out.append((t_ack - t_send, road[0] - t_ack, road[1] - wide[1]))
       time.sleep(0.5)
   finally:
     turn(False)

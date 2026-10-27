@@ -177,7 +177,7 @@ def main():
   ap.add_argument('--speed', type=float, default=25.0, help='cruise set speed, km/h')
   ap.add_argument('--pulse-frames', type=int, default=4, help='turnpilotPlan messages (20 Hz) that carry the desire; 0 for a no-desire baseline')
   ap.add_argument('--out', default='gate1_results.json')
-  ap.add_argument('--list', action='store_true', help='list signalised junctions with 90-degree turns and exit')
+  ap.add_argument('--list', action='store_true', help='list signalized junctions with 90-degree turns and exit')
   args, rest = ap.parse_known_args()
   graph = RoadGraph()
   if args.list:

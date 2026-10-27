@@ -1,5 +1,5 @@
 """BeamNG's AI road graph (map.getMap(), exported by piston to west_coast_usa_graph.json): junctions, their arms, and
-legal 90-degree turns, on public paved roads. Positions are BeamNG world metres (x east, y north), headings radians
+legal 90-degree turns, on public paved roads. Positions are BeamNG world meters (x east, y north), headings radians
 counterclockwise from east."""
 import json
 import math

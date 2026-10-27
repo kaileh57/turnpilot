@@ -25,7 +25,7 @@ class AccelController:
     self.i = 0.0
     self.v_ref = None
 
-  def update(self, a_target: float, a_meas: float, v_ego: float, dt: float) -> tuple[float, float]:
+  def update(self, a_target: float, v_ego: float, dt: float) -> tuple[float, float]:
     if v_ego < STOP_SPEED and a_target <= 0.0:
       self.reset()
       return 0.0, STANDSTILL_BRAKE

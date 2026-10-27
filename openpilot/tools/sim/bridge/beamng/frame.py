@@ -3,7 +3,7 @@
 # and the bridge GPS must use the same projection.
 """BeamNG world <-> WGS84 for the sim's road export and the bridge's GPS.
 
-BeamNG x = east, y = north, z = up (metres) are local ENU coordinates on the tangent plane at ORIGIN (h = 0 on
+BeamNG x = east, y = north, z = up (meters) are local ENU coordinates on the tangent plane at ORIGIN (h = 0 on
 the WGS84 ellipsoid). to_latlon: ENU -> ECEF -> geodetic (Bowring start, three Newton steps; sub-mm for
 |x|, |y| < 50 km). from_latlon is its exact inverse: geodetic -> ECEF -> ENU. Pass z / h to round-trip exactly;
 with z = 0 the horizontal error from dropping h is below 1 mm over a 10 km map.

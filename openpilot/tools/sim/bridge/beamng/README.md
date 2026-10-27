@@ -40,7 +40,7 @@ Use the repo venv, from the repo root. `OPENPILOT_PREFIX` keeps msgq, params and
    a driver who presses the gas up to that speed (km/h): the driving model holds a car that stands on an empty road,
    because its standstill acceleration stays under the 0.1 m/s^2 of `drive_helpers.should_stop`.
 
-Other options: `--spawn x,y,z --rot qx,qy,qz,qw` (BeamNG world metres; the default is 140 m before the junction
+Other options: `--spawn x,y,z --rot qx,qy,qz,qw` (BeamNG world meters; the default is 140 m before the junction
 `group_80_81_82_83`, eastbound in the right-hand lane), `--reload`, `--signals` (leave the traffic lights running; by
 default every light is forced green and held), `--capture chase.mp4`, `--duration`, and `--camera-update` and
 `--camera-poll` for the camera timing.
@@ -53,7 +53,7 @@ Without a TTY, the bridge reads one command per line on stdin: `cruise_up` (enga
 
 `gate1.py` checks whether one desire pulse makes the driving model take a 90-degree junction. It spawns the car on the
 approach to a junction from the road-graph export, engages, and publishes `turnpilotPlan` at 20 Hz with the desire set
-for `--pulse-frames` messages once the car is `--leads` metres from the junction. It logs the heading change, the path
+for `--pulse-frames` messages once the car is `--leads` meters from the junction. It logs the heading change, the path
 and whether the car left on the exit road, to `--out`. Block turnpilotd, the other `turnpilotPlan` publisher:
 
 ```sh
@@ -61,7 +61,7 @@ BLOCK=turnpilotd OPENPILOT_PREFIX=tpsim openpilot/tools/sim/bridge/beamng/launch
 OPENPILOT_PREFIX=tpsim python -m openpilot.tools.sim.bridge.beamng.gate1 --junction group_80_81_82_83 --turn left --leads 10,20,30,40
 ```
 
-`--list` prints the signalised junctions with legal 90-degree turns. The road graph is read from
+`--list` prints the signalized junctions with legal 90-degree turns. The road graph is read from
 `~/pc_relay/incoming/osm_export/west_coast_usa_graph.json`.
 
 ## Scenario hooks

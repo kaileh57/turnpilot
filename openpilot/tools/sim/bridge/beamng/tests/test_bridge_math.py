@@ -2,13 +2,11 @@ import math
 
 import numpy as np
 
+# no beamngpy here: these run without the game's client library installed
 from openpilot.tools.sim.bridge.beamng import frame
-from openpilot.tools.sim.bridge.beamng.cameras import W, H
 from openpilot.tools.sim.bridge.beamng.control import AccelController
+from openpilot.tools.sim.bridge.beamng.pose import Pose, after_last_jump
 from openpilot.tools.sim.bridge.beamng.scenario import heading_quat
-from openpilot.tools.sim.bridge.beamng.world import Pose
-from openpilot.tools.sim.bridge.beamng.yuv import NV12Converter
-from openpilot.tools.sim.lib.camerad import rgb_to_nv12
 
 
 def imu_reading(t, pos, yaw, acc=(0.0, 0.0, 0.0)):
@@ -16,14 +14,6 @@ def imu_reading(t, pos, yaw, acc=(0.0, 0.0, 0.0)):
   fwd = [math.cos(yaw), math.sin(yaw), 0.0]
   right = [math.sin(yaw), -math.cos(yaw), 0.0]
   return {'time': t, 'pos': list(pos), 'dirX': fwd, 'dirY': [0.0, 0.0, 1.0], 'dirZ': right, 'accSmooth': list(acc)}
-
-
-class TestNV12:
-  def test_matches_upstream(self):
-    rgba = np.random.default_rng(1).integers(0, 256, size=(H, W, 4), dtype=np.uint8)
-    ref = np.frombuffer(rgb_to_nv12(np.ascontiguousarray(rgba[:, :, :3])), dtype=np.uint8)
-    assert np.array_equal(NV12Converter(W, H).convert(rgba), ref)
-    assert np.array_equal(NV12Converter(W, H).convert(np.ascontiguousarray(rgba[:, :, :3])), ref)
 
 
 class TestPose:
@@ -46,6 +36,14 @@ class TestPose:
     gyro_up, _, _ = p.gyro
     assert abs(gyro_up - r) < 1e-3  # device yaw rate (z down) = -gyro_up: negative in a left turn
 
+  def test_teleport_inside_a_batch(self):
+    rs = [imu_reading(i * 0.01, (0.1 * i, 0.0, 0.0), 0.0) for i in range(10)]
+    assert after_last_jump(rs) == 0
+    rs[6:] = [imu_reading(i * 0.01, (500.0 + 0.1 * i, 0.0, 0.0), 0.0) for i in range(6, 10)]
+    assert after_last_jump(rs) == 6
+    rs[8:] = [imu_reading(i * 0.01, (-300.0, 0.0, 0.0), 0.0) for i in range(8, 10)]
+    assert after_last_jump(rs) == 8
+
 
 class TestFrame:
   def test_round_trip(self):
@@ -63,10 +61,10 @@ class TestScenario:
 class TestAccelController:
   def test_signs(self):
     c = AccelController()
-    th, br = c.update(1.0, 0.0, 10.0, 0.01)
+    th, br = c.update(1.0, 10.0, 0.01)
     assert th > 0 and br == 0
     c.reset()
-    th, br = c.update(-2.0, 0.0, 10.0, 0.01)
+    th, br = c.update(-2.0, 10.0, 0.01)
     assert br > 0 and th == 0
-    th, br = c.update(-0.5, 0.0, 0.1, 0.01)
+    th, br = c.update(-0.5, 0.1, 0.01)
     assert th == 0 and br > 0  # standstill hold

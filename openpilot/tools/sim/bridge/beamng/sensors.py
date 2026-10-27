@@ -18,7 +18,8 @@ class BeamNGSensors(SimulatedSensors):
                                    'peripheralState'])
     self.last_perp_update = self.last_dmon_update = self.last_gps_update = 0.0
 
-  def send_imu_message(self, state):
+  def send_imu_message(self, simulator_state):
+    state = simulator_state
     dat = messaging.new_message('accelerometer', valid=True)
     dat.accelerometer.timestamp = dat.logMonoTime
     dat.accelerometer.init('acceleration')
@@ -31,7 +32,8 @@ class BeamNGSensors(SimulatedSensors):
     dat.gyroscope.gyroUncalibrated.v = list(state.imu.gyroscope)
     self.pm.send('gyroscope', dat)
 
-  def send_gps_message(self, state):
+  def send_gps_message(self, simulator_state):
+    state = simulator_state
     v = state.velocity  # BeamNG world: x east, y north, z up
     dat = messaging.new_message('gpsLocationExternal', valid=True)
     dat.gpsLocationExternal = {
@@ -53,7 +55,8 @@ class BeamNGSensors(SimulatedSensors):
     }
     self.pm.send('gpsLocationExternal', dat)
 
-  def update(self, state, world=None):
+  def update(self, simulator_state, world=None):
+    state = simulator_state
     if not state.valid:
       return
     now = time.monotonic()

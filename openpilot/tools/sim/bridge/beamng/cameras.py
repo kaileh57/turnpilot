@@ -5,8 +5,9 @@ camera when its requested update time has passed, on the game frame; with an upd
 both cameras render on every frame, the same frame. A poll returns the newest render, and the game answers it on its main
 thread, so every poll (3 MB) costs game frame time: polling each camera every 10 ms on its own connection dropped the game
 to 9 fps. So both cameras are polled in one pipelined burst on their own connection (one BeamNGpy connection is not
-thread safe, so it has its own thread), which also puts both answers on the same game frame, a bit faster than 20 Hz.
-A 20 Hz publisher drops a pair unless both frames are new (by hash) and stamps both with one time for modeld's sync check.
+thread safe, so it has its own thread), which also puts both answers on the same game frame.
+The publisher hands a pair on as soon as both frames are new (by hash) and its 20 Hz slot is due, so a pair that comes in
+a few ms late takes the slot instead of losing it, and stamps both frames with one time for modeld's sync check.
 """
 import hashlib
 import threading
@@ -22,15 +23,18 @@ from beamngpy.sensors import Camera
 import openpilot.cereal.messaging as messaging
 from msgq.visionipc import VisionIpcServer
 from openpilot.cereal.visionipc import VisionStreamType
-from openpilot.common.realtime import Ratekeeper
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
-from openpilot.tools.sim.bridge.beamng.yuv import NV12Converter
+from openpilot.tools.sim.lib.camerad import rgb_to_nv12
 
 W, H = 1344, 760  # what a comma four's camerad outputs from the os04c10
 ROAD_FOV_Y = 36.82  # deg, common/transformations/camera.py _os_config: 2 atan(380 / 1141.5)
 WIDE_FOV_Y = 83.57  # deg, 2 atan(380 / 425.25); a pinhole stand-in for the fisheye, which is what modeld's warp assumes
 MOUNT = (0.0, -0.55, 1.3)  # etk800 vehicle frame (-y forward): top center of the windshield, 1.34 m above the road
+PERIOD = 0.05  # s, the comma four's 20 Hz
+MIN_GAP = 0.04  # s; after a late pair the next slot moves out so pairs never come in bursts
 REPUBLISH_AFTER = 0.15  # s; at a standstill BeamNG can render identical frames, and modeld must not starve
+STALE_AFTER = 1.0  # s without a successful poll: stop republishing, so modeld sees the cameras go away
+FAIL_AFTER = 5.0  # s of failed polls (camera removed, scenario reloaded, link down): stop the bridge
 
 
 def bng_send(conn, **msg) -> int:
@@ -63,31 +67,66 @@ class Frame:
 
 
 class CameraStream:
-  """Polls BeamNG cameras in one burst on their own connection and keeps each camera's newest distinct frame."""
+  """Polls BeamNG cameras in one burst on their own connection and keeps each camera's newest distinct frame.
+  `latest` is replaced as a whole once per poll, so a reader always gets frames from one poll; `new` is set when it changes."""
 
-  def __init__(self, host: str, port: int, names, period: float, size=(W, H)):
+  def __init__(self, host: str, port: int, names, period: float, size=(W, H), log=print):
+    self.host, self.port, self.log = host, port, log
     self.bng = BeamNGpy(host, port).open(launch=False)
     self.names, self.period, (self.w, self.h) = list(names), period, size
-    self.latest: list[Frame | None] = [None] * len(self.names)
+    self.latest: tuple[Frame | None, ...] = (None,) * len(self.names)
+    self.new = threading.Event()
+    self.failed = threading.Event()
+    self.t_ok = time.monotonic()  # last successful poll
     self.polls = 0
 
-  def run(self, exit_event: threading.Event):
+  def poll(self) -> list:
     conn = self.bng.connection
+    ids = [bng_send(conn, type="PollCamera", name=n, isUsingSharedMemory=False) for n in self.names]
+    return [bng_recv(conn, i)["data"].get("colour") for i in ids]  # codespell:ignore colour
+
+  def reconnect(self):
+    try:
+      self.bng.disconnect()
+    except Exception:
+      pass
+    self.bng = BeamNGpy(self.host, self.port).open(launch=False)
+
+  def run(self, exit_event: threading.Event):
     seq, prev_fp, t_prev = [0] * len(self.names), [None] * len(self.names), time.monotonic()
     while not exit_event.is_set():
       t0 = time.monotonic()
-      ids = [bng_send(conn, type="PollCamera", name=n, isUsingSharedMemory=False) for n in self.names]
-      bufs = [bng_recv(conn, i)["data"].get("colour") for i in ids]
-      t1 = time.monotonic()
+      try:
+        bufs = self.poll()
+      except Exception as e:
+        if exit_event.is_set():
+          break
+        # a half-answered burst leaves the connection out of step, so start a new one
+        self.log(f"camera poll failed ({', '.join(self.names)}): {e!r}")
+        if t0 - self.t_ok > FAIL_AFTER:
+          self.log(f"cameras gave nothing for {FAIL_AFTER:.0f} s, giving up")
+          self.failed.set()
+          break
+        time.sleep(0.5)
+        try:
+          self.reconnect()
+        except Exception as e2:
+          self.log(f"camera reconnect failed: {e2!r}")
+        continue
+      t1 = self.t_ok = time.monotonic()
       self.polls += 1
+      latest, changed = list(self.latest), False
       for i, buf in enumerate(bufs):
         # periodic polls come back RGB, ad-hoc ones RGBA
         if isinstance(buf, bytes) and len(buf) in (self.w * self.h * 3, self.w * self.h * 4):
           fp = fingerprint(buf)
           if fp != prev_fp[i]:
             seq[i] += 1
-            self.latest[i] = Frame(seq[i], np.frombuffer(buf, dtype=np.uint8).reshape(self.h, self.w, -1), t_prev, t1)
-            prev_fp[i] = fp
+            latest[i] = Frame(seq[i], np.frombuffer(buf, dtype=np.uint8).reshape(self.h, self.w, -1), t_prev, t1)
+            prev_fp[i], changed = fp, True
+      if changed:
+        self.latest = tuple(latest)
+        self.new.set()
       t_prev = t0
       time.sleep(max(0.0, self.period - (time.monotonic() - t0)))
 
@@ -124,10 +163,10 @@ class Camerad:
 
 
 class CameraRig:
-  """The two cameras in BeamNG, their pollers, and the 20 Hz pair publisher."""
+  """The two cameras in BeamNG, their poller, and the 20 Hz pair publisher. fail_event is set if the cameras stop for good."""
 
-  def __init__(self, bng: BeamNGpy, bng_lock: threading.Lock, vehicle, host: str, port: int, update_time: float = 0.02,
-               poll_period: float = 0.04, mount=MOUNT, log=print):
+  def __init__(self, bng: BeamNGpy, bng_lock: threading.Lock, vehicle, host: str, port: int, fail_event, update_time: float = 0.02,
+               poll_period: float = 0.03, mount=MOUNT, log=print):
     self.log = log
     self.names = ("tp_road", "tp_wide")
     self.bng, self.bng_lock = bng, bng_lock
@@ -145,12 +184,15 @@ class CameraRig:
       sent = [bng.connection.send({'type': "SetCameraRequestedUpdateTime", 'name': name, 'updateTime': update_time}) for name in self.names]
       for r in sent:
         r.ack("CompletedSetCameraRequestedUpdateTime")
-    self.stream = CameraStream(host, port, self.names, poll_period)
-    self.converters = [NV12Converter(W, H) for _ in self.names]
+    self.stream = CameraStream(host, port, self.names, poll_period, log=log)
+    self.fail_event = fail_event
     self.camerad: Camerad | None = None
-    self.stats = {'pairs': 0, 'republished': 0, 'skipped': 0, 'skew': deque(maxlen=200), 'age': deque(maxlen=200), 'convert': deque(maxlen=200)}
+    self.counts = {'pairs': 0, 'republished': 0}
+    self.skew: deque = deque(maxlen=200)
+    self.age: deque = deque(maxlen=200)
+    self.convert_t: deque = deque(maxlen=200)
+    self.interval: deque = deque(maxlen=200)
     self.threads: list[threading.Thread] = []
-    self.last_report: dict = {}
     self.last_t_frame = 0.0
 
   def start(self, exit_event: threading.Event):
@@ -161,50 +203,58 @@ class CameraRig:
 
   def publish_loop(self, exit_event: threading.Event):
     self.camerad = Camerad()
-    rk = Ratekeeper(20, print_delay_threshold=None)
-    last_seq, last_pub, last_report = (0, 0), 0.0, time.monotonic()
+    last_seq, last_pair, last_pub, due, last_report = (0, 0), None, 0.0, 0.0, time.monotonic()
+    timeout = 0.01
     while not exit_event.is_set():
-      road, wide = self.stream.latest
+      self.stream.new.wait(timeout)
+      self.stream.new.clear()
       now = time.monotonic()
-      if road is not None and wide is not None:
-        fresh = road.seq != last_seq[0] and wide.seq != last_seq[1]
-        if fresh or now - last_pub > REPUBLISH_AFTER:
-          self.publish(road, wide, fresh)
-          last_seq, last_pub = (road.seq, wide.seq), time.monotonic()
-        else:
-          self.stats['skipped'] += 1
+      road, wide = self.stream.latest
+      fresh = road is not None and wide is not None and road.seq != last_seq[0] and wide.seq != last_seq[1]
+      if road is not None and wide is not None and fresh and now >= due:
+        self.publish(road, wide, True)
+        last_seq, last_pair = (road.seq, wide.seq), (road, wide)
+        if last_pub:
+          self.interval.append(now - last_pub)
+        # stay on the 20 Hz grid through scheduling jitter, but never follow a late pair closer than MIN_GAP
+        due, last_pub = max(due + PERIOD, now + MIN_GAP), now
+      elif last_pair is not None and now - last_pub > REPUBLISH_AFTER and now - self.stream.t_ok < STALE_AFTER:
+        self.publish(*last_pair, False)  # the last published pair itself, never a half-new one
+        self.interval.append(now - last_pub)
+        due, last_pub = now + PERIOD, now
+      timeout = min(0.01, max(0.0005, due - now)) if fresh and now < due else 0.01
+      if self.stream.failed.is_set() and not self.fail_event.is_set():
+        self.log("camera stream failed, stopping the bridge")
+        self.fail_event.set()
       if now - last_report > 5.0:
         self.report(now - last_report)
         last_report = now
-      rk.keep_time()
 
   def publish(self, road: Frame, wide: Frame, fresh: bool):
     t0 = time.monotonic()
-    yuv = [c.convert(f.rgb) for c, f in zip(self.converters, (road, wide), strict=True)]
+    yuv = [rgb_to_nv12(f.rgb[:, :, :3]) for f in (road, wide)]
     t1 = time.monotonic()
     # a republished pair gets a later time than the last one, as a camera that kept seeing the same scene would
-    t_frame = road.t if fresh else self.last_t_frame + 0.05
+    t_frame = road.t if fresh else self.last_t_frame + PERIOD
     t_frame = max(t_frame, self.last_t_frame + 0.001)
     self.last_t_frame = t_frame
+    assert self.camerad is not None
     self.camerad.send(yuv[0], yuv[1], int(t_frame * 1e9), int(t_frame * 1e9))
     t2 = time.monotonic()
-    st = self.stats
-    st['pairs' if fresh else 'republished'] += 1
-    st['skew'].append(abs(road.t - wide.t))
-    st['age'].append(t2 - road.t)
-    st['convert'].append((t1 - t0) / 2)
+    self.counts['pairs' if fresh else 'republished'] += 1
+    self.skew.append(abs(road.t - wide.t))
+    self.age.append(t2 - road.t)
+    self.convert_t.append((t1 - t0) / 2)
 
   def report(self, dt: float):
-    st = self.stats
-    if st['skew']:
-      self.log(f"cameras: {st['pairs'] / dt:.1f} fresh pairs/s, {st['republished'] / dt:.1f} republished/s, " +
-               f"skew med {np.median(st['skew']) * 1e3:.1f} p90 {np.percentile(st['skew'], 90) * 1e3:.1f} ms, " +
-               f"age med {np.median(st['age']) * 1e3:.1f} p90 {np.percentile(st['age'], 90) * 1e3:.1f} ms, " +
-               f"nv12 {np.median(st['convert']) * 1e3:.1f} ms/frame, {self.stream.polls / dt:.1f} polls/s")
-    self.last_report = {'fresh_pairs_per_s': st['pairs'] / dt, 'republished_per_s': st['republished'] / dt,
-                            'skew_med_ms': float(np.median(st['skew']) * 1e3) if st['skew'] else None,
-                            'age_med_ms': float(np.median(st['age']) * 1e3) if st['age'] else None}
-    st['pairs'] = st['republished'] = st['skipped'] = 0
+    if self.skew:
+      iv = np.array(self.interval) * 1e3 if self.interval else np.zeros(1)
+      self.log(f"cameras: {self.counts['pairs'] / dt:.1f} fresh pairs/s, {self.counts['republished'] / dt:.1f} republished/s, " +
+               f"interval med {np.median(iv):.0f} p95 {np.percentile(iv, 95):.0f} max {iv.max():.0f} ms, " +
+               f"skew med {np.median(self.skew) * 1e3:.1f} ms, age med {np.median(self.age) * 1e3:.1f} p90 {np.percentile(self.age, 90) * 1e3:.1f} ms, " +
+               f"nv12 {np.median(self.convert_t) * 1e3:.1f} ms/frame, {self.stream.polls / dt:.1f} polls/s")
+    self.counts = {'pairs': 0, 'republished': 0}
+    self.interval.clear()
     self.stream.polls = 0
 
   def close(self):

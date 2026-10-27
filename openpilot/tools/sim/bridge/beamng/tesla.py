@@ -129,7 +129,7 @@ class TeslaCan:
       "DI_speed": (PARTY, {"DI_vehicleSpeed": clip(speed_kph, -40, 285), "DI_uiSpeed": clip(round(speed_kph), 0, 254), "DI_uiSpeedUnits": 1}),
       "DI_systemStatus": (PARTY, {"DI_gear": state.gear, "DI_systemState": 5,  # DI_SYS_ENABLE
                                   "DI_accelPedalPos": gas if gas > GAS_DEAD_BAND else 0.0, "DI_brakePedalState": int(brake)}),
-      # ESP_driverBrakeApply: 1 not applied, 2 driver applying brakes (0 is "not initialised")
+      # ESP_driverBrakeApply: 1 not applied, 2 driver applying brakes (0 is "not initialized")
       "ESP_status": (PARTY, {"ESP_driverBrakeApply": 2 if brake else 1, "ESP_brakeApply": int(brake)}),
       # the port negates angle and torsion bar torque (openpilot: positive is left)
       "EPAS3S_sysStatus": (PARTY, {"EPAS3S_internalSAS": -angle, "EPAS3S_internalSASQF": 1,

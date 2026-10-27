@@ -1,4 +1,5 @@
 import time
+from collections.abc import Callable
 from multiprocessing import Queue
 
 from openpilot.common.realtime import Ratekeeper
@@ -11,7 +12,7 @@ from openpilot.tools.sim.bridge.beamng.world import BeamNGConfig, BeamNGState, B
 MANUAL_STEER_DEG = 90.0  # steering wheel degrees for a full manual steer input
 STEER_NM_PER_UNIT = 12.5  # manual steer input as torsion bar torque; the port reads > 1 Nm as the driver steering
 SET_SPEED_STEP_KPH = 5.0
-DT = 0.01
+DT = 0.01  # s, the loop period
 ROLLING_START_ACCEL = 1.0  # m/s^2, the driver pulling away before engaging
 
 
@@ -25,7 +26,7 @@ class BeamNGBridge(SimulatorBridge):
   100 Hz until it returns True (done)."""
 
   def __init__(self, cfg: BeamNGConfig, engage: bool = False, set_speed_kph: float = 0.0, rolling_start_kph: float = 0.0,
-               scenario=None, test_run: bool = False):
+               scenario: Callable[['BeamNGBridge'], bool | None] | None = None, test_run: bool = False):
     super().__init__(dual_camera=True, high_quality=False)
     self.cfg = cfg
     self.auto_engage = engage
@@ -43,10 +44,12 @@ class BeamNGBridge(SimulatorBridge):
     m = cmd.split('_')
     car = self.car
     if m[0] == "cruise":
-      if m[1] == "up":
-        car.adjust_set_speed(SET_SPEED_STEP_KPH) if car.engaged else car.engage(state.wheel_speed, self.set_speed_kph)
+      if m[1] in ("up", "down") and car.engaged:
+        car.adjust_set_speed(SET_SPEED_STEP_KPH if m[1] == "up" else -SET_SPEED_STEP_KPH)
+      elif m[1] == "up":
+        car.engage(state.wheel_speed, self.set_speed_kph)
       elif m[1] == "down":
-        car.adjust_set_speed(-SET_SPEED_STEP_KPH) if car.engaged else car.engage(state.wheel_speed)
+        car.engage(state.wheel_speed)
       elif m[1] == "cancel":
         car.cancel()
     elif m[0] == "steer":
@@ -77,6 +80,7 @@ class BeamNGBridge(SimulatorBridge):
     rk = Ratekeeper(100, print_delay_threshold=None)
     scenario_done = self.scenario is None
     last_print = 0.0
+    t_prev = time.monotonic()
 
     while self._keep_alive:
       self.manual = [0.0, 0.0, 0.0]
@@ -85,10 +89,12 @@ class BeamNGBridge(SimulatorBridge):
         if getattr(msg, 'type', None) == QueueMessageType.CONTROL_COMMAND:
           self.handle_command(msg.info, state)
 
+      now = time.monotonic()
+      dt, t_prev = min(now - t_prev, 5 * DT), now
       self.world.read_sensors(state)
       steer_in, gas, brake = self.manual
       if self.auto_engage and state.valid:
-        gas = max(gas, self.engage_step(state))
+        gas = max(gas, self.engage_step(state, dt))
       state.user_gas, state.user_brake = gas, brake
       state.user_torque_nm = -steer_in * STEER_NM_PER_UNIT
       state.left_blinker, state.right_blinker = self.blinker
@@ -102,7 +108,7 @@ class BeamNGBridge(SimulatorBridge):
       else:
         steer = -steer_in * MANUAL_STEER_DEG
       if self.car.long_active() and gas == 0.0 and brake == 0.0:
-        throttle, brake_out = self.accel.update(self.car.accel_cmd, state.a_long, state.wheel_speed, DT)
+        throttle, brake_out = self.accel.update(self.car.accel_cmd, state.wheel_speed, dt)
       else:
         self.accel.reset()
         throttle, brake_out = gas, brake
@@ -111,21 +117,20 @@ class BeamNGBridge(SimulatorBridge):
       self.world.apply_controls(steer, throttle, brake_out)
       state.is_engaged = self.car.engaged
 
-      if not scenario_done:
+      if self.scenario is not None and not scenario_done:
         self.rk_frame = rk.frame
         scenario_done = bool(self.scenario(self))
 
       if self.world.exit_event.is_set():
         self.shutdown()
 
-      now = time.monotonic()
       if not self.test_run and now - last_print > 1.0:
         last_print = now
         self.print_status()
       self.started.value = True
       rk.keep_time()
 
-  def engage_step(self, state: BeamNGState) -> float:
+  def engage_step(self, state: BeamNGState, dt: float) -> float:
     """Engage like a driver: with a rolling start, press the gas up to that speed first (the driving model holds a car
     that stands on an empty road: its standstill accel stays under drive_helpers.should_stop's 0.1), then pull the stalk
     when openpilot is engageable; if openpilot didn't take the rising edge, cancel and retry. Returns the driver's gas."""
@@ -136,7 +141,7 @@ class BeamNGBridge(SimulatorBridge):
     if sm['selfdriveState'].enabled:
       self.auto_engage = self.rolled = False
     elif not self.car.engaged and not self.rolled and state.wheel_speed < roll_to:
-      throttle, _ = self.driver_accel.update(ROLLING_START_ACCEL, state.a_long, state.wheel_speed, DT)
+      throttle, _ = self.driver_accel.update(ROLLING_START_ACCEL, state.wheel_speed, dt)
       return max(throttle, 0.05)
     else:
       # off the gas once rolling, since a pressed pedal blocks engagement; roll again if the car slowed right down
