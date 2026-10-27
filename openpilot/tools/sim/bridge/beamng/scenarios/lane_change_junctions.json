@@ -1,0 +1,22 @@
+[
+  {
+    "name": "wpTown_5_left",
+    "note": "4-lane road (--++) into the signalized junction at (-600.7, 220.9); spawn 350 m out in the right lane, so the left turn needs one lane change left",
+    "junction": [-600.7, 220.9],
+    "turn": "left",
+    "spawn": [-357.39, 472.27, 89.98],
+    "heading_deg": -134.3,
+    "dest": [-558.34, 178.34, 104.36],
+    "speed_kph": 45
+  },
+  {
+    "name": "autojunction_1311_left",
+    "note": "divided road, two lanes our way (++), 530 m straight into autojunction_1311; spawn 350 m out in the right lane",
+    "junction": [-885.9, -407.3],
+    "turn": "left",
+    "spawn": [-627.09, -201.98, 93.2],
+    "heading_deg": -177.1,
+    "dest": [-841.58, -447.58, 96.79],
+    "speed_kph": 45
+  }
+]

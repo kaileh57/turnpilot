@@ -1,0 +1,380 @@
+"""The scenarios: one declarative Entry each, and the builders that turn an entry into a Plan of world positions from the
+road-graph export (no game). Positions are BeamNG world meters (x east, y north, z up), headings radians CCW from east.
+
+Turn scenarios name a signalized junction from piston_assets.md; the junctions with marked crosswalks are (-768.6, 555.2),
+(-759.2, 376.7), (-650.1, 481.7), (-600.7, 220.9), (-445.3, 147.0) and (-32.5, 403.8). The last two have no 90-degree
+turn in the road graph. Data scenarios (lane_change, occupied_lane) read a JSON list of
+  {"name", "spawn": [x, y, z], "heading_deg", "dest": [x, y, z], "junction": [x, y], "turn": "left"|"right", "speed_kph"}
+(junction, turn and speed_kph optional), from lane_change_junctions.json next to this file unless --data says otherwise.
+"""
+import json
+import math
+import os
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from openpilot.selfdrive.turnpilot.lane_planner import LANE_WIDTH, lane_change_window
+from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M
+from openpilot.tools.sim.bridge.beamng.roadgraph import RoadGraph, wrap
+from openpilot.tools.sim.bridge.beamng.scenarios.timing import WALK_SPEED, arc_lengths, point_at
+
+DATA_JSON = os.path.join(os.path.dirname(__file__), "lane_change_junctions.json")
+PREFIX = "tp_sc_"  # every actor a scenario spawns; the cleanup sweep deletes anything named like this
+TURN_TOLERANCE_DEG = 15.
+STRAIGHT_TOLERANCE_DEG = 25.
+CURB_STEP_M = 1.5        # walker start and end, beyond the road edge
+CROSSWALK_PAST_EDGE_M = 2.5  # the crosswalk across the exit road, this far past the edge of the road the car comes from
+WALK_AWAY_M = 10.        # after crossing, the walker goes this far along the far sidewalk, out of the crosswalk zone
+PACER_END_BEFORE_M = 50.  # the pacer's lane ends this far before the junction
+CLEAR_OF_JUNCTION_M = 25.  # a spawn this close to another junction moves up the approach
+
+
+@dataclass(frozen=True)
+class Entry:
+  kind: str                       # 'turn' (at a junction), 'straight' (past one), 'data' (from the JSON), 'route'
+  junction: tuple = ()            # (x, y) of a signalized junction
+  turn: str = 'right'
+  approach_m: float = 140.        # spawn this far before the junction (closer if that is inside another junction)
+  from_heading_deg: float | None = None  # approach travelling this way; None: the longest approach
+  dest_after_m: float = 60.       # destination this far past it
+  speed_kph: float = 30.
+  timeout_s: float = 150.
+  actor: str = ''                 # 'crosswalk', 'oncoming', 'standing', 'pacer'
+  walker_lead_s: float = 4.       # the walker steps off the curb this long before the car would reach its hold line
+  crosswalk_m: float = 0.         # crosswalk centre from the junction along the exit road; 0: road edge + 2.5 m (unverified)
+  ped_before_m: float = 40.       # standing mannequin, this far before the junction
+  oncoming: int = 2               # cars
+  oncoming_start_m: float = 60.   # the first one starts this far from the junction
+  oncoming_spacing_m: float = 25.
+  oncoming_speed: float = 11.     # m/s
+  oncoming_accel: float = 2.5     # m/s^2
+  arrive_after_s: float = 1.5     # the first oncoming car reaches the junction this long after the car reaches its hold line
+  pace_block_s: float = 6.        # the pacer keeps the target lane occupied this long into the lane change window
+  end_on_stop_s: float = 0.       # end the run once the car has stood this long after moving
+  spawn: tuple = ()               # route: (x, y, z), heading_deg, destination (x, y, z)
+  heading_deg: float = 0.
+  dest: tuple = ()
+
+
+SCENARIOS = {
+  'ped_crosswalk_right': Entry('turn', junction=(-768.6, 555.2), turn='right', actor='crosswalk', timeout_s=120.),
+  'unprotected_left': Entry('turn', junction=(-650.1, 481.7), turn='left', actor='oncoming', timeout_s=150.),
+  # gate1's approach: eastbound on the 140 m straight from the bridge's default spawn
+  'ped_in_path': Entry('straight', junction=(-768.9, 661.4), turn='right', from_heading_deg=0., actor='standing', end_on_stop_s=4.,
+                       timeout_s=90.),
+  'occupied_lane': Entry('data', actor='pacer', speed_kph=45., timeout_s=150.),
+  'lane_change': Entry('data', speed_kph=45., timeout_s=150.),
+  # downtown: 20 m on from the bridge's default spawn (clear of the junction behind it), eastbound, to road-graph node
+  # DR249_3 about 850 m east-southeast
+  'route_demo': Entry('route', spawn=(-888.82, 659.66, 111.4), heading_deg=0., dest=(-84.9, 377.0, 101.5), speed_kph=40., timeout_s=600.),
+}
+
+
+@dataclass
+class Actor:
+  name: str
+  kind: str            # 'walker' (the mannequin) or 'car' (an AI etk800)
+  trigger: str         # 'setup' (stands from the start), 'walk', 'oncoming', 'pace'
+  path: list           # [[x, y, z], ...]: the walk, or the car's lane (its script starts at the first point)
+  speed: float = WALK_SPEED
+  accel: float = 0.
+  heading: float = 0.  # where it faces at spawn
+  params: dict = field(default_factory=dict)
+
+
+@dataclass
+class Plan:
+  name: str
+  spawn: tuple         # (x, y, z) for the ego
+  heading: float
+  dest: tuple | None   # (x, y, z), or None for no route
+  junction: tuple | None  # (x, y) of the maneuver point the triggers time against
+  speed_kph: float
+  timeout_s: float
+  end_on_stop_s: float
+  actors: list
+  notes: dict
+
+
+# *** road geometry ***
+def heading_of(a, b) -> float:
+  return math.atan2(b[1] - a[1], b[0] - a[0])
+
+
+def unit(h: float) -> np.ndarray:
+  return np.array([math.cos(h), math.sin(h)])
+
+
+def right_of(h: float) -> np.ndarray:
+  return np.array([math.sin(h), -math.cos(h)])
+
+
+def lane_offset(lanes: str, radius: float, which: str) -> float:
+  """Offset to the right of the centreline of our rightmost or leftmost lane ('+' in a lane string, left to right)."""
+  ours = [k for k, c in enumerate(lanes) if c == '+'] or [len(lanes) - 1]
+  k = ours[-1] if which == 'right' else ours[0]
+  w = 2 * radius / max(len(lanes), 1)
+  return -radius + w * (k + 0.5)
+
+
+def flip(lanes: str) -> str:
+  """A lane string for travel the other way."""
+  return ''.join('+' if c == '-' else '-' for c in reversed(lanes))
+
+
+def offset_polyline(pts, offset: float) -> np.ndarray:
+  """The polyline moved `offset` m to the right of its direction of travel (first point to last)."""
+  pts = np.asarray(pts, dtype=float)
+  d = np.gradient(pts[:, :2], axis=0)
+  n = np.stack([d[:, 1], -d[:, 0]], axis=1) / np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-9)
+  out = pts.copy()
+  out[:, :2] += offset * n
+  return out
+
+
+def section(pts, s0: float, s1: float) -> np.ndarray:
+  """The polyline between arc lengths s0 and s1."""
+  seg = arc_lengths(pts)
+  inner = [p for p, a in zip(pts, seg, strict=True) if s0 < a < s1]
+  return np.array([point_at(pts, s0)[0]] + inner + [point_at(pts, s1)[0]])
+
+
+def cut(pts, s: float) -> np.ndarray:
+  """The first s m of a polyline."""
+  return section(pts, 0., s)
+
+
+def walk_straight(graph: RoadGraph, j: str, first: str, length: float) -> np.ndarray:
+  """Points from junction j along the arm through `first`, carrying on straight through junctions, until `length` m."""
+  pos = graph.pos
+  pts, prev, cur, d = [pos[j]], j, first, 0.0
+  while True:
+    d += float(np.linalg.norm(pos[cur][:2] - pos[prev][:2]))
+    pts.append(pos[cur])
+    nxt = graph.adj[cur] - {prev}
+    if d >= length or not nxt:
+      return np.array(pts)
+    h = heading_of(pos[prev], pos[cur])
+    turn = {n: abs(wrap(heading_of(pos[cur], pos[n]) - h)) for n in nxt}
+    best = min(turn, key=lambda n: turn[n])
+    if len(nxt) > 1 and math.degrees(turn[best]) > STRAIGHT_TOLERANCE_DEG:
+      return np.array(pts)
+    prev, cur = cur, best
+
+
+def arm_out_heading(graph: RoadGraph, j: str, a: str) -> float:
+  return graph.arm_heading(graph.walk(j, a, 30.))
+
+
+def lane_pose(arm, s: float, lanes: str, radius: float, which: str):
+  """(x, y, z), heading of a car s m out along an arm (points from the junction outward), in a lane, facing the junction.
+  lanes: oriented for travel toward the junction."""
+  p, h_out = point_at(arm, s)
+  heading = wrap(h_out + math.pi)
+  xy = p[:2] + lane_offset(lanes, radius, which) * right_of(heading)
+  return (float(xy[0]), float(xy[1]), float(p[2]) + 0.3), heading
+
+
+@dataclass
+class Junction:
+  node: str
+  center: np.ndarray
+  a: str               # approach neighbour
+  b: str               # exit neighbour
+  approach: np.ndarray  # from the junction out along the approach, carried on straight through junctions
+  exit: np.ndarray
+  h_in: float          # travel heading on the approach
+  straight: str | None  # the arm straight across, if any
+
+
+def find_turn(graph: RoadGraph, xy, direction: str, approach_len: float = 400., from_heading: float | None = None) -> Junction:
+  """The legal ~90 degree turn that way at the junction nearest xy: from the approach travelling closest to
+  from_heading (rad), else from the longest approach."""
+  j = graph.nearest_junction(*xy)
+  best = None
+  for a in graph.adj[j]:
+    if j not in graph.out[a]:
+      continue
+    app = walk_straight(graph, j, a, approach_len)
+    h_in = wrap(graph.arm_heading(app) + math.pi)
+    for b in graph.adj[j]:
+      if b == a or b not in graph.out[j]:
+        continue
+      ex = graph.walk(j, b, 120.)
+      angle = wrap(graph.arm_heading(ex) - h_in)
+      if abs(abs(math.degrees(angle)) - 90) <= TURN_TOLERANCE_DEG and (angle > 0) == (direction == 'left'):
+        n = float(arc_lengths(app)[-1]) if from_heading is None else -abs(wrap(h_in - from_heading))
+        if best is None or n > best[0]:
+          best = (n, a, b, app, ex, h_in)
+  if best is None:
+    raise ValueError(f"no legal {direction} turn of about 90 degrees at {j} near {xy}")
+  _, a, b, app, ex, h_in = best
+  # straight across, two-way: oncoming traffic comes from it and a straight-on destination lies along it
+  across = [o for o in graph.adj[j] if o not in (a, b) and j in graph.out[o] and o in graph.out[j] and
+            abs(math.degrees(wrap(arm_out_heading(graph, j, o) - h_in))) < STRAIGHT_TOLERANCE_DEG]
+  return Junction(j, graph.pos[j], a, b, app, ex, h_in, across[0] if across else None)
+
+
+def ego_lane(direction: str) -> str:
+  return 'left' if direction == 'left' else 'right'
+
+
+def crosswalk_path(graph: RoadGraph, jn: Junction, crosswalk_m: float = 0.) -> tuple[np.ndarray, float]:
+  """The walk across the exit road: from the inside corner of the turn, over the road, then away along the far sidewalk.
+  Returns (path, crosswalk distance from the junction)."""
+  h_out = graph.arm_heading(jn.exit)
+  u, n = unit(h_out), unit(h_out + math.pi / 2)
+  c_dist = crosswalk_m or graph.radius[jn.a] + CROSSWALK_PAST_EDGE_M
+  c = jn.center[:2] + c_dist * u
+  half = graph.radius[jn.b] + CURB_STEP_M
+  near = 1.0 if np.dot(n, unit(jn.h_in + math.pi)) > 0 else -1.0  # the side of the exit road the car comes from
+  z = float(jn.center[2])
+  pts = [c + near * half * n, c - near * half * n, c - near * half * n + WALK_AWAY_M * u]
+  return np.array([[p[0], p[1], z] for p in pts]), c_dist
+
+
+def oncoming_paths(graph: RoadGraph, jn: Junction, count: int, start_m: float, spacing: float, after_m: float = 60.):
+  """Lanes for cars coming straight across the junction toward the car: from start_m (+ spacing each) out on the far
+  arm, through the junction, and away along the car's approach, each in its rightmost lane."""
+  if jn.straight is None:
+    raise ValueError(f"no arm straight across {jn.node} for oncoming traffic")
+  far = walk_straight(graph, jn.node, jn.straight, start_m + spacing * (count - 1) + 5.)
+  lanes_in = graph.lanes_toward(jn.node, jn.straight)
+  lanes_out = flip(graph.lanes_toward(jn.node, jn.a))
+  leave = offset_polyline(cut(jn.approach, after_m), lane_offset(lanes_out, graph.radius[jn.a], 'right'))
+  length = float(arc_lengths(far)[-1])
+  paths = []
+  for k in range(count):
+    s = start_m + k * spacing
+    if s > length:
+      break
+    come = offset_polyline(cut(far, s)[::-1], lane_offset(lanes_in, graph.radius[jn.straight], 'right'))
+    paths.append(np.vstack([come, leave[1:]]))
+  return paths
+
+
+def project(pts, p) -> tuple[float, float, float]:
+  """(arc length, signed offset to the right, heading of the segment there) of point p against a polyline."""
+  pts = np.asarray(pts, dtype=float)
+  best = (math.inf, 0.0, 0.0, 0.0)
+  seg = arc_lengths(pts)
+  for i in range(len(pts) - 1):
+    a, b = pts[i, :2], pts[i + 1, :2]
+    ab = b - a
+    f = float(np.clip(np.dot(p[:2] - a, ab) / max(np.dot(ab, ab), 1e-9), 0.0, 1.0))
+    q = a + f * ab
+    d = float(np.linalg.norm(p[:2] - q))
+    if d < best[0]:
+      h = math.atan2(ab[1], ab[0])
+      best = (d, seg[i] + f * float(np.linalg.norm(ab)), float(np.dot(p[:2] - q, right_of(h))), h)
+  return best[1], best[2], best[3]
+
+
+def pacer_lane(graph: RoadGraph, spawn, heading: float, junction_xy, direction: str):
+  """The lane next to the car's toward the turn side, from 30 m behind the spawn to PACER_END_BEFORE_M before the
+  junction, and how far along it the junction is."""
+  j = graph.nearest_junction(*junction_xy)
+  best = None
+  for a in graph.adj[j]:
+    if j not in graph.out[a]:
+      continue
+    toward = walk_straight(graph, j, a, 800.)[::-1]  # the arm in the car's direction of travel, ending at the junction
+    s, off, h = project(toward, np.asarray(spawn, dtype=float))
+    if abs(math.degrees(wrap(h - heading))) < 45. and (best is None or abs(off) < abs(best[2])):
+      best = (toward, s, off)
+  if best is None:
+    raise ValueError(f"the spawn isn't on an approach to {j}")
+  toward, s_spawn, off = best
+  lane = offset_polyline(toward, off + (-LANE_WIDTH if direction == 'left' else LANE_WIDTH))
+  start, total = max(s_spawn - 30., 0.), float(arc_lengths(lane)[-1])
+  return section(lane, start, total - PACER_END_BEFORE_M), total - start
+
+
+# *** builders ***
+def _turn_plan(name: str, e: Entry, graph: RoadGraph) -> Plan:
+  jn = find_turn(graph, e.junction, e.turn, from_heading=None if e.from_heading_deg is None else math.radians(e.from_heading_deg))
+  lanes, radius = graph.lanes_toward(jn.node, jn.a), graph.radius[jn.a]
+  s = e.approach_m
+  while True:
+    spawn, heading = lane_pose(jn.approach, s, lanes, radius, ego_lane(e.turn))
+    if s < 60. or not any(np.hypot(*(graph.pos[j][:2] - spawn[:2])) < CLEAR_OF_JUNCTION_M for j in graph.junctions()):
+      break
+    s -= 10.
+  actors, notes = [], {'junction_node': jn.node, 'approach_m': s}
+  if e.kind == 'straight':
+    if jn.straight is None:
+      dest = None
+    else:
+      p, _ = point_at(walk_straight(graph, jn.node, jn.straight, e.dest_after_m + 5.), e.dest_after_m)
+      dest = tuple(float(v) for v in p)
+  else:
+    p, _ = point_at(jn.exit, min(e.dest_after_m, float(arc_lengths(jn.exit)[-1]) - 5.))
+    dest = tuple(float(v) for v in p)
+
+  if e.actor == 'crosswalk':
+    path, c_dist = crosswalk_path(graph, jn, e.crosswalk_m)
+    h = heading_of(path[0], path[1])
+    actors.append(Actor(f"{PREFIX}ped", 'walker', 'walk', path.tolist(), WALK_SPEED, heading=h,
+                        params={'lead_s': e.walker_lead_s, 'step_in_m': CURB_STEP_M}))
+    notes['crosswalk_m'] = round(c_dist, 1)
+    notes['crosswalk_unverified'] = "crosswalk placed from road widths, not from the level's crossing decals"
+  elif e.actor == 'standing':
+    p, _ = lane_pose(jn.approach, e.ped_before_m, lanes, radius, ego_lane(e.turn))
+    actors.append(Actor(f"{PREFIX}ped", 'walker', 'setup', [list(p)], 0., heading=wrap(heading + math.pi)))
+  elif e.actor == 'oncoming':
+    for k, path in enumerate(oncoming_paths(graph, jn, e.oncoming, e.oncoming_start_m, e.oncoming_spacing_m)):
+      h = heading_of(path[0], path[1])
+      actors.append(Actor(f"{PREFIX}car{k}", 'car', 'oncoming', path.tolist(), e.oncoming_speed, e.oncoming_accel, h,
+                          params={'start_m': e.oncoming_start_m, 'arrive_after_s': e.arrive_after_s}))
+  return Plan(name, spawn, heading, dest, (float(jn.center[0]), float(jn.center[1])), e.speed_kph, e.timeout_s,
+              e.end_on_stop_s, actors, notes)
+
+
+def load_data(path: str = DATA_JSON, entry: str = '') -> dict:
+  with open(path) as f:
+    items = json.load(f)
+  if entry:
+    found = [d for d in items if d['name'] == entry]
+    if not found:
+      raise ValueError(f"no entry {entry!r} in {path}: {[d['name'] for d in items]}")
+    return found[0]
+  return items[0]
+
+
+def _data_plan(name: str, e: Entry, graph: RoadGraph, data: dict) -> Plan:
+  spawn = tuple(float(v) for v in data['spawn'])
+  heading = math.radians(float(data['heading_deg']))
+  dest = tuple(float(v) for v in data['dest']) if data.get('dest') else None
+  junction = tuple(float(v) for v in data['junction']) if data.get('junction') else None
+  speed = float(data.get('speed_kph', e.speed_kph))
+  actors, notes = [], {'data_entry': data['name']}
+  if e.actor == 'pacer':
+    if junction is None:
+      raise ValueError("occupied_lane needs a junction in its data entry")
+    direction = data.get('turn', 'left')
+    lane, s_junction = pacer_lane(graph, spawn, heading, junction, direction)
+    v = speed / 3.6
+    window_start = lane_change_window(v)[0]
+    h = heading_of(lane[0], lane[1])
+    actors.append(Actor(f"{PREFIX}pacer", 'car', 'pace', lane.tolist(), v, 3.0, h,
+                        params={'s_junction': float(s_junction), 'window_start_m': window_start, 'block_s': e.pace_block_s,
+                                'drop_to': 0.4}))
+  return Plan(name, spawn, heading, dest, junction, speed, e.timeout_s, e.end_on_stop_s, actors, notes)
+
+
+def build(name: str, graph: RoadGraph | None = None, data_path: str = DATA_JSON, entry: str = '') -> Plan:
+  e = SCENARIOS[name]
+  if e.kind == 'route':
+    return Plan(name, e.spawn, math.radians(e.heading_deg), e.dest, None, e.speed_kph, e.timeout_s, e.end_on_stop_s, [], {})
+  graph = RoadGraph() if graph is None else graph
+  if e.kind == 'data':
+    return _data_plan(name, e, graph, load_data(data_path, entry))
+  return _turn_plan(name, e, graph)
+
+
+def hold_distance(plan: Plan, x: float, y: float) -> float:
+  """m from (x, y) to the hold line before the plan's junction (straight line, fine on an approach)."""
+  if plan.junction is None:
+    return math.inf
+  return math.hypot(plan.junction[0] - x, plan.junction[1] - y) - HOLD_LINE_M
