@@ -199,8 +199,9 @@ Later on 2026-10-27 (H3), same setup, 19.2-20.0 model runs a second in every run
   clear went out at 42-50 degrees and the car peaked at 50-55 degrees, 8 runs of 8. At the 90-degree turns it went
   out at 46-83 degrees and the car ended at 85-97, except at short2's last right (below).
 - `town15b2` (town15b's first leg and its second up to just past that left, 7 turns, 0.9 km): arrived with no
-  disengagement, gas tap or hold in 5 of 8 valid runs (3 recorded with the UI); 1 more arrived after one gas tap,
-  and 2 ended stuck, all three at the leg-2 right at (-706, 115). There the car sometimes starts turning only 2-3 m
+  disengagement, gas tap or hold in 5 of 7 runs with the detector up (3 recorded with the UI); 1 more arrived after
+  one gas tap and 1 ended stuck, both at the leg-2 right at (-706, 115), and an eighth run, with the detector
+  already off (below), also stuck there (a ninth held at a left for it). There the car sometimes starts turning only 2-3 m
   before the maneuver point (4-5 m when it gets round), ends up pointing at the storefront across the street, and
   the model sees it as a lead at 6.5-8.6 m (prob 0.76-0.91) and stops: 5 of 11 passes today in all routes (3 stuck,
   2 going on after a tap), 2 of 5 in H2's. The late starts had the car 0.4 m further from the right road edge 10 m
