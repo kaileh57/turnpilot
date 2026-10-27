@@ -34,7 +34,8 @@ MAX_COAST_S = 0.5        # and for this long after its last match;
 MAX_AGE_S = 1.5          # it's dropped after this
 STALE_S = 0.5            # no new detections for this long makes the scene unavailable
 CORRIDOR_HALF_WIDTH = 1.5  # m either side of the predicted path
-STRAIGHT_PATH_X = 50.    # m, the path straight ahead when there's no model path
+PATH_X = 50.             # m: objects up to this far ahead can be in the path
+MIN_MODEL_PATH_X = 10.   # m: a model path shorter than this (stopped, crawling) reads as straight ahead
 PERSON_HEIGHT = 1.7      # m: a pedestrian's range is the nearer of the ground and height estimates (hidden feet read far)
 ACCEL_STD = 3.0          # m/s^2, the filter's process noise
 VEL_STD0 = 5.0           # m/s, a new track's velocity uncertainty
@@ -107,6 +108,23 @@ def range_noise(xy: np.ndarray) -> np.ndarray:
   d = xy / rng
   rot = np.array([[d[0], -d[1]], [d[1], d[0]]])
   return rot @ np.diag([along ** 2, across ** 2]) @ rot.T
+
+
+def predicted_path(model_v2) -> tuple[np.ndarray, np.ndarray]:
+  """(x, y left) of the path ahead to PATH_X: modelV2.position, carried on along its last heading past its end, or
+  straight ahead when there's no model path or it's too short to have a heading."""
+  straight = np.array([0.0, PATH_X]), np.zeros(2)
+  if model_v2 is None or len(model_v2.position.x) < 2:
+    return straight
+  x, y = np.array(model_v2.position.x), -np.array(model_v2.position.y)  # modelV2's y is to the right
+  rising = x > np.maximum.accumulate(np.r_[-np.inf, x[:-1]])  # np.interp needs increasing x
+  x, y = x[rising], y[rising]
+  if len(x) < 2 or x[-1] < MIN_MODEL_PATH_X:
+    return straight
+  if x[-1] < PATH_X:
+    slope = (y[-1] - y[-2]) / (x[-1] - x[-2])
+    x, y = np.r_[x, PATH_X], np.r_[y, y[-1] + slope * (PATH_X - x[-1])]
+  return x, y
 
 
 class SceneTracker:
@@ -257,11 +275,9 @@ class SceneTracker:
     return self.published()
 
   def update_in_path(self, model_v2) -> None:
-    path_x, path_y = np.array([0.0, STRAIGHT_PATH_X]), np.zeros(2)
-    if model_v2 is not None and len(model_v2.position.x) > 1:
-      path_x, path_y = np.array(model_v2.position.x), -np.array(model_v2.position.y)  # modelV2's y is to the right
+    path_x, path_y = predicted_path(model_v2)
     for trk in self.tracks:
-      trk.in_path = bool(trk.x is not None and 0 < trk.x[0] <= path_x[-1] and
+      trk.in_path = bool(trk.x is not None and 0 < trk.x[0] <= PATH_X and
                          abs(trk.x[1] - np.interp(trk.x[0], path_x, path_y)) <= CORRIDOR_HALF_WIDTH)
 
   def published(self) -> list[Track]:

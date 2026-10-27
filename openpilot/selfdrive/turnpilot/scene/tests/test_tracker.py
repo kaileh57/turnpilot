@@ -5,7 +5,7 @@ from openpilot.common.test import OpenpilotTestCase
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.detector.decoder import CAR, PERSON, fill_detections
 from openpilot.selfdrive.turnpilot.scene.ranging import calib_from_view
-from openpilot.selfdrive.turnpilot.scene.tracker import SceneTracker
+from openpilot.selfdrive.turnpilot.scene.tracker import PATH_X, SceneTracker, predicted_path
 
 CAMS = DEVICE_CAMERAS[('mici', 'os04c10')]
 RPY, WIDE_EULER, HEIGHT = [0.0, 0.03, 0.01], [0.0, 0.005, -0.003], 1.3
@@ -133,3 +133,20 @@ class TestSceneTracker(OpenpilotTestCase):
       fill_detections(msg.turnpilotDetections, np.array([[600, 10, 700, 80, 0.9, CAR]], dtype=np.float32), i, int((1 + i * DT) * 1e9), 'road', 0)
       tracks = self.tracker.update(msg.as_reader().turnpilotDetections, self.cal, self.cs, now=1 + i * DT)
     assert tracks == [] and self.tracker.tracks == []
+
+  def test_predicted_path(self):
+    def model(xs, ys_right):
+      msg = messaging.new_message('modelV2')
+      msg.modelV2.position.x, msg.modelV2.position.y = xs, ys_right
+      return msg.as_reader().modelV2
+    x, y = predicted_path(None)
+    assert x[-1] == PATH_X and not y.any()
+    # stopped: the model path is a few cm long, so straight ahead
+    x, y = predicted_path(model([0.0, 0.01, 0.02, 0.02], [0.0, 0.0, 0.0, 0.0]))
+    assert x[-1] == PATH_X and not y.any()
+    # a right curve that ends at 30 m carries on along its last heading; y is to the left
+    xs = [float(v) for v in np.linspace(0, 30, 16)]
+    x, y = predicted_path(model(xs, [0.002 * v ** 2 for v in xs]))
+    assert x[-1] == PATH_X
+    np.testing.assert_allclose(np.interp(20.0, x, y), -0.8, atol=0.05)
+    assert y[-1] < np.interp(30.0, x, y) < 0
