@@ -91,7 +91,7 @@ def test_uturn_and_straight_send_nothing():
 
 
 def test_turn_desire_pulses_again_until_through_the_junction():
-  # the model forgets a pulse after about 5 s; a slow approach gets a new one every REPULSE_S up to the junction
+  # the model forgets a pulse after 132 frames (6.6 s); a slow approach gets a new one every REPULSE_S up to the junction
   trace = drive([(200., "turn", "right"), (900., "turn", "left")], v=3., turns_at=None, seconds=80.)
   edges = rising_edges(trace, Desire.turnRight)
   assert len(edges) == 4 and 0. < edges[-1][1] < ENTRY_M  # every REPULSE_S on the approach, and one at the entry

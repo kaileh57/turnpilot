@@ -160,8 +160,8 @@ with their reasons, desire pulses and lane changes.
 
 Results on 2026-10-27, big model on the chestnut, 20 camera pairs a second, set speed 40 km/h:
 
-- The model forgets a desire pulse about 5 s after it, the length of its desire history: `desireState` falls back
-  5 s after the pulse, and the planned turn goes with it. Gate 1's 40 m lead at 25 km/h fits inside that window. A
+- The model forgets a desire pulse when it leaves its desire history, 132 frames (6.6 s at 20 Hz) after it (first
+  read here as about 5 s): `desireState` falls back then, and the planned turn goes with it. Gate 1's 40 m lead at 25 km/h fits inside that window. A
   car slowed for a junction does not: at g62 the model planned the left, dropped it 10 m out and went straight,
   and a late retry pulse brought the plan back at once. So turnpilotd now pulses on the approach every 3.5 s and
   once more 10 m out, holds the car at 25 km/h until the first pulse, and slows it to 4.3 m/s by 15 m out.
@@ -185,6 +185,36 @@ Results on 2026-10-27, big model on the chestnut, 20 camera pairs a second, set 
   at 1: 12.8 to 14.0), so the cost is the third camera's existence, not its frame rate. The first turn of `short2`
   failed at that rate, and the demo run was recorded without the chase capture.
 - Per-run stats are in `~/turnpilot-artifacts/phase2/h2/*_stats.json` and `stats_table.txt`.
+
+Later on 2026-10-27 (H3), same setup, 19.2-20.0 model runs a second in every run:
+
+- The big model keeps the rising edges of its last 132 frames in a state tensor, `state_desire_q` (132, 1, 8), a
+  shift register max-pooled in groups of 4 (the small model: 100). In H1/H2's rlogs, wherever the car had not
+  turned, `desireState` fell under 0.5 125-134 model frames after a lone pulse.
+- A pulse still in that queue at the end of a turn turns the car on. town15b's leg-2 "left" at (-539, 157) is a
+  52-60 degree turn by the route geometry: the car reached the exit heading at about 46 degrees, kept turning while
+  the 10 m entry pulse was queued, and stopped against the curb at 122-126 degrees in H2's runs 2 and 3.
+  turnpilotd now sends desire 255 (`hooks.CLEAR_DESIRE`) once a turn is done (navd past the junction and 45 degrees
+  turned, or the nominal angle less 10), and modeld zeroes the turn columns of `state_desire_q`. At that left the
+  clear went out at 42-50 degrees and the car peaked at 50-55 degrees, 8 runs of 8. At the 90-degree turns it went
+  out at 46-83 degrees and the car ended at 85-97, except at short2's last right (below).
+- `town15b2` (town15b's first leg and its second up to just past that left, 7 turns, 0.9 km): arrived with no
+  disengagement, gas tap or hold in 3 of 3 runs, and in 1 of 3 recorded with the UI (one gas tap at the leg-2 right
+  at (-706, 115); one stuck there). At that right the model sees a lead at 6.5-8.6 m (prob 0.76-0.91) partway round
+  and stops: 2 of 6 runs today, 2 of 5 in H2's.
+- `town15b` itself stops at the fork DR272_7 (-486, 159), 55 m past that left: the route goes on at 108 degrees
+  between roads at 82 and 130, with no maneuver. The model took 130 with no desire (3 runs of 3) and 82 with a
+  keepLeft held from 20 m (2 of 2, reverted), so no keep desire fixes it. `fork272` starts just before it.
+  Screening the rest of town15b: the model stops and won't go on at (-167 to -180, -2 to 8) on leg 3, misses the
+  sharp right at (-539, 157) from the east on leg 4, and takes leg 2's last two turns and leg 4's last.
+- `short2`: 3 of 4 clean; the fourth turned the last right on to 127 degrees into the curb after a late start
+  (51 degrees turned at the maneuver point), with the clear at 81 degrees. Gate 1 at group_46_47_48_49, 40 m:
+  left 3 of 4, right 2 of 2.
+- `control.py` now drops its wound-up speed reference when the car accelerates 1.5 m/s^2 past the request: out of
+  a tight turn the ETK 800 surged at 4.5-4.8 m/s^2 on a 1.0 request, and openpilot latched excessiveActuation.
+- route_drive's JSON has `poses` per run: wall-clock and run time, position and BeamNG's rotation quaternion at
+  20 Hz (`pose_fields`), from the IMU pose, which trails the game by 150-210 ms. Per-run stats are in
+  `~/turnpilot-artifacts/phase3/h3/*_stats.json` and `stats_table.txt`.
 
 ## Scenario hooks
 
