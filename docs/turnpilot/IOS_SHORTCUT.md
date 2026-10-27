@@ -8,7 +8,7 @@ The steps follow the Shortcuts app on iOS 18. Nobody has tried them on a phone y
 
 1. Join the comma to your iPhone's Personal Hotspot, and keep the phone on that hotspot while you set this up.
 2. Scan the QR code on the comma screen with the phone camera and open the link in Safari. The page shows the TurnPilot status panel. The link ends in `?t=` and a token, which is the password for the comma. Anyone on the hotspot who has the token can set the destination, so don't share it.
-3. Optional: to add the app to the home screen, tap Share in Safari, then Add to Home Screen, while the address still ends in `?t=...`. The home-screen app doesn't share cookies with Safari, so the saved address is what pairs it. If you opened the page without the token, scan the QR code again.
+3. Optional: to add the app to the home screen, tap Share in Safari, then Add to Home Screen, while the address still ends in `?t=...`. The home-screen app doesn't share cookies or storage with Safari, so its first launch has to open the link with the token. After that the app keeps the token on the phone, and a launch without `?t=` still works.
 4. On the phone app, open Shortcut setup at the bottom of the page. It shows the URL and the token for this comma. Keep the page open, because you copy both values below.
 
 ## Build the shortcut
@@ -71,6 +71,7 @@ curl -X POST http://172.20.10.2:8088/api/destination \
 ## Troubleshooting
 
 - The shortcut says it can't connect. The phone and the comma must be on the same hotspot. The comma's address can change after it reconnects, so copy the URL from Shortcut setup again and update the action.
+- The page says Not paired. The page itself opens without the token, but the comma refused the one the phone has, or the phone has none. Scan the QR code on the comma screen again and open the link. A token you replaced over SSH does this to every phone.
 - The reply is 401 unauthorized. The header must read `Bearer ` followed by the token with nothing else. Copy the token again from Shortcut setup.
 - The reply is 415. The request body must be JSON. In the Get Contents of URL action, set Request Body to JSON rather than Form or File.
 - The reply is 404 or 400. The link had no coordinates and the search found no match, or the text wasn't a maps link. Check the reply text, which says which.

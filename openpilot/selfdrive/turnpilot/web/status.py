@@ -5,7 +5,8 @@ import time
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.navigation.helpers import latest_gps_source
 
-SERVICES = ["deviceState", "navInstruction", "navRoute", "turnpilotPlan", "gpsLocation", "gpsLocationExternal"]
+SERVICES = ["deviceState", "navInstruction", "turnpilotPlan", "gpsLocation", "gpsLocationExternal"]
+SNAPSHOT_PERIOD = 0.5  # s between snapshots; the page polls every 2 s, so 2 Hz is plenty
 SERVICE_TIMEOUT = 3.  # s since a service last published before it counts as not running
 STALE_AFTER = 5.  # s without a new snapshot means the reader thread is stuck or dead
 
@@ -28,8 +29,7 @@ def read_services(sm) -> dict:
   route = None
   if up("navInstruction") and sm.valid["navInstruction"]:
     route = {"text": ni.maneuverPrimaryText, "type": ni.maneuverType, "modifier": ni.maneuverModifier,
-             "maneuver_m": ni.maneuverDistance, "remaining_m": ni.distanceRemaining, "remaining_s": ni.timeRemaining,
-             "points": len(sm["navRoute"].coordinates) if sm.seen["navRoute"] else 0}
+             "maneuver_m": ni.maneuverDistance, "remaining_m": ni.distanceRemaining, "remaining_s": ni.timeRemaining}
   source = latest_gps_source(sm)
   return {
     "at": time.monotonic(),
@@ -66,6 +66,15 @@ def maneuver_text(kind: str, modifier: str, road: str) -> str:
   return f"{words} onto {road}" if words and road else words or road
 
 
+def offline_reason(fresh: bool, onroad: bool, enabled: bool) -> str:
+  """Why there is no plan from turnpilotd. It only runs onroad, and publishes while enabled."""
+  if not fresh:  # the snapshot is a placeholder, so onroad says nothing
+    return "car data is not available"
+  if not enabled:
+    return "TurnPilot is off"
+  return "turnpilotd is not running" if onroad else "car is off"
+
+
 def format_status(snap: dict | None, destination, enabled: bool, metric: bool, now: float | None = None) -> dict:
   """The /api/status body. snap comes from read_services, destination from Store.destination."""
   now = time.monotonic() if now is None else now
@@ -91,7 +100,7 @@ def format_status(snap: dict | None, destination, enabled: bool, metric: bool, n
       "enabled": enabled,
       "state": plan["state"] if plan else "offline",
       "label": STATE_LABELS.get(plan["state"], plan["state"]) if plan else STATE_LABELS["offline"],
-      "reason": plan["reason"] if plan else "turnpilotd is not running",
+      "reason": plan["reason"] if plan else offline_reason(fresh, snap["onroad"], enabled),
       "shadow": plan["shadow"] if plan else False,
     },
     "gps": snap["gps"] and {"latitude": snap["gps"][0], "longitude": snap["gps"][1]},
@@ -120,7 +129,7 @@ class StatusReader(threading.Thread):
           # imported here so a missing messaging build leaves the search and destination working
           from openpilot.cereal import messaging
           sm = messaging.SubMaster(SERVICES)
-        sm.update(500)
+        sm.update(0)  # the sockets conflate, so this takes the newest message of each service
         snap = read_services(sm)
         with self.lock:
           self.snapshot = snap
@@ -130,3 +139,4 @@ class StatusReader(threading.Thread):
           logged = True
         sm = None
         self.stopped.wait(5)
+      self.stopped.wait(SNAPSHOT_PERIOD)

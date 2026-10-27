@@ -1,6 +1,8 @@
 """Place search (Photon, then Nominatim) and Apple Maps share links."""
 import json
 import re
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -13,6 +15,7 @@ NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 TIMEOUT = 8
 LIMIT = 8
 APPLE_HOST = "maps.apple.com"
+APPLE_TIMEOUT = 4  # s in all for a short link, redirects included; the Shortcut is waiting and a search may follow
 
 
 def fetch(url: str, timeout: float = TIMEOUT, limit: int = 1 << 20) -> tuple[str, bytes]:
@@ -24,6 +27,38 @@ def fetch(url: str, timeout: float = TIMEOUT, limit: int = 1 << 20) -> tuple[str
 
 def fetch_json(url: str):
   return json.loads(fetch(url)[1])
+
+
+class _AppleRedirects(urllib.request.HTTPRedirectHandler):
+  """Follows a redirect only to maps.apple.com, and only before the deadline."""
+  max_redirections = 3
+
+  def __init__(self, deadline: float):
+    self.deadline = deadline
+
+  def redirect_request(self, req, fp, code, msg, headers, newurl):
+    left = self.deadline - time.monotonic()
+    if urllib.parse.urlsplit(newurl).hostname != APPLE_HOST or left <= 0:
+      raise urllib.error.URLError("refusing a redirect off maps.apple.com or past the deadline")
+    req.timeout = left  # the opener reads this off the old request when it follows
+    return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def fetch_apple(url: str, total: float = APPLE_TIMEOUT, limit: int = 1 << 20) -> tuple[str, bytes]:
+  """fetch for a maps.apple.com link, which never leaves that host and gives up after total seconds. The caller checks url's host."""
+  deadline = time.monotonic() + total
+  opener = urllib.request.build_opener(_AppleRedirects(deadline))
+  req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html"})
+  with opener.open(req, timeout=total) as resp:
+    body = b""
+    while len(body) < limit:
+      if time.monotonic() > deadline:
+        raise TimeoutError("apple maps link took too long")
+      chunk = resp.read1(min(1 << 16, limit - len(body)))  # read() would wait for a full chunk, and the deadline with it
+      if not chunk:
+        break
+      body += chunk
+    return resp.geturl(), body
 
 
 def _join(*parts):
@@ -122,7 +157,7 @@ def parse_apple_maps(url: str) -> dict | None:
   return {"query": query, "name": name} if query else None
 
 
-def resolve_apple_maps(url: str, get=fetch) -> dict | None:
+def resolve_apple_maps(url: str, get=fetch_apple) -> dict | None:
   """parse_apple_maps, following a short link (maps.apple.com/p/...) first, since it has no query string."""
   place = parse_apple_maps(url)
   u = urllib.parse.urlsplit(url.strip())
