@@ -1,5 +1,6 @@
 """Valhalla as a route source: pyvalhalla in this process when it imports, else a local valhalla_service."""
 import importlib
+import math
 import os
 import sys
 from pathlib import Path
@@ -86,7 +87,7 @@ class ValhallaSource:
   def request(self, start, destination, bearing, language) -> dict:
     """Valhalla's /route request for what navd gives Mapbox, with the bearing as the start's heading."""
     origin = {'lon': start[0], 'lat': start[1]}
-    if bearing is not None:
+    if bearing is not None and math.isfinite(bearing):  # a GPS fix without a heading can report NaN
       origin.update(heading=round(bearing) % 360, heading_tolerance=HEADING_TOLERANCE)
     request = {
       'locations': [origin, {'lon': destination[0], 'lat': destination[1]}],

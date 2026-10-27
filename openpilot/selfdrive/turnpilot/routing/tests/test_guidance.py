@@ -3,8 +3,8 @@ import unittest
 from pathlib import Path
 
 import openpilot.cereal.messaging as messaging
-from openpilot.selfdrive.turnpilot.routing.guidance import (approach_lanes, banner_lanes, fill_guidance, intersection_lanes,
-                                                            to_direction, upcoming_maneuvers)
+from openpilot.selfdrive.turnpilot.routing.guidance import (MAX_MANEUVERS, approach_lanes, banner_lanes, fill_guidance,
+                                                            intersection_lanes, to_direction, upcoming_maneuvers)
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 
@@ -70,6 +70,16 @@ class TestGuidance(unittest.TestCase):
     self.assertEqual([m['distance'] for m in maneuvers], [500, 500 + 445.0, 500 + 445.0 + 257.0])
     self.assertEqual([m['type'] for m in upcoming_maneuvers(steps, 2, 30)], ['arrive'])
     self.assertEqual(upcoming_maneuvers(steps, 3, 0), [])
+
+  def test_maneuvers_are_capped(self):
+    steps = [{'distance': 100, 'maneuver': {'type': 'turn', 'modifier': 'left'}} for _ in range(40)]
+    maneuvers = upcoming_maneuvers(steps, 5, 30)
+    self.assertEqual(len(maneuvers), MAX_MANEUVERS)
+    self.assertEqual([m['distance'] for m in maneuvers], [30 + 100 * i for i in range(MAX_MANEUVERS)])  # the nearest ones
+    self.assertEqual(len(upcoming_maneuvers(steps, 35, 30)), 4)
+    instruction = messaging.new_message('navInstruction').navInstruction
+    fill_guidance(instruction, steps, 0, 30)
+    self.assertEqual(len(instruction.allManeuvers), MAX_MANEUVERS)
 
   def test_fill_navinstruction(self):
     steps = steps_of('valhalla_left_then_right.json')

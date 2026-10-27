@@ -9,9 +9,9 @@ from unittest.mock import MagicMock, patch
 import requests
 
 from openpilot.selfdrive.navigation.navd import RouteEngine
-from openpilot.selfdrive.turnpilot.routing import valhalla
-from openpilot.selfdrive.turnpilot.routing.sources import MapboxSource, RouteSources, select_source
-from openpilot.selfdrive.turnpilot.routing.valhalla import ValhallaSource, locate, tiles_usable
+from openpilot.selfdrive.turnpilot.routing import valhalla_source
+from openpilot.selfdrive.turnpilot.routing.sources import FallbackSource, MapboxSource, RouteSources, select_source
+from openpilot.selfdrive.turnpilot.routing.valhalla_source import ValhallaSource, locate, tiles_usable
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 RESPONSE = json.loads((FIXTURES / 'valhalla_left_then_right.json').read_text())
@@ -92,21 +92,65 @@ class TestSelection(unittest.TestCase):
     values = {}
     self.assertIs(sources.get(params_of(values)), mapbox)
     values['TurnPilotValhallaTiles'] = str(self.tiles)
-    with patch.object(valhalla, 'import_valhalla', fake_valhalla):
-      source = sources.get(params_of(values))
+    with patch.object(valhalla_source, 'import_valhalla', fake_valhalla):
+      auto = sources.get(params_of(values))
+      self.assertIsInstance(auto, FallbackSource)  # auto falls back to Mapbox when Valhalla can't route
+      source = auto.valhalla
       self.assertIsInstance(source, ValhallaSource)
+      self.assertIs(auto.mapbox, mapbox)
       self.assertEqual(source.actor.config, {'tile_extract': str(self.tiles / 'tiles.tar'), 'tile_dir': str(self.tiles / 'tiles')})
-      self.assertIs(sources.get(params_of(values)), source)  # the actor is kept between requests
+      self.assertIs(sources.get(params_of(values)), auto)  # the actor is kept between requests
+      values['TurnPilotRouteSource'] = 'valhalla'
+      self.assertIs(sources.get(params_of(values)), source)  # asked for by name, so no fallback
       values['TurnPilotRouteSource'] = 'mapbox'
       self.assertIs(sources.get(params_of(values)), mapbox)
       values['TurnPilotRouteSource'] = 'auto'
-      self.assertIs(sources.get(params_of(values)), source)
+      self.assertIs(sources.get(params_of(values)), auto)
       values['TurnPilotValhallaTiles'] = 'http://127.0.0.1:9000'  # new tiles, new source
-      self.assertIsNot(sources.get(params_of(values)), source)
+      self.assertIsNot(sources.get(params_of(values)).valhalla, source)
       values['TurnPilotRouteSource'] = 'valhalla'
       values['TurnPilotValhallaTiles'] = str(self.tiles / 'missing')
       with self.assertRaises(FileNotFoundError):
         sources.get(params_of(values))
+
+  def test_auto_uses_mapbox_for_tiles_that_do_not_load(self):
+    mapbox = MapboxSource('https://example.test', 'token', None)
+    values = {'TurnPilotValhallaTiles': str(self.tiles)}
+    broken = MagicMock(Actor=MagicMock(side_effect=RuntimeError('bad tiles')), get_config=lambda **kwargs: kwargs)
+    with patch.object(valhalla_source, 'import_valhalla', return_value=broken):
+      self.assertIs(RouteSources(mapbox).get(params_of(values)), mapbox)
+      values['TurnPilotRouteSource'] = 'valhalla'
+      with self.assertRaises(RuntimeError):
+        RouteSources(mapbox).get(params_of(values))
+
+
+class TestFallback(unittest.TestCase):
+  def sources(self, valhalla_result):
+    valhalla, mapbox = MagicMock(), MagicMock()
+    mapbox.route.return_value = STEPS
+    if isinstance(valhalla_result, Exception):
+      valhalla.route.side_effect = valhalla_result
+    else:
+      valhalla.route.return_value = valhalla_result
+    return FallbackSource(valhalla, mapbox), valhalla, mapbox
+
+  def test_valhalla_first(self):
+    source, valhalla, mapbox = self.sources([{'distance': 1}])
+    self.assertEqual(source.route(START, DESTINATION, 90, 'en'), [{'distance': 1}])
+    self.assertEqual(valhalla.route.call_args.args, (START, DESTINATION, 90, 'en'))
+    mapbox.route.assert_not_called()
+
+  def test_mapbox_when_valhalla_cannot_route(self):
+    for result in ([], RuntimeError('No path could be found for input'), requests.ConnectionError('valhalla_service is not running')):
+      source, _, mapbox = self.sources(result)
+      self.assertEqual(source.route(START, DESTINATION, 90, 'en'), STEPS, result)
+      self.assertEqual(mapbox.route.call_args.args, (START, DESTINATION, 90, 'en'))
+
+  def test_mapbox_failure_is_not_hidden(self):
+    source, _, mapbox = self.sources([])
+    mapbox.route.side_effect = requests.ConnectionError('offline')
+    with self.assertRaises(requests.ConnectionError):
+      source.route(START, DESTINATION, None, None)
 
 
 class TestMapbox(unittest.TestCase):
@@ -128,6 +172,9 @@ class TestMapbox(unittest.TestCase):
       self.assertEqual(MapboxSource('https://api.mapbox.com', 'mapbox-token', None).route(START, DESTINATION, None, None), [])
     self.assertNotIn('bearings', get.call_args.kwargs['params'])
     self.assertEqual(get.call_args.kwargs['params']['access_token'], 'mapbox-token')
+    with patch('requests.get', return_value=self.response([])) as get:  # a fix without a heading can report NaN
+      MapboxSource('https://api.mapbox.com', 'mapbox-token', None).route(START, DESTINATION, float('nan'), None)
+    self.assertNotIn('bearings', get.call_args.kwargs['params'])
 
   def test_failure(self):
     response = self.response([])
@@ -138,7 +185,7 @@ class TestMapbox(unittest.TestCase):
 
 class TestValhalla(unittest.TestCase):
   def test_request(self):
-    with patch.object(valhalla, 'import_valhalla', fake_valhalla), tempfile.TemporaryDirectory() as tiles:
+    with patch.object(valhalla_source, 'import_valhalla', fake_valhalla), tempfile.TemporaryDirectory() as tiles:
       (Path(tiles) / 'tiles').mkdir()
       source = ValhallaSource(tiles)
       self.assertEqual(source.route(START, DESTINATION, 92.4, 'en'), STEPS)
@@ -150,10 +197,12 @@ class TestValhalla(unittest.TestCase):
     self.assertEqual(request['locations'][0]['heading'], 0)
     self.assertNotIn('language', request)
     self.assertNotIn('heading', source.request(START, DESTINATION, None, None)['locations'][0])
+    for bearing in (float('nan'), float('inf')):
+      self.assertNotIn('heading', source.request(START, DESTINATION, bearing, None)['locations'][0])
     self.assertEqual(source.request(START, DESTINATION, 300.2, None)['locations'][0]['heading'], 300)
 
   def test_config_file(self):
-    with patch.object(valhalla, 'import_valhalla', fake_valhalla), tempfile.TemporaryDirectory() as directory:
+    with patch.object(valhalla_source, 'import_valhalla', fake_valhalla), tempfile.TemporaryDirectory() as directory:
       config = Path(directory) / 'valhalla.json'
       config.write_text('{}')
       self.assertEqual(ValhallaSource(str(config)).actor.config, str(config))
@@ -161,7 +210,7 @@ class TestValhalla(unittest.TestCase):
   def test_http_fallback(self):
     response = MagicMock(status_code=200)
     response.json.return_value = RESPONSE
-    with patch.object(valhalla, 'import_valhalla', return_value=None), patch('requests.post', return_value=response) as post:
+    with patch.object(valhalla_source, 'import_valhalla', return_value=None), patch('requests.post', return_value=response) as post:
       source = ValhallaSource('http://localhost:8002/')
       self.assertEqual(source.route(START, DESTINATION, None, None), STEPS)
       self.assertEqual(post.call_args.args[0], 'http://localhost:8002/route')
@@ -186,14 +235,14 @@ class TestValhalla(unittest.TestCase):
     marker = object()
     with tempfile.TemporaryDirectory() as device, patch.dict('os.environ', {'TURNPILOT_PYVALHALLA': device}):
       with patch('importlib.import_module', side_effect=[ImportError, marker]), patch.object(sys, 'path', list(sys.path)):
-        self.assertIs(valhalla.import_valhalla(), marker)
+        self.assertIs(valhalla_source.import_valhalla(), marker)
         self.assertEqual(sys.path[-1], device)
       with patch('importlib.import_module', side_effect=ImportError), patch.object(sys, 'path', list(sys.path)):
-        self.assertIsNone(valhalla.import_valhalla())  # an install that doesn't import
+        self.assertIsNone(valhalla_source.import_valhalla())  # an install that doesn't import
     with patch.dict('os.environ', {'TURNPILOT_PYVALHALLA': '/nonexistent/pyvalhalla'}), patch('importlib.import_module', side_effect=ImportError):
-      self.assertIsNone(valhalla.import_valhalla())
+      self.assertIsNone(valhalla_source.import_valhalla())
     with patch('importlib.import_module', return_value=marker), patch.object(sys, 'path', list(sys.path)) as path:
-      self.assertIs(valhalla.import_valhalla(), marker)  # a system install wins and the path is left alone
+      self.assertIs(valhalla_source.import_valhalla(), marker)  # a system install wins and the path is left alone
       self.assertEqual(path, sys.path)
 
 

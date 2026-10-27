@@ -7,6 +7,8 @@ what Mapbox shows) and the intersection fills in the rest. A lane is active if i
 and activeDirection is the direction it takes from there.
 """
 
+MAX_MANEUVERS = 10  # allManeuvers is for the planner's lookahead; a long route would otherwise send every step each second
+
 
 def to_direction(indication) -> str:
   """An OSRM lane indication as a NavInstruction.Direction. Sharp turns count as turns, and u-turns as none."""
@@ -50,10 +52,10 @@ def approach_lanes(steps, step_idx, distance_to_maneuver) -> list[dict]:
 
 
 def upcoming_maneuvers(steps, step_idx, distance_to_maneuver) -> list[dict]:
-  """Every maneuver still ahead, with its distance from the ego: the one that ends the current step first."""
+  """The next MAX_MANEUVERS maneuvers ahead, with their distance from the ego: the one that ends the current step first."""
   maneuvers = []
   distance = distance_to_maneuver
-  for ahead in steps[step_idx + 1:]:
+  for ahead in steps[step_idx + 1:step_idx + 1 + MAX_MANEUVERS]:
     maneuver = ahead.get('maneuver') or {}
     maneuvers.append({'distance': distance, 'type': maneuver.get('type') or '', 'modifier': maneuver.get('modifier') or ''})
     distance += ahead['distance']
