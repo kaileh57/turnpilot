@@ -98,7 +98,7 @@ class RouteDrive:
     self.engaged_once, self.enabled_prev, self.dis_t, self.still_t = False, False, None, 0.0
     self.dist, self.last_xy, self.rem_min = 0.0, None, float('inf')
     self.nav_lost_t = None
-    self.confirmations, self.stand_t, self.tap_t = [], 0.0, None
+    self.confirmations, self.stand_t, self.tap_t, self.stuck_ref = [], 0.0, None, None
     print(f"route_drive run {self.run + 1}/{self.runs}: {self.route.name} ({self.route.maneuvers})", flush=True)
     return True
 
@@ -190,7 +190,10 @@ class RouteDrive:
         return
 
     holding = str(plan.state) == 'holding'
-    self.still_t = self.still_t + 0.01 if s.wheel_speed < 0.3 and not holding else 0.0
+    # stuck: not 5 m from where it was STUCK_S ago, unless TurnPilot holds it (gas taps at a wall don't count as going)
+    if self.stuck_ref is None or holding or float(np.linalg.norm(xy - self.stuck_ref[1])) > 5.0:
+      self.stuck_ref = (t, xy)
+    self.still_t = t - self.stuck_ref[0]
     # the driver confirms a stop the model made on its own (a stop sign): a gas tap, an override, not a disengagement
     self.stand_t = self.stand_t + 0.01 if enabled and s.wheel_speed < 0.3 and not holding else 0.0
     if self.tap_t is not None and t - self.tap_t > CONFIRM_TAP_S:
@@ -200,7 +203,7 @@ class RouteDrive:
       self.confirmations.append({"t": round(t, 1), "x": round(float(xy[0]), 1), "y": round(float(xy[1]), 1), "leg": self.leg + 1})
       print(f"route_drive: driver confirms a stop at ({xy[0]:.0f}, {xy[1]:.0f}) with the gas", flush=True)
     timeout = SETTLE + ROUTE_TIMEOUT + 60.0 + route_length(self.route) / MIN_SPEED
-    stuck_s = 20.0 if self.screen else STUCK_S
+    stuck_s = 25.0 if self.screen else STUCK_S
     if self.still_t > stuck_s or t > timeout:
       self.end_run(b, "stuck" if self.still_t > stuck_s else "timeout")
 
