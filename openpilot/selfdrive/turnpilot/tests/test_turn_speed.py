@@ -34,6 +34,16 @@ def test_which_maneuvers_are_capped():
          turn_speed_cap(maneuver("turn", "slight right"), 0., 4.)
 
 
+def test_no_cap_where_the_highway_bends():
+  # "continue slight right" at 30 m/s braked the car at 2 m/s^2 toward 6.9 m/s from 300 m out
+  for mtype, modifier in (("continue", "slight right"), ("new name", "slight left"), ("turn", "slight right")):
+    for d in (300., 100., 20., 0.):
+      assert turn_speed_cap(maneuver(mtype, modifier), d, 30.) == NO_SPEED_CAP, (mtype, modifier, d)
+  # a slight turn in town is still capped, and a junction turn is capped at any speed
+  assert turn_speed_cap(maneuver("turn", "slight right"), 20., 14.) < 10.
+  assert turn_speed_cap(maneuver("turn", "right"), 100., 30.) < 15.
+
+
 def test_braking_curve():
   m = maneuver("turn", "right")
   assert math.isclose(turn_speed_cap(m, 100. + TURN_DESIRE_LEAD_M, 0.), math.sqrt(V_TURN_MIN ** 2 + 2 * 1.5 * 100.))

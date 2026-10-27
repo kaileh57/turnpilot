@@ -8,6 +8,10 @@ def test_classify():
   assert classify("end of road", "sharp right") == (TURN, RIGHT)
   assert classify("on ramp", "right") == (TURN, RIGHT)
   assert classify("turn", "slight right") == (KEEP, RIGHT)
+  # the road bending: no keep desire, which at highway speed swerves the car
+  assert classify("continue", "slight right") == (NONE, 0)
+  assert classify("new name", "slight left") == (NONE, 0)
+  assert classify("continue", "left") == (TURN, LEFT)
   assert classify("off ramp", "right") == (KEEP, RIGHT)
   assert classify("fork", "left") == (KEEP, LEFT)
   assert classify("turn", "uturn") == (UTURN, 0)

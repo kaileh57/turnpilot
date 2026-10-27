@@ -19,6 +19,8 @@ NONE = "none"
 TURN_MODIFIERS = {"left": LEFT, "sharp left": LEFT, "right": RIGHT, "sharp right": RIGHT}
 SLIGHT_MODIFIERS = {"slight left": LEFT, "slight right": RIGHT}
 KEEP_TYPES = ("fork", "off ramp")  # a keep whatever the modifier says: their branches part gently
+# with a slight modifier, nothing: the road itself bends that way. A keep desire there swerves the car, at highway speed
+CONTINUE_TYPES = ("continue", "new name")
 RAMP_TYPES = ("fork", "off ramp", "on ramp", "merge")
 NO_ACTION_TYPES = ("depart", "notification", "merge", "roundabout", "rotary", "roundabout turn",
                    "exit roundabout", "exit rotary")
@@ -56,6 +58,8 @@ def classify(mtype: str, modifier: str) -> tuple[str, int]:
     return NONE, 0
   if modifier == "uturn":
     return UTURN, 0
+  if mtype in CONTINUE_TYPES and modifier in SLIGHT_MODIFIERS:
+    return NONE, 0
   side = TURN_MODIFIERS.get(modifier) or SLIGHT_MODIFIERS.get(modifier, 0)
   if side == 0:
     return NONE, 0

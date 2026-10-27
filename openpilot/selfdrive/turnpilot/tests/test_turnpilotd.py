@@ -106,6 +106,14 @@ def test_consecutive_turns_drive():
   assert sim.s > 440.
 
 
+def test_highway_bends_are_left_alone():
+  # "continue slight right" and "new name slight left" at 30 m/s: no keep desire, no braking
+  sim = Sim([(400., "continue", "slight right"), (900., "new name", "slight left"), (5000., "turn", "right")], cruise=30.)
+  sim.run(40.)
+  assert sim.s > 1000. and min(v for _, v, _ in sim.trace) > 29.9
+  assert all(plan.desire == Desire.none and plan.speedCap == NO_SPEED_CAP for _, _, plan in sim.trace)
+
+
 def test_oncoming_car_holds_unprotected_left():
   spawn = {}
 
