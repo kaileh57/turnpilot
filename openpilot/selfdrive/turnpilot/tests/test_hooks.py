@@ -1,37 +1,55 @@
 """The upstream hunks: what modeld, DesireHelper and the longitudinal planner do with turnpilotPlan."""
+import time
+
 import numpy as np
 
 import openpilot.cereal.messaging as messaging
-from openpilot.cereal import log
+from openpilot.cereal import custom, log
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
 from openpilot.selfdrive.modeld.constants import ModelConstants
-from openpilot.selfdrive.turnpilot.hooks import CLEAR_DESIRE, active_plan, plan_desire
+from openpilot.selfdrive.turnpilot.hooks import CLEAR_DESIRE, PLAN_MAX_AGE_S, active_plan, plan_desire
 from openpilot.selfdrive.turnpilot.tests.synthetic import car_state
 
 LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
+State = custom.TurnpilotPlan.State
 
 
 class FakeSM(dict):
-  def __init__(self, msgs, alive=None):
+  """SubMaster's dicts, every message received just now and valid. alive stays true, as SubMaster keeps it in simulation."""
+  def __init__(self, msgs, valid=True, age=0.):
     super().__init__(msgs)
-    self.alive = dict.fromkeys(msgs, True) | (alive or {})
+    self.alive = dict.fromkeys(msgs, True)
+    self.valid = dict.fromkeys(msgs, valid)
+    self.recv_time = dict.fromkeys(msgs, time.monotonic() - age)
 
 
-def turnpilot_plan(shadow, desire=log.Desire.turnLeft, lane_change='left', accel_cap=-3., speed_cap=2., should_stop=True):
+def turnpilot_plan(shadow, desire=log.Desire.turnLeft, lane_change='left', accel_cap=-3., speed_cap=2., should_stop=True,
+                   state=State.turning):
   msg = messaging.new_message('turnpilotPlan')
   p = msg.turnpilotPlan
   p.desire, p.laneChange, p.accelCap, p.speedCap, p.shouldStop, p.shadow = desire, lane_change, accel_cap, speed_cap, should_stop, shadow
+  p.state = state
   return msg.as_reader().turnpilotPlan
 
 
 def test_active_plan():
   assert active_plan(FakeSM({'turnpilotPlan': turnpilot_plan(False)})) is not None
   assert active_plan(FakeSM({'turnpilotPlan': turnpilot_plan(True)})) is None
-  assert active_plan(FakeSM({'turnpilotPlan': turnpilot_plan(False)}, alive={'turnpilotPlan': False})) is None
   assert active_plan({'turnpilotPlan': turnpilot_plan(False)}) is None  # the maneuver tests' plain dict
+
+
+def test_active_plan_needs_a_fresh_valid_enabled_plan():
+  # alive is true throughout, as it stays in simulation once seen: freshness is by receive time alone
+  assert active_plan(FakeSM({'turnpilotPlan': turnpilot_plan(False)}, age=PLAN_MAX_AGE_S + 0.1)) is None
+  assert active_plan(FakeSM({'turnpilotPlan': turnpilot_plan(False)}, age=PLAN_MAX_AGE_S - 0.1)) is not None
+  sm = FakeSM({'turnpilotPlan': turnpilot_plan(False)})
+  assert active_plan(sm, now=sm.recv_time['turnpilotPlan'] + 60.) is None
+  assert active_plan(FakeSM({'turnpilotPlan': turnpilot_plan(False)}, valid=False)) is None
+  assert active_plan(FakeSM({'turnpilotPlan': turnpilot_plan(False, state=State.disabled)})) is None
+  assert active_plan(messaging.SubMaster(['turnpilotPlan'])) is None  # a real SubMaster that never got one
 
 
 def modeld_inputs(sm, dh_desire=log.Desire.none):
@@ -103,7 +121,7 @@ def test_nav_lane_change_keeps_blindspot_and_speed_checks():
   assert dh.lane_change_state == LaneChangeState.off
 
 
-def planner_sm(v=15., plan=None):
+def planner_sm(v=15., plan=None, age=0.):
   msgs = {s: messaging.new_message(s) for s in ('radarState', 'controlsState', 'selfdriveState', 'carState', 'modelV2')}
   msgs['controlsState'].controlsState.longControlState = LongCtrlState.pid
   msgs['carState'].carState.vEgo = v
@@ -112,20 +130,18 @@ def planner_sm(v=15., plan=None):
   model.action.desiredAcceleration = 0.5
   for field in ('velocity', 'acceleration', 'position'):
     getattr(model, field).x = [float(v)] * ModelConstants.IDX_N
-  sm = FakeSM({s: m.as_reader().__getattr__(s) for s, m in msgs.items()})
   if plan is not None:
-    sm['turnpilotPlan'] = plan
-    sm.alive['turnpilotPlan'] = True
-  return sm
+    msgs['turnpilotPlan'] = plan
+  return FakeSM({s: m if s == 'turnpilotPlan' else m.as_reader().__getattr__(s) for s, m in msgs.items()}, age=age)
 
 
-def run_planner(plan):
+def run_planner(plan, age=0.):
   from opendbc.car.honda.interface import CarInterface
   from opendbc.car.honda.values import CAR
   lp = LongitudinalPlanner(CarInterface.get_non_essential_params(CAR.HONDA_CIVIC), init_v=15.)
   out = []
   for _ in range(20):
-    lp.update(planner_sm(plan=plan))
+    lp.update(planner_sm(plan=plan, age=age))
     out.append((float(lp.output_a_target), lp.output_should_stop))
   return out
 
@@ -138,3 +154,9 @@ def test_shadow_never_changes_planner_output():
   assert all(stop for _, stop in active) and not any(stop for _, stop in baseline)
   # an active plan with no caps changes nothing either
   assert np.allclose(run_planner(turnpilot_plan(shadow=False, accel_cap=10., speed_cap=100., should_stop=False)), baseline)
+
+
+def test_stale_or_disabled_plan_never_changes_planner_output():
+  baseline = run_planner(None)
+  assert run_planner(turnpilot_plan(shadow=False), age=PLAN_MAX_AGE_S + 0.1) == baseline
+  assert run_planner(turnpilot_plan(shadow=False, state=State.disabled)) == baseline
