@@ -128,8 +128,10 @@ moves the mannequin sideways onto the car's own line at 90 m, beyond the detecto
 `route_drive.py` drives a route from `routes.py` with the whole stack: navd routing on Valhalla tiles built from the
 road-graph export, turnpilotd, the detector in modeld and turnpilot_web. The bridge plays the driver. It sets each
 leg's destination through turnpilot_web's `/api/destination`, as the phone app does, pulls away and engages, and
-signals when turnpilotd prompts for a nav lane change (`driver.py`; the Tesla port can't signal). It engages again
-after a disengagement and logs the events behind it, and it brakes at the destination. One bridge session runs
+signals when turnpilotd prompts for a nav lane change (`driver.py`; the Tesla port can't signal). The model stops on
+its own at stop signs, and now and then where nothing is in the road, and waits; after 4 s standing without a
+TurnPilot hold the driver taps the gas, an override that keeps openpilot engaged, and each tap is logged. The driver
+engages again after a disengagement and logs the events behind it, and brakes at the destination. One bridge session runs
 `--runs` drives, and `route_stats.py` turns the session's rlogs into per-run stats. Start openpilot with these
 params set and nothing extra blocked: `NavigationEnabled`, `TurnPilotEnabled`, `TurnPilotRouteSource=valhalla`
 and `TurnPilotValhallaTiles=~/turnpilot_data/valhalla/west_coast_usa`.
