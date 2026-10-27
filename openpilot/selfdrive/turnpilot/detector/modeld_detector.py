@@ -15,8 +15,10 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.turnpilot.detector.decoder import decode, fill_detections
 from openpilot.selfdrive.turnpilot.detector.graph import detector_pkl_path, letterbox
 
-RUN_EVERY = 3              # at most every 3rd model frame (6.7 Hz)
-STEP_BUDGET_S = 0.045      # driving model + detector must finish within this of the 50 ms cycle
+# chestnut, 2026-10-27, yolo26n at 1344x760: big model 25-27 ms, detector 7.9 ms in modeld (5.9 ms alone). Every frame
+# fit with no drops; every 2nd keeps headroom for a slower host and in-stack load.
+RUN_EVERY = 2              # at most every 2nd model frame (10 Hz)
+STEP_BUDGET_S = 0.045      # driving model + detector must finish within this of the 50 ms cycle (the rest takes ~1 ms)
 WIDE_CURVATURE = 0.01      # 1/m (a 100 m radius): at or above this, look through the wide camera
 WIDE_HOLD_S = 2.0          # and keep looking through it this long after the turn ends
 TURN_DESIRES = (log.Desire.turnLeft, log.Desire.turnRight)

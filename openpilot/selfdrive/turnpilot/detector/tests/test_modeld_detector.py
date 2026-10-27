@@ -70,11 +70,11 @@ class TestModeldDetector(OpenpilotTestCase):
 
   def test_every_nth_frame_and_message(self):
     det, pm = make_detector(), PM()
-    for k in range(9):
+    for k in range(3 * RUN_EVERY):
       det.step(pm, det.model_state, 0.010, 0.0, log.Desire.none, [Meta(100 + k), Meta(200 + k)])
     assert len(pm.sent) == 3 and det.run.calls == ['frame0'] * 3
     td = pm.sent[-1]
-    assert str(td.camera) == 'road' and td.frameId == 106 and len(td.detections) == 1
+    assert str(td.camera) == 'road' and td.frameId == 100 + 2 * RUN_EVERY and len(td.detections) == 1
     np.testing.assert_allclose([td.detections[0].x0, td.detections[0].y1], [100, 400], atol=1e-3)
 
   def test_wide_uses_extra_frame(self):

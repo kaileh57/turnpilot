@@ -17,3 +17,4 @@ openpilot/common/hardware/comma/updater filter=lfs diff=lfs merge=lfs -text
 # TurnPilot files are plain git blobs, not LFS (the LFS endpoint is comma's read-only Hugging Face repo)
 openpilot/selfdrive/turnpilot/** -filter
 openpilot/selfdrive/turnpilot/**/*.onnx -diff -merge
+openpilot/selfdrive/turnpilot/**/*.pkl -text -diff -merge

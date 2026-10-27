@@ -34,7 +34,19 @@ def frame_views(frames: np.ndarray):
   return [Tensor(UOp.from_buffer(buf.view(size, 256 + i * size).ensure_allocated(), dtypes.uint8)) for i in range(len(frames))]
 
 
+def compile_context():
+  """The context modeld's own pkls are compiled in (tinygrad examples/openpilot/helpers.benchmark). Kernels are
+  optimized when the jit captures them, so outside it the detector misses the AMD tensor core opts."""
+  from tinygrad import Context, Device
+  return Context(OPENPILOT_HACKS=1, **{'AMD': {'TC_OPT': 2, 'TC_MIN_GLOBALS': 32}}.get(Device.DEFAULT, {}))
+
+
 def compile_one(cam_w: int, cam_h: int, model: str, out: Path, runs: int, retargetable: bool) -> None:
+  with compile_context():
+    _compile_one(cam_w, cam_h, model, out, runs, retargetable)
+
+
+def _compile_one(cam_w: int, cam_h: int, model: str, out: Path, runs: int, retargetable: bool) -> None:
   from tinygrad import Device, Tensor, TinyJit
   from tinygrad.engine.realize import lower_and_compile
   from tinygrad_repo.examples.openpilot.helpers import dump_pickle, load_pickle, make_retargetable
