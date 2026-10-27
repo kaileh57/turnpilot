@@ -12,7 +12,7 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.desire_timing import DesireTiming
 from openpilot.selfdrive.turnpilot.lane_planner import OPENPILOT_SIGNALS_BRANDS, LanePlanner, lane_change_window, model_lanes_from_msg
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, TURN, RouteFollower
-from openpilot.selfdrive.turnpilot.scene.tracker import SceneTracker
+from openpilot.selfdrive.turnpilot.scene.tracker import SceneTracker, default_yaw_rate
 from openpilot.selfdrive.turnpilot.scene_policy import NO_ACCEL_CAP, scene_policy
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, turn_speed_cap
 
@@ -53,7 +53,7 @@ class TurnPilot:
 
     lanes = model_lanes_from_msg(model)
     plan.desire = self.desires.update(maneuver, rf.distance, rf.maneuver_id, rf.passed, v_ego, cs.steeringAngleDeg,
-                                      lanes.keep_left_ok, lanes.keep_right_ok, DT_MDL)
+                                      lanes.keep_left_ok, lanes.keep_right_ok, DT_MDL, default_yaw_rate(cs, model))
     plan.laneChange, plan.signalPrompt, lane_reason = self.lanes.update(
       maneuver, rf.distance, lanes, model.meta.laneChangeState, v_ego, cs.leftBlinker, cs.rightBlinker, objects,
       driver_signals, right_hand_traffic, DT_MDL)

@@ -87,7 +87,7 @@ def test_left_turn_drive():
   sim.run(45., turn_at=300.)
   states = [str(plan.state) for _, _, plan in sim.trace]
   assert states[0] == 'following' and 'approaching' in states and 'turning' in states
-  assert 1 <= len(rising(sim.trace, 'desire', Desire.turnLeft)) <= 2
+  assert 1 <= len(rising(sim.trace, 'desire', Desire.turnLeft)) <= 4  # repeats until turned; this sim has no yaw rate
   at_desire = [v for s, v, _ in sim.trace if 300. - TURN_DESIRE_LEAD_M < s < 300.]  # gate 1's speed from the pulse on
   assert max(at_desire) < V_TURN_MIN + 0.3
   after = [plan for s, _, plan in sim.trace if s > 320.]
@@ -100,9 +100,9 @@ def test_consecutive_turns_drive():
   for _ in range(int(60. / DT_MDL)):
     near = [m for m in (300., 420.) if abs(sim.s - m) < 8.]
     sim.step(available=True, steer=90. if near else 0.)
-  # one pulse each, and one more where the slow approach takes longer than REPULSE_S
-  assert 1 <= len(rising(sim.trace, 'desire', Desire.turnRight)) <= 2
-  assert 1 <= len(rising(sim.trace, 'desire', Desire.turnLeft)) <= 2
+  # a pulse each, and more on the REPULSE_S clock while the car hasn't turned (this sim has no yaw rate)
+  assert 1 <= len(rising(sim.trace, 'desire', Desire.turnRight)) <= 4
+  assert 1 <= len(rising(sim.trace, 'desire', Desire.turnLeft)) <= 4
   assert sim.s > 440.
 
 

@@ -8,10 +8,13 @@ noise, and dropping the desire whenever it read past the lead again sent the mod
 A keep toward a side where the model sees no lane line drove the car off the road there, so it is dropped.
 The model forgets a pulse about 5 s after it (the length of its desire history): at junctions where the slow
 approach took longer than that, it planned the turn and then dropped it 10 m out, and a late retry pulse brought
-the turn back at once. So a turn desire is pulsed again every REPULSE_S until the car reaches the junction or is
-seen turning: a pulse after the turn was made turned the car a second time, into the curb. A repeat pulse is a
-short drop to none, long enough that modeld (unsynchronized, conflated subscriber) can't miss it.
+the turn back at once. So a turn desire is pulsed again every REPULSE_S until the car has turned TURN_DONE_DEG
+(by its yaw rate): at 4 m/s a turn outlasts one pulse, and the model let go of it halfway round, while a pulse
+after the turn was made turned the car a second time, into the curb. A repeat pulse is a short drop to none, long
+enough that modeld (unsynchronized, conflated subscriber) can't miss it.
 """
+import math
+
 from openpilot.cereal import log
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, LEFT, TURN
 
@@ -22,10 +25,9 @@ KEEP_DESIRE_LEAD_S = 2.5
 KEEP_DESIRE_LEAD_MIN_M = 20.
 KEEP_DESIRE_PAST_M = 5.       # a keep desire lasts this far past the maneuver point
 DESIRE_TIMEOUT_S = 15.        # moving time a desire may be held before it is dropped for good
-REPULSE_S = 4.                # a turn desire pulses again this often...
-REPULSE_PAST_M = 0.           # ...until the car is this far past the junction...
-TURNED_STEER_DEG = 45.        # ...or has steered this far toward the turn
-MAX_PULSES = 4
+REPULSE_S = 3.5               # a turn desire pulses again this often...
+TURN_DONE_DEG = 60.           # ...until the car has turned this far toward the maneuver
+MAX_PULSES = 5
 PULSE_GAP_FRAMES = 3          # frames of none before a repeat pulse
 STANDSTILL_SPEED = 0.3        # m/s
 STANDSTILL_REARM_S = 2.       # stopped this long (a queue, a red light), the pulse goes again once the car moves
@@ -49,15 +51,16 @@ class DesireTiming:
     self.done = False         # passed or timed out: nothing more for this maneuver
     self.pulses = 0
     self._since_pulse = 0.
-    self._max_toward = 0.     # deg the steering went toward the turn since the first pulse
+    self.turned_deg = 0.      # heading change toward the turn since the first pulse
     self._gap = 0
     self._moving_t = 0.
     self._stopped_t = 0.
 
   def update(self, maneuver, distance: float, maneuver_id: int, passed: bool, v_ego: float,
-             steering_angle_deg: float, keep_left_ok: bool, keep_right_ok: bool, dt: float) -> int:
+             steering_angle_deg: float, keep_left_ok: bool, keep_right_ok: bool, dt: float, yaw_rate: float = 0.) -> int:
     """The desire to publish. maneuver is RouteFollower.upcoming (None when there is none);
-    keep_left_ok/keep_right_ok: the model sees a lane line and road that way (lane_planner.ModelLanes)."""
+    keep_left_ok/keep_right_ok: the model sees a lane line and road that way (lane_planner.ModelLanes);
+    yaw_rate: rad/s, left positive."""
     if maneuver_id != self.maneuver_id:
       self.maneuver_id = maneuver_id
       self._reset()
@@ -95,9 +98,8 @@ class DesireTiming:
 
     if self.active and maneuver.kind == TURN:
       self._since_pulse += dt
-      self._max_toward = max(self._max_toward, steering_angle_deg * maneuver.side)
-      if self._since_pulse >= REPULSE_S and distance > -REPULSE_PAST_M and self._max_toward < TURNED_STEER_DEG and \
-         self.pulses < MAX_PULSES:
+      self.turned_deg += math.degrees(yaw_rate * dt) * maneuver.side
+      if self._since_pulse >= REPULSE_S and self.turned_deg < TURN_DONE_DEG and self.pulses < MAX_PULSES:
         self._gap, self._since_pulse = PULSE_GAP_FRAMES, 0.
         self.pulses += 1
     if self._gap > 0:
