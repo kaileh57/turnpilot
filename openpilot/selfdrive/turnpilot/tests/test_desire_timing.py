@@ -1,6 +1,6 @@
 from openpilot.cereal import log
 from openpilot.common.realtime import DT_MDL
-from openpilot.selfdrive.turnpilot.desire_timing import (MAX_PULSES, PULSE_GAP_FRAMES, REPULSE_S, STANDSTILL_REARM_S, TURN_DESIRE_LEAD_M,
+from openpilot.selfdrive.turnpilot.desire_timing import (ENTRY_M, PULSE_GAP_FRAMES, REPULSE_S, STANDSTILL_REARM_S, TURN_DESIRE_LEAD_M,
                                                          DesireTiming, keep_lead)
 from openpilot.selfdrive.turnpilot.route_follower import RouteFollower
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd
@@ -38,12 +38,13 @@ def rising_edges(trace, desire):
 def test_left_turn_desire_from_the_lead():
   trace = drive([(200., "turn", "left"), (900., "turn", "right")], v=12.)
   edges = rising_edges(trace, Desire.turnLeft)
-  assert len(edges) == 1  # through the junction within REPULSE_S of the pulse
+  assert len(edges) == 2 and 0. < edges[1][1] < ENTRY_M  # the pulse at the lead, and the one for the turn itself
   s, d = edges[0]
   assert TURN_DESIRE_LEAD_M - 12. * DT_MDL - 1. < d < TURN_DESIRE_LEAD_M  # within a frame of the lead, dead-reckoned
   assert all(desire == Desire.none for s, d, desire in trace if s < 200. - TURN_DESIRE_LEAD_M - 1.)
   # held through the junction, dropped once navd moves on
-  assert all(desire == Desire.turnLeft for s, d, desire in trace if 200. - TURN_DESIRE_LEAD_M + 1. < s < 205.)
+  held = [desire for s, d, desire in trace if 200. - TURN_DESIRE_LEAD_M + 1. < s < 205.]
+  assert held.count(Desire.turnLeft) == len(held) - PULSE_GAP_FRAMES  # but for the drop before the entry pulse
   assert all(desire != Desire.turnLeft for s, d, desire in trace if s > 230.)
   assert not rising_edges(trace, Desire.turnRight)  # the next turn, 700 m on, isn't reached
 
@@ -90,8 +91,8 @@ def test_turn_desire_pulses_again_until_through_the_junction():
   # the model forgets a pulse after about 5 s; a slow approach gets a new one every REPULSE_S up to the junction
   trace = drive([(200., "turn", "right"), (900., "turn", "left")], v=3., turns_at=None, seconds=80.)
   edges = rising_edges(trace, Desire.turnRight)
-  assert len(edges) == MAX_PULSES
-  for (s0, _), (s1, _) in zip(edges[:-1], edges[1:], strict=True):
+  assert len(edges) == 4 and 0. < edges[-1][1] < ENTRY_M  # every REPULSE_S on the approach, and one at the entry
+  for (s0, _), (s1, _) in zip(edges[:-2], edges[1:-1], strict=True):
     assert abs((s1 - s0) / 3. - REPULSE_S) < 0.3  # plus the gap
   # the drop between two pulses is long enough for modeld to see it
   gap = [desire for s, d, desire in trace if edges[0][0] < s < edges[1][0] and desire == Desire.none]

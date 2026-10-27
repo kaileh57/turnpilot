@@ -8,10 +8,11 @@ noise, and dropping the desire whenever it read past the lead again sent the mod
 A keep toward a side where the model sees no lane line drove the car off the road there, so it is dropped.
 The model forgets a pulse about 5 s after it (the length of its desire history): at junctions where the slow
 approach took longer than that, it planned the turn and then dropped it 10 m out, and a late retry pulse brought
-the turn back at once. So a turn desire is pulsed again every REPULSE_S until the car has turned TURN_DONE_DEG
-(by its yaw rate): at 4 m/s a turn outlasts one pulse, and the model let go of it halfway round, while a pulse
-after the turn was made turned the car a second time, into the curb. A repeat pulse is a short drop to none, long
-enough that modeld (unsynchronized, conflated subscriber) can't miss it.
+the turn back at once. So a turn desire is pulsed again every REPULSE_S on the approach, and once more ENTRY_M
+before the junction, so the last pulse is fresh for the whole turn: at 4 m/s a turn outlasts one pulse, and the
+model let go of it halfway round. None once the car has turned TURN_STARTED_DEG (by its yaw rate): pulses during
+the turn turned the car on past the exit road, into the curb. A repeat pulse is a short drop to none, long enough
+that modeld (unsynchronized, conflated subscriber) can't miss it.
 """
 import math
 
@@ -25,8 +26,10 @@ KEEP_DESIRE_LEAD_S = 2.5
 KEEP_DESIRE_LEAD_MIN_M = 20.
 KEEP_DESIRE_PAST_M = 5.       # a keep desire lasts this far past the maneuver point
 DESIRE_TIMEOUT_S = 15.        # moving time a desire may be held before it is dropped for good
-REPULSE_S = 3.5               # a turn desire pulses again this often...
-TURN_DONE_DEG = 60.           # ...until the car has turned this far toward the maneuver
+REPULSE_S = 3.5               # a turn desire pulses again this often on the approach...
+ENTRY_M = 10.                 # ...and once more this far before the junction (not within ENTRY_GAP_S of the last)...
+ENTRY_GAP_S = 1.5
+TURN_STARTED_DEG = 15.        # ...until the car has turned this far toward the maneuver
 MAX_PULSES = 5
 PULSE_GAP_FRAMES = 3          # frames of none before a repeat pulse
 STANDSTILL_SPEED = 0.3        # m/s
@@ -52,6 +55,7 @@ class DesireTiming:
     self.pulses = 0
     self._since_pulse = 0.
     self.turned_deg = 0.      # heading change toward the turn since the first pulse
+    self.entry = False        # the pulse at ENTRY_M went out
     self._gap = 0
     self._moving_t = 0.
     self._stopped_t = 0.
@@ -99,7 +103,10 @@ class DesireTiming:
     if self.active and maneuver.kind == TURN:
       self._since_pulse += dt
       self.turned_deg += math.degrees(yaw_rate * dt) * maneuver.side
-      if self._since_pulse >= REPULSE_S and self.turned_deg < TURN_DONE_DEG and self.pulses < MAX_PULSES:
+      entry = not self.entry and distance < ENTRY_M and self._since_pulse >= ENTRY_GAP_S
+      self.entry = self.entry or distance < ENTRY_M
+      if (entry or (self._since_pulse >= REPULSE_S and distance > ENTRY_M)) and self.turned_deg < TURN_STARTED_DEG and \
+         self.pulses < MAX_PULSES:
         self._gap, self._since_pulse = PULSE_GAP_FRAMES, 0.
         self.pulses += 1
     if self._gap > 0:
