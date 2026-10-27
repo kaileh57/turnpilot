@@ -25,11 +25,18 @@ OPENPILOT_ROOT="${OPENPILOT_ROOT:-$DIR/../../../../..}"
 cd "$OPENPILOT_ROOT"
 export PYTHONPATH="$OPENPILOT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
+# navd routes on the sim map's own tiles, never on real roads (the default 'auto' falls back to Mapbox);
+# TURNPILOT_TILES picks the tiles, e.g. ~/turnpilot_data/valhalla/west_coast_usa_lanes for the turn-lane demos
 python3 -c "
+import os
 from openpilot.common.params import Params
 from openpilot.selfdrive.test.helpers import set_params_enabled
 set_params_enabled()
-Params().put_bool('AlphaLongitudinalEnabled', True)
+p = Params()
+p.put_bool('AlphaLongitudinalEnabled', True)
+p.put('TurnPilotRouteSource', 'valhalla')
+tiles = os.environ.get('TURNPILOT_TILES') or p.get('TurnPilotValhallaTiles') or os.path.expanduser('~/turnpilot_data/valhalla/west_coast_usa')
+p.put('TurnPilotValhallaTiles', tiles)
 "
 
 cd openpilot/system/manager && exec ./manager.py

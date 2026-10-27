@@ -229,7 +229,7 @@ def collect(params) -> list[Check]:
   from openpilot.common.hardware.usb import get_usb_state
   from openpilot.selfdrive.modeld.helpers import chestnut_compiled
   from openpilot.selfdrive.turnpilot.detector.graph import detector_pkl_path
-  from openpilot.selfdrive.turnpilot.routing.valhalla import ValhallaSource, import_valhalla, locate
+  from openpilot.selfdrive.turnpilot.routing.valhalla_source import ValhallaSource, import_valhalla, locate
   from openpilot.selfdrive.turnpilot.routing.sources import select_source
   from openpilot.selfdrive.turnpilot.web.pairing import PORT, local_ip
 

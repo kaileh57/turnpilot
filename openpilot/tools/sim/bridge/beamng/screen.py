@@ -11,7 +11,7 @@ import numpy as np
 
 from openpilot.selfdrive.navigation.route import cumulative_distance
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, LEFT, TURN, classify
-from openpilot.selfdrive.turnpilot.routing.valhalla import ValhallaSource
+from openpilot.selfdrive.turnpilot.routing.valhalla_source import ValhallaSource
 from openpilot.tools.sim.bridge.beamng.frame import from_latlon, to_latlon
 from openpilot.tools.sim.bridge.beamng.roadgraph import RoadGraph
 from openpilot.tools.sim.bridge.beamng.routes import Route

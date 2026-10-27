@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from openpilot.selfdrive.navigation.navd import RouteEngine
+from openpilot.selfdrive.navigation.navd import MANEUVER_TRANSITION_THRESHOLD, RouteEngine
 from openpilot.selfdrive.navigation.route import local_meters
 from openpilot.selfdrive.turnpilot.routing.guidance import MAX_MANEUVERS, approach_lanes, fill_guidance, upcoming_maneuvers
 from openpilot.selfdrive.turnpilot.routing.valhalla_source import ValhallaSource
@@ -163,6 +163,8 @@ class TestWestCoastUSA(unittest.TestCase):
       self.assertTrue(instruction.valid)
       self.assertIn(engine.step_idx, (step_idx, step_idx + 1))  # never skips a step
       distance = instruction.navInstruction.maneuverDistance
+      # past a step's end navd sends it once more, then moves on; a car already on the next step gets that step's
+      step_idx = step_idx if distance < -MANEUVER_TRANSITION_THRESHOLD else engine.step_idx
       if step_idx == previous:
         self.assertLessEqual(distance, last_distance + 1)  # and closes in on the maneuver
       previous, last_distance = step_idx, distance
