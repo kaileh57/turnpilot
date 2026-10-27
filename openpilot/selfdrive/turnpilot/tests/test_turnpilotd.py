@@ -2,6 +2,7 @@
 from openpilot.cereal import custom, log
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot.hooks import plan_accel
+from openpilot.selfdrive.turnpilot.lane_planner import lane_change_window
 from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP, ONCOMING_TTA_S, PED_STOP_GAP_M
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_state, model_v2, nav_instruction, scene
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP
@@ -144,12 +145,13 @@ def test_lane_change_request_and_driver_prompt():
   sim.run(15.)
   requests = [(s, plan) for s, _, plan in sim.trace if plan.laneChange == LaneChange.left]
   assert requests and all(plan.state == State.laneChange for _, plan in requests)
-  assert 500. - 300. < requests[0][0] < 500. - 90.
+  start, end = lane_change_window(15., 2)
+  assert 500. - start < requests[0][0] < 500. - end
 
   sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., nav_lanes={0: THREE_LANES_LEFT_TURN}, model_lanes=(2, 0),
             driver_signals=True)
   sim.run(15.)
-  assert any(plan.signalPrompt == LaneChange.left for _, _, plan in sim.trace)
+  assert any(plan.signalPrompt == LaneChange.left and plan.state == State.laneChange for _, _, plan in sim.trace)
   assert all(plan.laneChange == LaneChange.none for _, _, plan in sim.trace)
   plan = sim.step(blinker=True)
   assert plan.laneChange == LaneChange.left

@@ -103,8 +103,9 @@ def test_left_turn_on_three_lane_road_requests_two_lane_changes():
   assert drive.requests and all(r == LaneChange.left for r, _ in drive.requests)
   assert len(drive.requests) == 2 and drive.lp.changes == 2
   assert (drive.lanes_left, drive.lanes_right) == (0, 2)
-  start, end = lane_change_window(drive.v)
+  start, end = lane_change_window(drive.v, 2)
   assert all(end < d < start for _, d in drive.requests)
+  assert drive.requests[0][1] > lane_change_window(drive.v)[0]  # two changes to make: the first starts earlier
   assert distance < 100.
 
 

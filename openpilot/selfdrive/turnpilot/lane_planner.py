@@ -30,6 +30,7 @@ KEEP_MIN_ROOM_M = 1.0       # a keep desire toward a trusted edge closer than th
 
 LC_START_S, LC_START_MIN_M, LC_START_MAX_M = 20., 150., 400.  # lane changes start this far before the maneuver...
 LC_END_S, LC_END_MIN_M, LC_END_MAX_M = 6., 60., 120.          # ...and none start closer than this
+LC_EXTRA_LANE_S = 8.        # each change past the first starts this much earlier (an exit across a highway)
 LC_SPEED_MARGIN = 0.5       # m/s above DesireHelper's minimum, so a request never waits below it
 LC_CONFIRM_FRAMES = 10      # the same need this many frames in a row before a request
 LC_COOLDOWN_S = 3.          # after a change, for the model's lane lines to settle
@@ -104,9 +105,9 @@ def lane_changes_needed(maneuver, lanes: ModelLanes, right_hand_traffic: bool = 
   return need
 
 
-def lane_change_window(v_ego: float) -> tuple[float, float]:
-  """(start, end) m before the maneuver."""
-  start = min(max(LC_START_S * v_ego, LC_START_MIN_M), LC_START_MAX_M)
+def lane_change_window(v_ego: float, changes: int = 1) -> tuple[float, float]:
+  """(start, end) m before the maneuver, for this many lane changes still to make."""
+  start = min(max(LC_START_S * v_ego, LC_START_MIN_M), LC_START_MAX_M) + max(changes - 1, 0) * LC_EXTRA_LANE_S * v_ego
   end = min(max(LC_END_S * v_ego, LC_END_MIN_M), LC_END_MAX_M)
   return start, end
 
@@ -131,6 +132,7 @@ def target_lane_blocked(objects, direction: int, v_ego: float, width: float = LA
 class LanePlanner:
   def __init__(self):
     self.requested = LaneChange.none  # what was last asked of DesireHelper
+    self.prompt = LaneChange.none     # what the driver was last asked to signal
     self.ours = False                 # a DesireHelper lane change we asked for is under way
     self.changes = 0                  # nav lane changes completed
     self._cooldown = 0.
@@ -140,7 +142,7 @@ class LanePlanner:
 
   @property
   def active(self) -> bool:
-    return self.requested != LaneChange.none or self.ours
+    return self.requested != LaneChange.none or self.prompt != LaneChange.none or self.ours
 
   def update(self, maneuver, distance: float, lanes: ModelLanes, lc_state, v_ego: float, left_blinker: bool,
              right_blinker: bool, objects, driver_signals: bool, right_hand_traffic: bool, dt: float):
@@ -158,10 +160,10 @@ class LanePlanner:
       self._confirm = 0
       return self._none()
 
-    start, end = lane_change_window(v_ego)
-    need = 0
-    if end < distance < start and v_ego > LANE_CHANGE_SPEED_MIN + LC_SPEED_MARGIN:
-      need = lane_changes_needed(maneuver, lanes, right_hand_traffic)
+    need = lane_changes_needed(maneuver, lanes, right_hand_traffic) if v_ego > LANE_CHANGE_SPEED_MIN + LC_SPEED_MARGIN else 0
+    start, end = lane_change_window(v_ego, abs(need))
+    if not end < distance < start:
+      need = 0
     direction = LaneChange.left if need > 0 else LaneChange.right if need < 0 else LaneChange.none
     self._confirm = self._confirm + 1 if direction == self._candidate else 1
     self._candidate = direction
@@ -179,9 +181,10 @@ class LanePlanner:
       self._pre_t = 0.
     signaled = left_blinker if direction == LaneChange.left else right_blinker
     self.requested = direction if signaled or not driver_signals else LaneChange.none
-    return self.requested, direction if driver_signals else LaneChange.none, ""
+    self.prompt = direction if driver_signals else LaneChange.none
+    return self.requested, self.prompt, ""
 
   def _none(self, reason=""):
-    self.requested = LaneChange.none
+    self.requested = self.prompt = LaneChange.none
     self._pre_t = 0.
     return LaneChange.none, LaneChange.none, reason
