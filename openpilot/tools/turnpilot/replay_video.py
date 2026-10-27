@@ -35,7 +35,7 @@ import requests
 from openpilot.cereal import messaging
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.detector.decoder import BICYCLE, BUS, CAR, MOTORCYCLE, PERSON, TRUCK, decode, fill_detections
-from openpilot.selfdrive.turnpilot.detector.graph import DEFAULT_MODEL, make_detector
+from openpilot.selfdrive.turnpilot.detector.graph import DEFAULT_MODEL, letterbox, make_detector
 from openpilot.selfdrive.turnpilot.scene.ranging import calib_from_view, camera_height
 from openpilot.selfdrive.turnpilot.scene.tracker import CORRIDOR_HALF_WIDTH, PATH_X, SceneTracker, predicted_path
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
@@ -266,6 +266,7 @@ def main():
   ap.add_argument('--model', default=DEFAULT_MODEL)
   ap.add_argument('--step', type=int, default=1, help='frames between detector runs on each camera; the two cameras alternate when 2 or more')
   ap.add_argument('--scale', type=float, default=1.0, help='scale the written video')
+  ap.add_argument('--raw-cache', type=Path, help="raw detector outputs: read from here if the file exists (no detector run), else saved here after the run")
   args = ap.parse_args()
 
   route = Route(args.route, data_dir=args.data_dir)
@@ -280,11 +281,17 @@ def main():
   device_camera = DEVICE_CAMERAS[(log.device_type, log.sensor)]
   assert (device_camera.narrow_road.width, device_camera.narrow_road.height) == (w, h), f'{log.device_type}/{log.sensor} is not {w}x{h}'
 
-  from tinygrad import Device, Tensor, TinyJit
-  lb, detect = make_detector(w, h, args.model)
-  run = TinyJit(detect, prune=True)
+  cached = dict(np.load(args.raw_cache)) if args.raw_cache and args.raw_cache.exists() else None
+  fresh: dict[str, np.ndarray] = {}  # 'road_<frame in the route>' -> raw (1, 300, 6), 'dt_road_<frame>' -> detector seconds
+  if cached is None:
+    from tinygrad import Device, Tensor, TinyJit
+    lb, detect = make_detector(w, h, args.model)
+    run = TinyJit(detect, prune=True)
+    backend = Device.DEFAULT
+  else:
+    lb, backend = letterbox(w, h), 'raw cache'
   panels = {cam: Panel(cam, SceneTracker(device_camera, log.device_type), w, h) for cam in ('road', 'wide')}
-  print(f'{log.device_type}/{log.sensor} {w}x{h} -> {lb.in_w}x{lb.in_h}, {args.model} on {Device.DEFAULT}', flush=True)
+  print(f'{log.device_type}/{log.sensor} {w}x{h} -> {lb.in_w}x{lb.in_h}, {args.model} on {backend}', flush=True)
 
   out_w, out_h = 2 * w, h + LEGEND_H
   scaled = (round(out_w * args.scale) // 2 * 2, round(out_h * args.scale) // 2 * 2)
@@ -312,10 +319,15 @@ def main():
       for cam, panel in panels.items():
         last[cam] = frame_id, eof = log.stamp(cam, seg, k, last[cam])
         if (frame + (args.step // 2 if cam == 'wide' else 0)) % args.step == 0:
-          padded = camerad_nv12(frames[cam], w, h)
-          t0 = time.perf_counter()
-          raw = run(input_frame=Tensor(padded).realize()).numpy()
-          dt = time.perf_counter() - t0
+          key = f'{cam}_{seg * SEGMENT_FRAMES + k}'
+          if cached is None:
+            padded = camerad_nv12(frames[cam], w, h)
+            t0 = time.perf_counter()
+            raw = run(input_frame=Tensor(padded).realize()).numpy()
+            dt = time.perf_counter() - t0
+            fresh[key], fresh['dt_' + key] = raw, np.float32(dt)
+          else:
+            raw, dt = cached[key], float(cached['dt_' + key])
           times[cam].append(dt)
           dets = decode(raw, lb)
           msg = messaging.new_message('turnpilotDetections')
@@ -355,10 +367,13 @@ def main():
   encoder.stdin.close()
   if encoder.wait() != 0:
     raise SystemExit('ffmpeg failed to encode the video')
+  if args.raw_cache and cached is None:
+    args.raw_cache.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(args.raw_cache, **fresh)
 
   summary = {
     'route': route.name.canonical_name, 'start_s': args.start, 'frames': frame, 'seconds': frame / FPS, 'device': f'{log.device_type}/{log.sensor}',
-    'frame': f'{w}x{h}', 'model': args.model, 'input': f'{lb.in_w}x{lb.in_h}', 'backend': Device.DEFAULT, 'step': args.step,
+    'frame': f'{w}x{h}', 'model': args.model, 'input': f'{lb.in_w}x{lb.in_h}', 'backend': backend, 'step': args.step,
     'detections_summed_over_frames': {cam: dict(c) for cam, c in raw_counts.items()},
     'distinct_tracks': {cam: {NAMES[c]: sum(1 for v in ids.values() if v == c) for c in NAMES} for cam, ids in track_ids.items()},
     'detector_runs_with_pedestrian_track': dict(ped_frames), 'max_simultaneous_pedestrian_tracks': dict(max_peds),
