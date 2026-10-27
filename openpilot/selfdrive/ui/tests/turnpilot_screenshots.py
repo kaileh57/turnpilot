@@ -256,7 +256,11 @@ def main():
                       help='only publish, cycling the scenes every SECONDS, in the current OPENPILOT_PREFIX')
   args = parser.parse_args()
   if args.publish:
-    publish(args.publish)
+    # fake started/ignition must never reach a real device's namespace
+    if not os.environ.get('OPENPILOT_PREFIX'):
+      parser.error('--publish needs OPENPILOT_PREFIX, shared with the UI')
+    with OpenpilotPrefix(os.environ['OPENPILOT_PREFIX'], clean_dirs_on_exit=False):
+      publish(args.publish)
   elif args.out_dir:
     os.makedirs(args.out_dir, exist_ok=True)
     with OpenpilotPrefix():
