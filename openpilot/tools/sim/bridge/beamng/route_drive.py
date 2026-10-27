@@ -14,6 +14,7 @@ then:
 import argparse
 import json
 import math
+import signal
 import threading
 import time
 from multiprocessing import Queue
@@ -220,6 +221,9 @@ def main():
   q: Queue = Queue()
   bridge = BeamNGBridge(config_from_args(bargs), scenario=drive)
   p = bridge.run(q)
+  # a background shell ignores SIGINT: SIGTERM (or SIGINT) ends the session cleanly, sensors and traffic removed
+  for sig in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(sig, lambda *_: q.put(control_cmd_gen("quit")))
   try:
     p.join()
   except KeyboardInterrupt:
