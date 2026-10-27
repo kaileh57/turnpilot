@@ -13,10 +13,19 @@ before the junction, so the last pulse is fresh for the whole turn: at 4 m/s a t
 model let go of it halfway round. None once the car has turned TURN_STARTED_DEG (by its yaw rate): pulses during
 the turn turned the car on past the exit road, into the curb. A repeat pulse is a short drop to none, long enough
 that modeld (unsynchronized, conflated subscriber) can't miss it.
+The model keeps the rising edges of the last 132 frames (6.6 s at 20 Hz, the big model's state_desire_q), and
+forgets a pulse when it leaves that queue. A pulse still in the queue once the car is round the corner turns it
+on: at a 55 degree "left" the car turned 122-126 degrees into the curb, the last pulse 6.6 s from leaving.
+So once the turn is done, CLEAR_DESIRE goes out and modeld drops the turn desires from the queue: at the
+junction (navd past it) once the car has turned CLEAR_MIN_DEG, or anywhere within CLEAR_MARGIN_DEG of the turn's
+nominal angle (80 degrees for a left or right).
+Short of CLEAR_MIN_DEG it waits: with the desire gone at 15-32 degrees the model gave up 2 turns of 3, from
+25-42 degrees it finished all 8 on its own.
 """
 import math
 
 from openpilot.cereal import log
+from openpilot.selfdrive.turnpilot.hooks import CLEAR_DESIRE
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, LEFT, TURN
 
 Desire = log.Desire
@@ -34,6 +43,10 @@ MAX_PULSES = 5
 PULSE_GAP_FRAMES = 3          # frames of none before a repeat pulse
 STANDSTILL_SPEED = 0.3        # m/s
 STANDSTILL_REARM_S = 2.       # stopped this long (a queue, a red light), the pulse goes again once the car moves
+CLEAR_MIN_DEG = 45.           # past the junction, the turn desire is cleared once the car has turned this far...
+CLEAR_MARGIN_DEG = 10.        # ...and before it, once it has turned the maneuver's nominal angle less this
+CLEAR_WAIT_S = 6.             # past the junction short of CLEAR_MIN_DEG, the turn may get there this long after
+CLEAR_FRAMES = 5              # frames CLEAR_DESIRE is published
 
 DESIRES = {(TURN, LEFT): Desire.turnLeft, (TURN, -LEFT): Desire.turnRight,
            (KEEP, LEFT): Desire.keepLeft, (KEEP, -LEFT): Desire.keepRight}
@@ -46,6 +59,8 @@ def keep_lead(v_ego: float) -> float:
 class DesireTiming:
   def __init__(self):
     self.maneuver_id = -1
+    self.clear_frames = 0     # CLEAR_DESIRE goes out while this counts down
+    self._pending = None      # [turned deg, side, s] of a passed turn not yet turned CLEAR_MIN_DEG
     self._reset()
 
   def _reset(self):
@@ -59,12 +74,41 @@ class DesireTiming:
     self._gap = 0
     self._moving_t = 0.
     self._stopped_t = 0.
+    self.side = 0             # set once a turn desire went out: the turn to clear once it is done
+
+  def _turn_over(self):
+    """The maneuver was passed or replaced: clear its turn desire now, or once the car has turned CLEAR_MIN_DEG."""
+    if self.side:
+      self._pending = [self.turned_deg, self.side, 0.]
+      self.side = 0
+
+  def _clear(self):
+    self.clear_frames, self._pending, self.side = CLEAR_FRAMES, None, 0
 
   def update(self, maneuver, distance: float, maneuver_id: int, passed: bool, v_ego: float,
              steering_angle_deg: float, keep_left_ok: bool, keep_right_ok: bool, dt: float, yaw_rate: float = 0.) -> int:
-    """The desire to publish. maneuver is RouteFollower.upcoming (None when there is none);
-    keep_left_ok/keep_right_ok: the model sees a lane line and road that way (lane_planner.ModelLanes);
+    """The desire to publish, CLEAR_DESIRE once a turn is done. maneuver is RouteFollower.upcoming (None when there is
+    none); keep_left_ok/keep_right_ok: the model sees a lane line and road that way (lane_planner.ModelLanes);
     yaw_rate: rad/s, left positive."""
+    if maneuver_id != self.maneuver_id:
+      self._turn_over()
+    if self._pending is not None:
+      self._pending[0] += math.degrees(yaw_rate * dt) * self._pending[1]
+      self._pending[2] += dt
+      if self._pending[0] >= CLEAR_MIN_DEG:
+        self._clear()
+      elif self._pending[2] > CLEAR_WAIT_S:
+        self._pending = None
+    desire = self._update(maneuver, distance, maneuver_id, passed, v_ego, keep_left_ok, keep_right_ok, dt, yaw_rate)
+    if desire != Desire.none:
+      self._pending = None  # the next maneuver's pulse is in the model's queue now
+    if self.clear_frames > 0:
+      self.clear_frames -= 1
+      return CLEAR_DESIRE
+    return desire
+
+  def _update(self, maneuver, distance: float, maneuver_id: int, passed: bool, v_ego: float,
+              keep_left_ok: bool, keep_right_ok: bool, dt: float, yaw_rate: float) -> int:
     if maneuver_id != self.maneuver_id:
       self.maneuver_id = maneuver_id
       self._reset()
@@ -72,6 +116,8 @@ class DesireTiming:
     if passed or maneuver is None:
       self.done = self.done or passed
       self.active = False
+      if passed:
+        self._turn_over()
       return Desire.none
     desire = DESIRES.get((maneuver.kind, maneuver.side), Desire.none)
     if desire == Desire.none or self.done:
@@ -103,6 +149,10 @@ class DesireTiming:
     if self.active and maneuver.kind == TURN:
       self._since_pulse += dt
       self.turned_deg += math.degrees(yaw_rate * dt) * maneuver.side
+      if self.turned_deg >= maneuver.angle_deg - CLEAR_MARGIN_DEG:
+        self._clear()
+        self.done, self.active = True, False
+        return Desire.none
       entry = not self.entry and distance < ENTRY_M and self._since_pulse >= ENTRY_GAP_S
       self.entry = self.entry or distance < ENTRY_M
       if (entry or (self._since_pulse >= REPULSE_S and distance > ENTRY_M)) and self.turned_deg < TURN_STARTED_DEG and \
@@ -117,4 +167,6 @@ class DesireTiming:
       self.active = self.started = True
       self.pulses += 1
       self._since_pulse = 0.
+      if maneuver.kind == TURN:
+        self.side = maneuver.side
     return desire

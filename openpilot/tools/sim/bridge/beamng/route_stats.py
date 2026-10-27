@@ -17,6 +17,7 @@ import os
 import numpy as np
 
 from openpilot.selfdrive.navigation.route import RouteTracker, local_meters
+from openpilot.selfdrive.turnpilot.hooks import CLEAR_DESIRE
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, TURN, classify
 from openpilot.tools.lib.logreader import LogReader
 
@@ -170,7 +171,10 @@ def run_stats(run: dict, realdata: str = REALDATA) -> dict:
   t_p = [t for t, _, _ in plan]
   holds = episodes(t_p, [str(p.state) == 'holding' for _, _, p in plan], [p.reason for _, _, p in plan])
   desires = [int(p.desire) for _, _, p in plan]
-  pulses = sum(1 for a, b in zip([0] + desires[:-1], desires, strict=True) if b and not a)
+  pulses = sum(1 for a, b in zip([0] + desires[:-1], desires, strict=True) if 0 < b < CLEAR_DESIRE and not a)
+  clears = sum(1 for a, b in zip([0] + desires[:-1], desires, strict=True) if b == CLEAR_DESIRE and a != b)
+  t_m = [t for t, _, _ in msgs['modelV2']]
+  model_hz = (len(t_m) - 1) / (t_m[-1] - t_m[0]) if len(t_m) > 1 and t_m[-1] > t_m[0] else 0.  # one model run per camera pair
   prompts = episodes(t_p, [str(p.signalPrompt) != 'none' for _, _, p in plan], [str(p.signalPrompt) for _, _, p in plan])
   lc_state = [str(m.meta.laneChangeState) for _, _, m in msgs['modelV2']]
   lane_changes = sum(1 for a, b in zip(['off'] + lc_state[:-1], lc_state, strict=True) if b == 'laneChangeStarting' and a != b)
@@ -192,7 +196,8 @@ def run_stats(run: dict, realdata: str = REALDATA) -> dict:
     "gas_overrides": [round(a - run['mono_start'], 1) for a, _, _ in overrides],
     "holds": [{"t_s": round(a - run['mono_start'], 1), "dur_s": round(b - a, 1), "reason": r} for a, b, r in holds],
     "reroutes": sum(v[2] == 'reroute' for v in versions), "legs_routed": sum(v[2] in ('first', 'leg') for v in versions),
-    "desire_pulses": pulses, "lane_change_prompts": len(prompts), "lane_changes": lane_changes,
+    "desire_pulses": pulses, "desire_clears": clears, "model_hz": round(model_hz, 1),
+    "lane_change_prompts": len(prompts), "lane_changes": lane_changes,
     "plan_state_frames": states, "min_distance_remaining_m": round(min((d for _, d in nav), default=float('nan')), 1),
     "maneuvers": rows, "rlogs": files,
   }
@@ -204,7 +209,8 @@ def summary_line(s: dict) -> str:
   return (f"{s['route']} run {s['run']} | traffic {s['traffic']} | end {s['end']} | maneuvers {s['maneuvers_taken']}/{s['maneuvers_attempted']} | " +
           f"disengagements {s['disengagement_count']}: {causes} | gas overrides {len(s['gas_overrides'])} | holds {holds} | " +
           f"reroutes {s['reroutes']} | " +
-          f"desire pulses {s['desire_pulses']} | lane changes {s['lane_changes']}/{s['lane_change_prompts']} prompted | " +
+          f"desire pulses {s['desire_pulses']} | clears {s.get('desire_clears', 0)} | model {s.get('model_hz', 0)} Hz | " +
+          f"lane changes {s['lane_changes']}/{s['lane_change_prompts']} prompted | " +
           f"{s['distance_m']:.0f} m in {s['duration_s']:.0f} s")
 
 

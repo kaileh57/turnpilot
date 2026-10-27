@@ -35,7 +35,7 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
-from openpilot.selfdrive.turnpilot.hooks import active_plan
+from openpilot.selfdrive.turnpilot.hooks import active_plan, plan_desire
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, should_stop, smooth_value, get_curvature_from_plan
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
 from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_driving_model_data, fill_pose_msg, PublishState
@@ -218,6 +218,17 @@ class ModelState:
       outputs_dict['raw_pred'] = model_output.copy()
     return outputs_dict
 
+  def clear_desire_history(self, desires: list[int]) -> None:
+    """TurnPilot: drop these desires from the model's desire queue (the rising edges of its last frames)."""
+    queue = self.input_queues.get('state_desire_q')
+    if queue is None:
+      return
+    buf = queue._buffer()
+    q = np.frombuffer(buf.as_memoryview(), dtype=np.float32).reshape(queue.shape).copy()
+    q[..., desires] = 0
+    buf.copy_from(Tensor(q, device='NPY')._buffer())
+    self.prev_desire[desires] = 0
+
   def warmup(self) -> None:
     dummy_frames = {k: np.zeros(self.frame_copy_size, dtype=np.uint8) for k in self.vision_input_names}
     eye = np.eye(3, dtype=np.float32)
@@ -346,6 +357,7 @@ def main(demo=False):
   prev_action = log.ModelDataV2.Action()
 
   DH = DesireHelper()
+  desire_cleared = False
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -382,10 +394,16 @@ def main(demo=False):
 
     sm.update(0)
     desire = DH.desire
-    # TurnPilot: nav turn desires go in while DesireHelper is idle (a nav lane change goes through DesireHelper)
+    # TurnPilot: nav turn desires go in while DesireHelper is idle (a nav lane change goes through DesireHelper),
+    # and a finished turn's desire comes out of the model's desire queue
     tp = active_plan(sm)
-    if desire == log.Desire.none and tp is not None:
-      desire = tp.desire
+    tp_desire, clear = plan_desire(tp.desire) if tp is not None else (log.Desire.none, False)
+    if clear and not desire_cleared:
+      model.clear_desire_history([log.Desire.turnLeft, log.Desire.turnRight])
+      cloudlog.info("turnpilot: turn desires cleared from the model's desire queue")
+    desire_cleared = clear
+    if desire == log.Desire.none:
+      desire = tp_desire
     is_rhd = sm["driverMonitoringState"].isRHD
     frame_id = sm["narrowRoadCameraState"].frameId
     v_ego = max(sm["carState"].vEgo, 0.)

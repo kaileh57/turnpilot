@@ -7,7 +7,7 @@ from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
 from openpilot.selfdrive.modeld.constants import ModelConstants
-from openpilot.selfdrive.turnpilot.hooks import active_plan
+from openpilot.selfdrive.turnpilot.hooks import CLEAR_DESIRE, active_plan, plan_desire
 from openpilot.selfdrive.turnpilot.tests.synthetic import car_state
 
 LaneChangeState = log.LaneChangeState
@@ -46,6 +46,13 @@ def test_modeld_reads():
   assert modeld_inputs(FakeSM({'turnpilotPlan': turnpilot_plan(True)})) == (log.Desire.none, LaneChangeDirection.none)
   # DesireHelper's own lane change desire wins
   assert modeld_inputs(FakeSM({'turnpilotPlan': turnpilot_plan(False)}), log.Desire.laneChangeRight)[0] == log.Desire.laneChangeRight
+
+
+def test_clear_desire():
+  # the clear is fed to the model as no desire, and asks modeld to clear the turn desire history
+  assert plan_desire(CLEAR_DESIRE) == (log.Desire.none, True)
+  assert plan_desire(log.Desire.turnRight) == (log.Desire.turnRight, False)
+  assert CLEAR_DESIRE >= ModelConstants.DESIRE_LEN and CLEAR_DESIRE not in log.Desire.schema.enumerants.values()
 
 
 def torque_state(v, left=True):
