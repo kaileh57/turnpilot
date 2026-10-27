@@ -1,4 +1,5 @@
 import struct
+import sys
 
 import usb1
 
@@ -30,7 +31,8 @@ def chestnut_state_thread(end_event):
     handle = None
     try:
       while not end_event.is_set():
-        if handle is None:
+        # libusb on macOS opens a device exclusively, which would lock modeld out of chestnut
+        if handle is None and sys.platform != "darwin":
           devices = [d for d in get_usb_state() if is_chestnut_usb_id(d['vendorId'], d['productId']) and
                      d['product'] == CHESTNUT_USB_PRODUCT]
           if len(devices) == 1:

@@ -1,4 +1,7 @@
 import os
+import plistlib
+import subprocess
+import sys
 from pathlib import Path
 
 CHESTNUT_FW_VERSION = "8516b768"
@@ -17,6 +20,8 @@ def is_chestnut_usb_id(vendor_id: int, product_id: int, include_bootloader: bool
 
 
 def get_usb_topology() -> set[str]:
+  if sys.platform == "darwin":
+    return {f"{d['busnum']}-{d['devnum']}-{d['vendorId']:04x}:{d['productId']:04x}" for d in get_usb_state()}
   try:
     return set(os.listdir(USB_DEVICES_PATH))
   except OSError:
@@ -65,7 +70,38 @@ def controller(device: Path) -> Path | None:
     return None
 
 
+def get_darwin_usb_state() -> list[dict]:
+  # macOS has no /sys, so read the IOUSB registry plane, which doesn't open any device
+  try:
+    out = subprocess.run(["/usr/sbin/ioreg", "-p", "IOUSB", "-r", "-c", "IOUSBHostDevice", "-a"],
+                         capture_output=True, check=True, timeout=5).stdout
+    stack = list(plistlib.loads(out)) if out.strip() else []
+  except (OSError, subprocess.SubprocessError, plistlib.InvalidFileException):
+    return []
+
+  devices = []
+  while stack:
+    d = stack.pop()
+    stack += d.get("IORegistryEntryChildren", [])
+    if "idVendor" not in d or "bInterfaceNumber" in d:
+      continue
+    devices.append({
+      "busnum": d.get("locationID", 0) >> 24,
+      "devnum": d.get("USB Address", 0),
+      "vendorId": d["idVendor"],
+      "productId": d.get("idProduct", 0),
+      "speedMbps": min(d.get("UsbLinkSpeed", 0) // 1_000_000, 0xFFFF),
+      "manufacturer": d.get("kUSBVendorString", ""),
+      "product": d.get("kUSBProductString", ""),
+      "linkErrorCount": 0,
+      "usb3Lane": "unknown",
+    })
+  return sorted(devices, key=lambda d: (d["busnum"], d["devnum"]))
+
+
 def get_usb_state() -> list[dict]:
+  if sys.platform == "darwin":
+    return get_darwin_usb_state()
   devices = []
   typec_orientation = read_int(TYPEC_CC_ORIENTATION_PATH)
   for device in usb_devices():

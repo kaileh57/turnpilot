@@ -3,7 +3,7 @@ import time
 from pathlib import Path
 
 from openpilot.common.hardware import AGNOS
-from openpilot.common.hardware.usb import CHESTNUT_USB_PRODUCT, USB_DEVICES_PATH, is_chestnut_usb_id
+from openpilot.common.hardware.usb import CHESTNUT_USB_PRODUCT, get_usb_state, is_chestnut_usb_id
 
 MODELS_DIR = Path(__file__).resolve().parent / 'models'
 
@@ -20,15 +20,7 @@ def load_oob(path, chestnut=False):
     return load_pickle(path, out_of_band=True)
 
 def chestnut_present() -> bool:
-  for d in USB_DEVICES_PATH.glob("*"):
-    try:
-      usb_id = (int((d / "idVendor").read_text(), 16), int((d / "idProduct").read_text(), 16))
-      product = (d / "product").read_text().strip()
-      if is_chestnut_usb_id(*usb_id) and product == CHESTNUT_USB_PRODUCT:
-        return True
-    except Exception:
-      pass
-  return False
+  return any(is_chestnut_usb_id(d["vendorId"], d["productId"]) and d["product"] == CHESTNUT_USB_PRODUCT for d in get_usb_state())
 
 def wait_for_chestnut(timeout: float = 10.) -> None:
   # the cable is detected before chestnut enumerates
