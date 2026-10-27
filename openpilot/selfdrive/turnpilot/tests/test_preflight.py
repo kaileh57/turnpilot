@@ -136,7 +136,7 @@ def test_parse_assignment():
   assert preflight.parse_assignment(params, "TurnPilotValhallaTiles=/data/x=y") == ("TurnPilotValhallaTiles", "/data/x=y")
   assert preflight.parse_assignment(params, "TurnpilotCount=3") == ("TurnpilotCount", 3)
   for bad in ("TurnPilotEnabled", "TurnPilotEnabled=maybe", "NavDestination={}", "Unknown=1", "TurnpilotCount=x"):
-    with pytest.raises((ValueError, KeyError)):
+    with pytest.raises(ValueError):
       preflight.parse_assignment(params, bad)
 
 

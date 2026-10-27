@@ -163,7 +163,7 @@ def check_token(token: str | None) -> Check:
   if token:
     return Check(name, PASS, "set")
   return Check(name, FAIL, "TurnPilotWebToken is not set",
-               "turnpilot_web creates it on its first run: set TurnPilotEnabled, then restart the manager (or reboot)")
+               "turnpilot_web creates it when it starts, a few seconds after TurnPilotEnabled is set: run preflight again")
 
 
 def check_pairing_url(token: str | None, ip: str, port: int) -> Check:
@@ -189,7 +189,10 @@ def parse_assignment(params, assignment: str):
   key, sep, text = assignment.partition("=")
   if not sep:
     raise ValueError(f"{assignment!r}: expected KEY=VALUE")
-  kind = params.get_type(key).name
+  try:
+    kind = params.get_type(key).name
+  except Exception:  # Params raises UnknownKeyName
+    raise ValueError(f"{key} is not a param") from None
   if kind == "BOOL":
     lowered = text.strip().lower()
     if lowered not in ("1", "0", "true", "false", "on", "off", "yes", "no"):
@@ -305,7 +308,7 @@ def main(argv=None) -> int:
   for assignment in args.set:
     try:
       key, value = parse_assignment(params, assignment)
-    except Exception as e:  # an unknown key raises from Params
+    except ValueError as e:
       print(f"--set {assignment}: {e}", file=sys.stderr)
       return 2
     if isinstance(value, bool):

@@ -1,3 +1,25 @@
+# TurnPilot
+
+TurnPilot is a fork of [openpilot](https://github.com/commaai/openpilot) that adds navigation. It routes to a destination, tells the driving model about each turn, asks for lane changes before turns, and slows or stops for pedestrians and cars the driving model does not cover. The goal is a drive from one address to another with no disengagements, eyes up and hands off. It is built for a Tesla Model 3 with a comma four and a chestnut eGPU. It has not been driven on a road yet, and the first drives run in shadow mode: TurnPilot computes its plan and nothing acts on it.
+
+This is alpha software for research. You are responsible for the car and for following local laws. openpilot's driver monitoring stays on.
+
+**Install.** On a comma four, choose custom software and enter `installer.comma.ai/kaileh57/turnpilot`. The branch is a non-release build. The comma compiles it at first boot and flashes the panda with the debug firmware that Tesla longitudinal control needs.
+
+- [INSTALL.md](docs/turnpilot/INSTALL.md): install, toggles, offline routing tiles, phone pairing, preflight, updating
+- [SHADOW_CHECKLIST.md](docs/turnpilot/SHADOW_CHECKLIST.md): the car ladder and what to note on the first drives
+- [IOS_SHORTCUT.md](docs/turnpilot/IOS_SHORTCUT.md): set the destination from Apple Maps
+- [AGENTS.md](docs/turnpilot/AGENTS.md): the code rules for working on TurnPilot
+
+| Pinned | Version |
+| --- | --- |
+| openpilot base | `commaai/openpilot` master at `14652aa` (2026-10-25, version 0.11.3) |
+| Big driving model | `big_driving_tinygrad.pkl`, Git LFS oid `f0667cf6cf7827db467f7a5212620b876477cfea172257dcd97e26132344a3a4` |
+
+**License.** TurnPilot is distributed under the [GNU Affero General Public License v3.0](LICENSE-AGPL-3.0). The detector uses YOLO26 from Ultralytics, whose code and weights are AGPL-3.0, so the fork as a whole is AGPL-3.0. openpilot's MIT notice stays in [LICENSE](LICENSE), and openpilot's own code stays MIT. [NOTICE](NOTICE) lists which parts carry which license.
+
+---
+
 <div align="center" style="text-align: center;">
 
 <h1>openpilot</h1>
@@ -23,7 +45,7 @@
 Quick start: `bash <(curl -fsSL openpilot.comma.ai)`
 
 [![openpilot tests](https://github.com/commaai/openpilot/actions/workflows/tests.yaml/badge.svg)](https://github.com/commaai/openpilot/actions/workflows/tests.yaml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE-AGPL-3.0)
 [![X Follow](https://img.shields.io/twitter/follow/comma_ai)](https://x.com/comma_ai)
 [![Discord](https://img.shields.io/discord/469524606043160576)](https://discord.comma.ai)
 
@@ -95,7 +117,7 @@ Safety and Testing
 * We run the latest openpilot in a testing closet containing 10 comma devices continuously replaying routes.
 
 <details>
-<summary>MIT Licensed</summary>
+<summary>openpilot is MIT licensed</summary>
 
 openpilot is released under the MIT license. Some parts of the software are released under other licenses as specified.
 
