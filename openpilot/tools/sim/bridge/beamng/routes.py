@@ -38,6 +38,12 @@ ROUTES = {r.name: r for r in (
   Route("town14", (-629.47, 459.21, 116.2), -0.7875, ((39.7707207, -86.1626724), (39.7699151, -86.1657233),
                                                      (39.7723673, -86.167217), (39.773957, -86.1651128)),
         "town15 from just past its first junction (g62), whose left the model takes in some runs and not in others"),
+  Route("town15b", (-629.47, 459.21, 116.2), -0.7875, ((39.7694848, -86.1648298), (39.7680603, -86.1612328),
+                                                      (39.7693629, -86.1603638), (39.7705062, -86.1649586)),
+        "15 maneuvers, about 2.7 km in four legs from just past g62, with every leg ending on a two-way street (a leg " +
+        "that ended on a divided road had Valhalla start the next one on the other carriageway) and no junction that " +
+        "failed in screening: right, left, right; right, right, right, left, right, slight left; left, left, right; " +
+        "left, right, right. Ends about 230 m from the start"),
   Route("loop", *G62_START, ((39.7661729, -86.1647217), (39.7737206, -86.1659774)),
         "18 maneuvers, about 5.6 km: out (left, left, right, right, keep left, keep left, keep right, 1.5 km) and back " +
         "(keep right, keep left, left, keep left, left, keep right, keep left, right, keep left, right, left, 4.0 km), " +
