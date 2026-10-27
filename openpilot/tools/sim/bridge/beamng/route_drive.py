@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""Routed drives with the full stack: start on a route from routes.py, set the destination through turnpilot_web the
+way the phone app does, engage, and let navd, turnpilotd and the model drive to arrival.
+
+The bridge plays the driver: it pulls away and engages (--rolling-start), signals when turnpilotd prompts for a nav lane
+change (driver.py), sets each leg's destination once the one before is reached, re-engages after a disengagement (each
+one is logged with the events behind it), and brakes at the destination. Several runs share one bridge session. Per-run
+stats come from the rlog afterwards (route_stats.py); this writes the run windows, legs and the path to --out.
+
+Start openpilot with navd, turnpilotd and turnpilot_web (NavigationEnabled, TurnPilotEnabled, TurnPilotRouteSource),
+then:
+  python -m openpilot.tools.sim.bridge.beamng.route_drive --route loop --runs 3 --out loop.json --no-keyboard < /dev/null
+"""
+import argparse
+import json
+import math
+import threading
+import time
+from multiprocessing import Queue
+
+import numpy as np
+import requests
+
+import openpilot.cereal.messaging as messaging
+from openpilot.common.params import Params
+from openpilot.tools.sim.bridge.beamng import scenario
+from openpilot.tools.sim.bridge.beamng.bridge import BeamNGBridge
+from openpilot.tools.sim.bridge.beamng.frame import from_latlon
+from openpilot.tools.sim.bridge.beamng.gate1 import CANCEL_WAIT
+from openpilot.tools.sim.bridge.beamng.routes import ROUTES
+from openpilot.tools.sim.bridge.beamng.run_bridge import config_from_args, parse_args
+from openpilot.tools.sim.bridge.common import control_cmd_gen
+
+WEB = "http://127.0.0.1:8088"  # turnpilot_web (selfdrive/turnpilot/web/pairing.py PORT)
+SETTLE = 4.0          # s after the teleport before the destination goes in
+ROUTE_TIMEOUT = 20.0  # s for navd to publish a valid route
+ENGAGE_TIMEOUT = 25.0
+ARRIVE_M = 25.0       # navInstruction.distanceRemaining under this is the leg's arrival (navd drops a passed destination at 25 m)
+STUCK_S = 45.0        # standing this long, not holding for anything, ends the run
+MIN_SPEED = 2.5       # m/s, the slowest average a run may take before it times out
+REENGAGE_WAIT = 2.0   # s after a disengagement before the driver engages again
+
+
+def post(method, path, body=None):
+  token = Params().get("TurnPilotWebToken")
+  try:
+    r = requests.request(method, WEB + path, json=body, headers={"Authorization": f"Bearer {token}"}, timeout=5)
+    return r.status_code, r.text[:200]
+  except requests.RequestException as e:
+    return None, repr(e)
+
+
+class RouteDrive:
+  """Runs in the bridge process, called at 100 Hz (BeamNGBridge scenario hook)."""
+
+  def __init__(self, route, runs: int, speed_kph: float, rolling_kph: float, traffic: int, out: str):
+    self.route, self.runs, self.speed_kph, self.rolling_kph, self.traffic, self.out = route, runs, speed_kph, rolling_kph, traffic, out
+    self.length = 0.0
+    self.results, self.run, self.phase, self.t_end = [], -1, "init", 0.0
+    self.sm = None
+    self.web: list = []
+
+  def web_call(self, method, path, body=None):
+    """turnpilot_web off the bridge loop; the answer lands in self.web."""
+    def go():
+      self.web.append((round(time.monotonic() - self.t0, 2), method, path, *post(method, path, body)))
+    threading.Thread(target=go, daemon=True).start()
+
+  def set_leg(self, i):
+    lat, lon = self.route.legs[i]
+    self.leg, self.leg_t = i, time.monotonic()
+    self.web_call("POST", "/api/destination", {"latitude": lat, "longitude": lon, "name": f"{self.route.name} leg {i + 1}"})
+    print(f"route_drive: leg {i + 1}/{len(self.route.legs)} destination set", flush=True)
+
+  def start_run(self, b):
+    self.run += 1
+    b.car.cancel()
+    b.driver_brake = 0.0
+    b.world.teleport(self.route.start, scenario.heading_quat(self.route.heading))
+    self.t0, self.phase, self.leg = time.monotonic(), "settle", -1
+    self.wall0 = time.time()  # noqa: TID251
+    self.rows, self.disengagements, self.legs_done, self.web = [], [], [], []
+    self.engaged_once, self.enabled_prev, self.dis_t, self.still_t = False, False, None, 0.0
+    self.dist, self.last_xy = 0.0, None
+    print(f"route_drive run {self.run + 1}/{self.runs}: {self.route.name}", flush=True)
+
+  def __call__(self, b) -> bool:
+    if self.sm is None:
+      self.sm = messaging.SubMaster(['selfdriveState', 'onroadEvents', 'navInstruction', 'turnpilotPlan', 'carState'])
+      if self.traffic:
+        with b.world.bng_lock:
+          scenario.spawn_traffic(b.world.bng, self.traffic)
+        print(f"route_drive: {self.traffic} traffic cars spawned", flush=True)
+      self.phase, self.t_end, self.t0 = "next", time.monotonic(), time.monotonic()
+      self.web_call("DELETE", "/api/destination")
+    sm, s, now = self.sm, b.simulator_state, time.monotonic()
+    sm.update(0)
+
+    if self.phase == "next":
+      if now - self.t_end < CANCEL_WAIT:
+        return False
+      if self.run + 1 >= self.runs:
+        self.finish(b)
+        return True
+      self.start_run(b)
+      return False
+
+    t = now - self.t0
+    enabled = sm['selfdriveState'].enabled
+    nav = sm['navInstruction']
+    nav_ok = sm.valid['navInstruction'] and sm.recv_frame['navInstruction'] > 0
+    if self.phase == "settle":
+      if t > SETTLE:
+        self.set_leg(0)
+        self.phase = "route"
+    elif self.phase == "route":
+      if nav_ok and sm.updated['navInstruction'] and now - self.leg_t > 1.5:
+        b.set_speed_kph, b.rolling_start_kph, b.auto_engage, self.phase = self.speed_kph, self.rolling_kph, True, "drive"
+        self.route_t = t
+      elif now - self.leg_t > ROUTE_TIMEOUT:
+        self.end_run(b, "no route")
+    elif self.phase == "drive":
+      self.track(b, s, sm, t, enabled, nav, nav_ok)
+    return False
+
+  def track(self, b, s, sm, t, enabled, nav, nav_ok):
+    xy = np.array([s.position.x, s.position.y])
+    if self.last_xy is not None:
+      self.dist += float(np.linalg.norm(xy - self.last_xy))
+    self.last_xy = xy
+    plan = sm['turnpilotPlan']
+
+    if enabled and not self.engaged_once:
+      self.engaged_once, self.engage_t = True, t
+    if self.engaged_once and self.enabled_prev and not enabled:
+      ev = [str(e.name) for e in sm['onroadEvents']]
+      sd = sm['selfdriveState']
+      d = {"t": round(t, 2), "x": round(float(xy[0]), 1), "y": round(float(xy[1]), 1), "v": round(s.wheel_speed, 2),
+           "events": ev, "alert": str(sd.alertType), "alert_text": f"{sd.alertText1} {sd.alertText2}".strip(),
+           "plan_state": str(plan.state), "plan_reason": plan.reason, "leg": self.leg + 1}
+      self.disengagements.append(d)
+      self.dis_t = t
+      print(f"route_drive: DISENGAGED {json.dumps(d)}", flush=True)
+    self.enabled_prev = enabled
+    if not enabled and self.dis_t is not None and t - self.dis_t > REENGAGE_WAIT and not b.auto_engage:
+      b.auto_engage = True  # the driver takes it again and engages
+
+    if b.rk_frame % 10 == 0:
+      self.rows.append((round(t, 2), round(float(xy[0]), 2), round(float(xy[1]), 2), round(s.wheel_speed, 2), bool(enabled),
+                        str(plan.state), str(plan.desire), str(plan.laneChange), str(plan.signalPrompt), plan.reason,
+                        round(nav.maneuverDistance, 1) if nav_ok else None, f"{nav.maneuverType} {nav.maneuverModifier}" if nav_ok else "",
+                        round(nav.distanceRemaining, 1) if nav_ok else None, self.leg + 1))
+
+    # arrival of this leg: navd's distance left, once the car is well under way on this leg
+    if nav_ok and nav.distanceRemaining < ARRIVE_M and time.monotonic() - self.leg_t > 10.0 and self.dist > 50.0:
+      self.legs_done.append({"leg": self.leg + 1, "t": round(t, 2), "x": round(float(xy[0]), 1), "y": round(float(xy[1]), 1)})
+      if self.leg + 1 < len(self.route.legs):
+        self.set_leg(self.leg + 1)
+      else:
+        self.end_run(b, "arrived")
+        return
+
+    holding = str(plan.state) == 'holding'
+    self.still_t = self.still_t + 0.01 if s.wheel_speed < 0.3 and not holding else 0.0
+    timeout = SETTLE + ROUTE_TIMEOUT + 60.0 + self.length / MIN_SPEED
+    if self.still_t > STUCK_S or t > timeout:
+      self.end_run(b, "stuck" if self.still_t > STUCK_S else "timeout")
+
+  def end_run(self, b, reason):
+    b.auto_engage = False
+    b.driver_brake = 1.0 if reason == "arrived" else 0.0  # the driver brakes at the destination, which also cancels cruise
+    b.car.cancel()
+    self.t_end = time.monotonic()
+    self.web_call("DELETE", "/api/destination")
+    t = self.t_end - self.t0
+    res = {"run": self.run + 1, "route": self.route.name, "end": reason, "wall_start": self.wall0, "mono_start": self.t0,
+           "mono_end": self.t_end, "duration_s": round(t, 1), "distance_m": round(self.dist, 1),
+           "engaged_at_s": getattr(self, "engage_t", None), "legs_reached": self.legs_done, "legs": len(self.route.legs),
+           "disengagements": self.disengagements, "lane_change_prompts_signalled": b.driver.signals, "web": self.web,
+           "traffic": self.traffic, "speed_kph": self.speed_kph, "path": self.rows}
+    self.results.append(res)
+    print(f"route_drive run {res['run']}: {reason} after {t:.0f} s, {self.dist:.0f} m, {len(self.disengagements)} disengagements, " +
+          f"legs {len(self.legs_done)}/{len(self.route.legs)}", flush=True)
+    with open(self.out, 'w') as f:
+      json.dump({"route": self.route.name, "runs": self.results}, f, indent=1)
+    self.phase = "next"
+
+  def finish(self, b):
+    if self.traffic:
+      with b.world.bng_lock:  # never leave AI cars in the shared game
+        scenario.remove_traffic(b.world.bng)
+      print("route_drive: traffic removed", flush=True)
+    arrived = sum(r['end'] == 'arrived' for r in self.results)
+    clean = sum(r['end'] == 'arrived' and not r['disengagements'] for r in self.results)
+    print(f"route_drive: {arrived}/{len(self.results)} arrived, {clean} with no disengagement, results in {self.out}", flush=True)
+    b.shutdown()
+
+
+def route_length(route) -> float:
+  """Straight-line length of the legs, a floor for the timeout (the drive is longer)."""
+  pts = [route.start[:2]] + [from_latlon(lat, lon)[:2] for lat, lon in route.legs]
+  return 2.0 * sum(math.dist(a, b) for a, b in zip(pts[:-1], pts[1:], strict=True))
+
+
+def main():
+  ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+  ap.add_argument('--route', choices=sorted(ROUTES), default='short')
+  ap.add_argument('--runs', type=int, default=1)
+  ap.add_argument('--speed', type=float, default=40.0, help='cruise set speed, km/h')
+  ap.add_argument('--rolling', type=float, default=20.0, help='rolling start speed before engaging, km/h')
+  ap.add_argument('--traffic', type=int, default=0, help='BeamNG traffic cars to spawn (removed at the end)')
+  ap.add_argument('--out', default='route_drive.json')
+  args, rest = ap.parse_known_args()
+  route = ROUTES[args.route]
+  drive = RouteDrive(route, args.runs, args.speed, args.rolling, args.traffic, args.out)
+  drive.length = route_length(route)
+  bargs = parse_args(rest)
+  bargs.spawn, bargs.rot = route.start, scenario.heading_quat(route.heading)
+  q: Queue = Queue()
+  bridge = BeamNGBridge(config_from_args(bargs), scenario=drive)
+  p = bridge.run(q)
+  try:
+    p.join()
+  except KeyboardInterrupt:
+    q.put(control_cmd_gen("quit"))
+    p.join()
+
+
+if __name__ == "__main__":
+  main()
