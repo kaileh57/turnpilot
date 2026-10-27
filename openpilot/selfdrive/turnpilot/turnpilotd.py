@@ -54,7 +54,8 @@ class TurnPilot:
 
     lanes = model_lanes_from_msg(model)
     plan.desire = self.desires.update(maneuver, rf.distance, rf.maneuver_id, rf.passed, v_ego, cs.steeringAngleDeg,
-                                      lanes.keep_left_ok, lanes.keep_right_ok, DT_MDL, default_yaw_rate(cs, model))
+                                      lanes.keep_left_ok, lanes.keep_right_ok, DT_MDL, default_yaw_rate(cs, model),
+                                      lat_active=sm['carControl'].latActive)
     plan.laneChange, plan.signalPrompt, lane_reason = self.lanes.update(
       maneuver, rf.distance, lanes, model.meta.laneChangeState, v_ego, cs.leftBlinker, cs.rightBlinker, objects,
       driver_signals, right_hand_traffic, DT_MDL)
@@ -123,7 +124,7 @@ def main():
   params = Params()
   pm = messaging.PubMaster(['turnpilotPlan', 'turnpilotScene'])
   optional = ['navInstruction', 'turnpilotDetections']  # no route, or no detector (TurnPilotEnabled off, no pkl)
-  sm = messaging.SubMaster(['carState', 'navInstruction', 'modelV2', 'turnpilotDetections', 'extrinsicsCalibration',
+  sm = messaging.SubMaster(['carState', 'carControl', 'navInstruction', 'modelV2', 'turnpilotDetections', 'extrinsicsCalibration',
                             'deviceState', 'narrowRoadCameraState'],
                            ignore_alive=optional, ignore_avg_freq=optional, ignore_valid=optional)
   rk = Ratekeeper(1. / DT_MDL, print_delay_threshold=None)

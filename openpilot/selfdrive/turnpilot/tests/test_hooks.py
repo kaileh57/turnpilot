@@ -52,10 +52,11 @@ def test_active_plan_needs_a_fresh_valid_enabled_plan():
   assert active_plan(messaging.SubMaster(['turnpilotPlan'])) is None  # a real SubMaster that never got one
 
 
-def modeld_inputs(sm, dh_desire=log.Desire.none):
+def modeld_inputs(sm, dh_desire=log.Desire.none, lat_active=True):
   """modeld's turnpilot reads, as in its main loop: the desire fed to the model and DesireHelper's nav lane change."""
   tp = active_plan(sm)
-  desire = tp.desire if dh_desire == log.Desire.none and tp is not None else dh_desire
+  tp_desire = plan_desire(tp.desire, lat_active)[0] if tp is not None else log.Desire.none
+  desire = tp_desire if dh_desire == log.Desire.none else dh_desire
   return desire, tp.laneChange.raw if tp is not None else LaneChangeDirection.none
 
 
@@ -64,12 +65,17 @@ def test_modeld_reads():
   assert modeld_inputs(FakeSM({'turnpilotPlan': turnpilot_plan(True)})) == (log.Desire.none, LaneChangeDirection.none)
   # DesireHelper's own lane change desire wins
   assert modeld_inputs(FakeSM({'turnpilotPlan': turnpilot_plan(False)}), log.Desire.laneChangeRight)[0] == log.Desire.laneChangeRight
+  # no desire while openpilot isn't steering; DesireHelper gates the lane change on latActive itself
+  assert modeld_inputs(FakeSM({'turnpilotPlan': turnpilot_plan(False)}), lat_active=False) == (log.Desire.none, LaneChangeDirection.left)
 
 
 def test_clear_desire():
   # the clear is fed to the model as no desire, and asks modeld to clear the turn desire history
-  assert plan_desire(CLEAR_DESIRE) == (log.Desire.none, True)
-  assert plan_desire(log.Desire.turnRight) == (log.Desire.turnRight, False)
+  assert plan_desire(CLEAR_DESIRE, True) == (log.Desire.none, True)
+  assert plan_desire(log.Desire.turnRight, True) == (log.Desire.turnRight, False)
+  # with openpilot not steering, no desire, but the clear still goes
+  assert plan_desire(log.Desire.turnRight, False) == (log.Desire.none, False)
+  assert plan_desire(CLEAR_DESIRE, False) == (log.Desire.none, True)
   assert CLEAR_DESIRE >= ModelConstants.DESIRE_LEN and CLEAR_DESIRE not in log.Desire.schema.enumerants.values()
 
 

@@ -28,9 +28,13 @@ def active_plan(sm, now: float | None = None):
   return None if plan.shadow or plan.state == custom.TurnpilotPlan.State.disabled else plan
 
 
-def plan_desire(desire: int) -> tuple[int, bool]:
-  """(desire to feed the model, clear the turn desire history) from turnpilotPlan.desire."""
-  return (0, True) if desire == CLEAR_DESIRE else (desire, False)
+def plan_desire(desire: int, lat_active: bool) -> tuple[int, bool]:
+  """(desire to feed the model, clear the turn desire history) from turnpilotPlan.desire. No desire while openpilot
+  isn't steering (carControl.latActive), so the model never plans a turn the driver didn't engage for; turnpilotd
+  pulses afresh once it is. A clear goes through regardless: it only takes turn desires out of the model's queue."""
+  if desire == CLEAR_DESIRE:
+    return 0, True
+  return (desire if lat_active else 0), False
 
 
 def plan_accel(accel_cap: float, speed_cap: float, v_ego: float) -> float:

@@ -5,7 +5,7 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot.hooks import plan_accel
 from openpilot.selfdrive.turnpilot.lane_planner import lane_change_window
 from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP, ONCOMING_TTA_S, PED_STOP_GAP_M
-from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_state, model_v2, nav_instruction, scene
+from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_control, car_state, model_v2, nav_instruction, scene
 from openpilot.selfdrive.turnpilot.desire_timing import TURN_DESIRE_LEAD_M
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, V_TURN_MIN
 from openpilot.selfdrive.turnpilot.turnpilotd import NO_LONG_REASON, TurnPilot, long_control_for
@@ -18,7 +18,8 @@ THREE_LANES_LEFT_TURN = ((("left",), True), (("straight",), False), (("straight"
 
 class FakeSM:
   def __init__(self):
-    self.data = {'carState': car_state(0.), 'navInstruction': nav_instruction(0., valid=False), 'modelV2': model_v2()}
+    self.data = {'carState': car_state(0.), 'carControl': car_control(), 'navInstruction': nav_instruction(0., valid=False),
+                 'modelV2': model_v2()}
     self.updated = dict.fromkeys(self.data, False)
     self.valid = dict.fromkeys(self.data, True)
     self.alive = dict.fromkeys(self.data, True)
@@ -37,12 +38,13 @@ class Sim:
     self.model_lanes, self.shadow, self.driver_signals, self.long_control = model_lanes, shadow, driver_signals, long_control
     self.trace = []
 
-  def step(self, objects=(), available=True, steer=0., blinker=False):
+  def step(self, objects=(), available=True, steer=0., blinker=False, lat_active=True):
     self.sm.updated = dict.fromkeys(self.sm.data, False)
     instr = self.navd.update(self.s)
     if instr is not None:
       self.sm.put('navInstruction', instr)
     self.sm.put('carState', car_state(self.v, steer, left_blinker=blinker))
+    self.sm.put('carControl', car_control(lat_active))
     self.sm.put('modelV2', model_v2(*self.model_lanes))
     plan = self.tp.plan(self.sm, scene(objects, available), True, self.shadow, self.driver_signals,
                         long_control=self.long_control).as_reader().turnpilotPlan
@@ -126,6 +128,16 @@ def test_highway_bends_are_left_alone():
   sim.run(40.)
   assert sim.s > 1000. and min(v for _, v, _ in sim.trace) > 29.9
   assert all(plan.desire == Desire.none and plan.speedCap == NO_SPEED_CAP for _, _, plan in sim.trace)
+
+
+def test_turn_desire_waits_for_openpilot_to_steer():
+  # the driver engages 20 m before the left: no desire before, a fresh pulse then
+  sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
+  for _ in range(int(45. / DT_MDL)):
+    sim.step(lat_active=sim.s > 280.)
+  edges = rising(sim.trace, 'desire', Desire.turnLeft)
+  assert edges and 280. < edges[0] < 281.
+  assert all(plan.desire == Desire.none for s, _, plan in sim.trace if s < 280.)
 
 
 def test_oncoming_car_holds_unprotected_left():

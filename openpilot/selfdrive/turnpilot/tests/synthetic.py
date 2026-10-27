@@ -83,6 +83,12 @@ def car_state(v_ego=10., steering_angle_deg=0., left_blinker=False, right_blinke
   return msg.as_reader().carState
 
 
+def car_control(lat_active=True):
+  msg = messaging.new_message('carControl')
+  msg.carControl.latActive = lat_active
+  return msg.as_reader().carControl
+
+
 def scene(objects=(), available=True):
   """A turnpilotScene reader. objects: dicts of TrackedObject fields (cls, x, y, vx, vy, inPath)."""
   msg = messaging.new_message('turnpilotScene')

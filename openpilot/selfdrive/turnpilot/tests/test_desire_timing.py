@@ -199,3 +199,54 @@ def test_next_turn_pulse_cancels_a_pending_clear():
                                       (20. / 17.2, 1, LEFT_TURN, 0., 4., 0.3, False),
                                       (3., 2, RIGHT_TURN, 30., 4., 0.3, True)])
   assert CLEAR_DESIRE not in out and Desire.turnRight in out
+
+
+def engage_through(dt_, legs, dt=DT_MDL):
+  """step_through with openpilot steering or not: legs of (seconds, maneuver, distance at the start, v, yaw rate, lat_active),
+  all one maneuver. Returns the desires."""
+  out = []
+  for seconds, maneuver, d0, v, yaw, lat_active in legs:
+    for k in range(int(round(seconds / dt))):
+      out.append(dt_.update(maneuver, d0 - v * k * dt, 1, False, v, 0., True, True, dt, yaw, lat_active=lat_active))
+  return out
+
+
+def pulses(out, desire):
+  return sum(cur == desire and prev != desire for prev, cur in zip([Desire.none] + out[:-1], out, strict=True))
+
+
+def test_no_desire_until_openpilot_steers():
+  # a slow approach with openpilot off from 40 m (longer than the timeout and every repeat), engaged 8 m out: one fresh
+  # pulse then, none before
+  out = engage_through(DesireTiming(), [(32. / 1.5, LEFT_TURN, 40., 1.5, 0., False), (2., LEFT_TURN, 8., 1.5, 0., True)])
+  i = int(round(32. / 1.5 / DT_MDL))
+  assert Desire.turnLeft not in out[:i] and CLEAR_DESIRE not in out
+  assert out[i] == Desire.turnLeft and pulses(out, Desire.turnLeft) == 1
+  # a keep the same way
+  out = engage_through(DesireTiming(), [(2., KEEP_LEFT, 20., 5., 0., False), (1., KEEP_LEFT, 10., 5., 0., True)])
+  assert Desire.keepLeft not in out[:40] and out[40] == Desire.keepLeft
+
+
+def test_disengaged_on_the_approach_pulses_again_when_engaged():
+  out = engage_through(DesireTiming(), [(1., LEFT_TURN, 40., 4., 0., True), (1., LEFT_TURN, 36., 4., 0., False),
+                                        (1., LEFT_TURN, 32., 4., 0., True)])
+  assert pulses(out, Desire.turnLeft) == 2 and out[20:40] == [Desire.none] * 20 and out[40] == Desire.turnLeft
+
+
+def test_no_pulse_on_engaging_in_the_turn():
+  # the driver took over 15 m out and turned the car 30 degrees by hand before engaging again: a pulse now would turn it
+  # on past the exit road
+  yaw = 0.3  # rad/s, 17 deg/s
+  out = engage_through(DesireTiming(), [(25. / 4., LEFT_TURN, 40., 4., 0., True), (30. / 17.2, LEFT_TURN, 15., 4., yaw, False),
+                                        (1., LEFT_TURN, 8., 4., yaw, True)])
+  assert pulses(out, Desire.turnLeft) == 2  # the one at the lead and a repeat on the REPULSE_S clock, both before the takeover
+  assert Desire.turnLeft not in out[int(round(25. / 4. / DT_MDL)):]
+
+
+def test_turn_desire_cleared_with_openpilot_off():
+  # pulsed with openpilot steering, then the driver took over and drove the turn: the clear still goes at 80 degrees
+  yaw = 0.5
+  out = engage_through(DesireTiming(), [(5., LEFT_TURN, 40., 4., 0., True), (3.5, LEFT_TURN, 20., 4., yaw, False)])
+  assert Desire.turnLeft in out and out.count(CLEAR_DESIRE) == CLEAR_FRAMES
+  i = out.index(CLEAR_DESIRE)
+  assert abs((i * DT_MDL - 5.) * yaw * 57.3 - (90. - CLEAR_MARGIN_DEG)) < 2.
