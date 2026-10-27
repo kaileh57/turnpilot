@@ -4,7 +4,7 @@ Connections (BeamNGpy connections are not thread safe, and BeamNG.tech accepts s
   self.bng       game engine: scenario setup, scenario hooks and teardown, under bng_lock
   ego.connection the car: control and electrics, in the vehicle thread
   self.imu_bng   game engine: the AdvancedIMU (pose, acceleration) at 100 Hz sim time, polled in the imu thread
-  two more       one per camera, in cameras.CameraRig
+  one more       both cameras, polled in one burst in cameras.CameraStream (a fourth for --capture)
 The game runs in real time; nothing here steps it. Closing disconnects and removes our sensors, and never quits the game.
 """
 import threading
