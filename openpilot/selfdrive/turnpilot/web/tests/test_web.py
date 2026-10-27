@@ -1,10 +1,13 @@
 import http.client
 import json
 import re
+import socket
 import struct
 import threading
 import time
 import zlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 import numpy as np
 
@@ -36,11 +39,17 @@ class FakeSearch:
 
 class WebTestCase(OpenpilotTestCase):
   """A real server on a free port, backed by the per-test Params that OpenpilotTestCase isolates."""
+  HANDLER_TIMEOUT = None  # a test that waits on timeouts sets a short one
+
   def setup_method(self):
     self.params = Params()
     self.search = FakeSearch([{"name": "Cafe", "detail": "1 Main St", "latitude": 39.1, "longitude": -86.2}])
     self.app = server.App(self.params, reader=None, search=self.search, resolve=places.resolve_apple_maps)
     self.token = ensure_token(self.params)
+    if self.HANDLER_TIMEOUT:
+      patcher = mock.patch.object(server.Handler, "timeout", self.HANDLER_TIMEOUT)
+      patcher.start()
+      self.addCleanup(patcher.stop)
     self.httpd = server.Server(("127.0.0.1", 0), server.make_handler(self.app))
     self.port = self.httpd.server_address[1]
     threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
@@ -68,6 +77,18 @@ class WebTestCase(OpenpilotTestCase):
     conn.close()
     is_json = resp.getheader("Content-Type", "").startswith("application/json")
     return resp.status, json.loads(raw) if is_json else raw, dict(resp.getheaders())
+
+  def raw(self, data: bytes, wait: float = 3.) -> bytes:
+    """Send bytes down a plain socket and return everything the server answers before it closes the connection."""
+    with socket.create_connection(("127.0.0.1", self.port), timeout=wait) as sock:
+      sock.sendall(data)
+      out = b""
+      try:
+        while chunk := sock.recv(4096):
+          out += chunk
+      except TimeoutError:
+        raise AssertionError(f"the server kept the connection open for {wait} s; got {out!r}") from None
+      return out
 
 
 class TestToken(WebTestCase):
@@ -98,17 +119,35 @@ class TestToken(WebTestCase):
     assert self.call("GET", "/api/status", auth="cookie")[0] == 200
     assert self.call("GET", "/api/status", auth="none", headers={"Authorization": f"Basic {self.token}"})[0] == 401
 
-  def test_query_token_works_on_the_page_only(self):
-    code, body, _ = self.call("GET", "/", auth="none")
-    assert code == 401 and b"Not paired" in body
-
-    code, body, headers = self.call("GET", f"/?t={self.token}", auth="none")
-    assert code == 200 and body.startswith(b"<!doctype html>")
-    cookie = headers["Set-Cookie"]
-    assert cookie.startswith(f"tp_token={self.token};") and "HttpOnly" in cookie and "SameSite=Strict" in cookie
-
-    assert self.call("GET", "/?t=wrong", auth="none")[0] == 401
+  def test_page_loads_without_a_token_and_the_api_does_not(self):
+    page = server.INDEX.read_bytes()
+    for path in ("/", "/?t=wrong", f"/?t={self.token}"):
+      code, body, headers = self.call("GET", path, auth="none")
+      assert code == 200 and body == page and headers["Content-Type"].startswith("text/html"), path
+    assert b'id="unpaired"' in page  # what the page shows when the API says 401
+    assert self.call("GET", "/nope", auth="none")[0] == 401  # only the page and the icon are open
+    assert self.call("POST", "/", {}, auth="none")[0] == 401
     assert self.call("GET", f"/api/status?t={self.token}", auth="none")[0] == 401
+
+  def test_query_token_sets_the_cookie_and_nothing_else_does(self):
+    code, _, headers = self.call("GET", f"/?t={self.token}", auth="none")
+    cookie = headers["Set-Cookie"]
+    assert code == 200
+    assert cookie.startswith(f"tp_token={self.token};") and "HttpOnly" in cookie and "SameSite=Strict" in cookie
+    assert self.call("GET", "/api/status", auth="none", headers={"Cookie": cookie.split(";")[0]})[0] == 200
+
+    for path, auth in [("/", "none"), ("/?t=wrong", "none"), ("/?t=", "none"), ("/", "bearer"), ("/?t=wrong", "cookie")]:
+      assert "Set-Cookie" not in self.call("GET", path, auth=auth)[2], (path, auth)
+
+  def test_cookie_never_holds_the_raw_query_value(self):
+    # a request that offers the valid token too passes the check, so the junk next to it must not reach the cookie or any header
+    junk = "wrong%0d%0aX-Injected:%201"
+    for path in (f"/?t={junk}&t={self.token}", f"/?t={self.token}&t={junk}"):
+      code, _, headers = self.call("GET", path, auth="none")
+      assert code == 200 and "X-Injected" not in headers, path
+      assert headers["Set-Cookie"].startswith(f"tp_token={self.token};"), path
+    code, _, headers = self.call("GET", f"/?t={junk}", auth="cookie")
+    assert code == 200 and "X-Injected" not in headers and "Set-Cookie" not in headers
 
   def test_icon_is_public_and_a_png(self):
     code, body, headers = self.call("GET", "/icon.png", auth="none")
@@ -132,6 +171,45 @@ class TestToken(WebTestCase):
     old = server.LOOPBACK
     server.LOOPBACK = value
     self.addCleanup(setattr, server, "LOOPBACK", old)
+
+
+class TestHandlerDefaults(OpenpilotTestCase):
+  def test_sockets_time_out_by_default(self):
+    assert server.Handler.timeout == server.REQUEST_TIMEOUT and 0 < server.REQUEST_TIMEOUT <= 30
+
+
+class TestConnections(WebTestCase):
+  """Sockets that stall or lie about their length must not hold a handler thread for good."""
+  HANDLER_TIMEOUT = 0.4
+
+  def post_head(self, length):
+    headers = ["POST /api/destination HTTP/1.1", f"Authorization: Bearer {self.token}", "Content-Type: application/json",
+               f"Content-Length: {length}", "", ""]
+    return "\r\n".join(headers).encode()
+
+  def test_idle_connection_is_closed(self):
+    assert self.raw(b"") == b""
+
+  def test_half_a_request_is_closed(self):
+    assert self.raw(b"GET /api/status HTTP/1.1\r\nHost: x\r\n") == b""
+
+  def test_short_body_times_out(self):
+    reply = self.raw(self.post_head(50) + b'{"latitude"')
+    assert reply.startswith(b"HTTP/1.0 408 ") and b"request timed out" in reply
+    assert self.params.get("NavDestination") is None
+
+  def test_bad_content_length_is_rejected_at_once(self):
+    for length in ("-1", "-0", "abc", "1.5", "+5", "1_0", "\u00b2"):
+      reply = self.raw(self.post_head(length))
+      assert reply.startswith(b"HTTP/1.0 400 ") and b"bad Content-Length" in reply, (length, reply)
+    assert self.call("POST", "/api/destination", {"latitude": 1, "longitude": 2}, headers={"Content-Length": "-1"})[0] == 400
+    assert self.params.get("NavDestination") is None
+
+  def test_too_long_body_is_still_413(self):
+    assert self.call("POST", "/api/destination", b" " * (server.MAX_BODY + 1))[0] == 413
+
+  def test_a_request_inside_the_timeout_still_works(self):
+    assert self.call("POST", "/api/destination", {"latitude": 1, "longitude": 2})[0] == 200
 
 
 class TestDestination(WebTestCase):
@@ -267,6 +345,33 @@ class TestFavorites(WebTestCase):
     assert self.call("GET", "/api/favorites")[1] == {"favorites": [], "recents": []}
     self.params.put("TurnPilotFavorites", {"favorites": [1, {"name": "ok", "latitude": 1, "longitude": 2}]}, block=True)
     assert [p["name"] for p in self.call("GET", "/api/favorites")[1]["favorites"]] == ["ok"]
+    self.params.put("TurnPilotFavorites", {"favorites": 5, "recents": "x"}, block=True)
+    assert self.call("GET", "/api/favorites")[1] == {"favorites": [], "recents": []}
+
+  BAD_PLACES = [{"name": "no coordinates"}, {"name": "no longitude", "latitude": 1}, {"latitude": None, "longitude": 2},
+                {"name": "text", "latitude": "39.1", "longitude": "-86.2"}, {"name": "bool", "latitude": True, "longitude": 1},
+                {"name": "range", "latitude": 99, "longitude": 0}, {"name": "list", "latitude": [1], "longitude": 2}, 7, None, "x"]
+  GOOD = {"name": "Home", "latitude": 39.1, "longitude": -86.2, "id": "abc12345"}
+
+  def test_places_without_numeric_coordinates_are_dropped(self):
+    self.params.put("TurnPilotFavorites", {"favorites": [*self.BAD_PLACES, self.GOOD], "recents": [*self.BAD_PLACES, self.GOOD]}, block=True)
+    code, body, _ = self.call("GET", "/api/favorites")
+    assert code == 200 and body == {"favorites": [self.GOOD], "recents": [self.GOOD]}
+    # these used to raise KeyError in same_place or destination
+    self.params.put("NavDestination", {"latitude": 39.1, "longitude": -86.2}, block=True)
+    code, body, _ = self.call("GET", "/api/status")
+    assert code == 200 and body["destination"]["name"] == "Home"
+    assert self.call("POST", "/api/destination", {"latitude": 40, "longitude": -86, "name": "New"})[0] == 200
+    assert self.call("POST", "/api/favorites", {"latitude": 41, "longitude": -86, "name": "Fav"})[0] == 200
+    saved = self.params.get("TurnPilotFavorites")
+    assert [p["name"] for p in saved["recents"]] == ["New", "Home"]
+    assert [p["name"] for p in saved["favorites"]] == ["Home", "Fav"]  # writing again also cleans the stored param
+
+  def test_a_place_without_a_name_gets_its_coordinates(self):
+    self.params.put("TurnPilotFavorites", {"favorites": [{"latitude": 1.5, "longitude": 2.5, "id": "x"}]}, block=True)
+    self.params.put("NavDestination", {"latitude": 1.5, "longitude": 2.5}, block=True)
+    assert self.call("GET", "/api/favorites")[1]["favorites"][0]["name"] == "1.50000, 2.50000"
+    assert self.call("GET", "/api/status")[1]["destination"]["name"] == "1.50000, 2.50000"
 
 
 class TestPlaces(OpenpilotTestCase):
@@ -384,6 +489,96 @@ class TestPlaces(OpenpilotTestCase):
     assert places.USER_AGENT.startswith("turnpilot-web/") and "http" in places.USER_AGENT
 
 
+class TestAppleFetch(OpenpilotTestCase):
+  """fetch_apple against throwaway servers on loopback, with APPLE_HOST pointed at 127.0.0.1."""
+  def setup_method(self):
+    patcher = mock.patch.object(places, "APPLE_HOST", "127.0.0.1")
+    patcher.start()
+    self.addCleanup(patcher.stop)
+
+  def serve(self, routes):
+    """(base url, hits). A route is (status, headers, body), or a function that answers on the handler itself."""
+    hits = []
+
+    class Handler(BaseHTTPRequestHandler):
+      def do_GET(self):
+        hits.append(self.path)
+        route = routes.get(self.path.split("?")[0])
+        if route is None:
+          return self.send_error(404)
+        if callable(route):
+          return route(self)
+        status, headers, body = route
+        self.send_response(status)
+        for k, v in headers.items():
+          self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+      def log_message(self, format, *args):  # noqa: A002
+        pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, args=(0.05,), daemon=True).start()  # shutdown waits one poll
+    self.addCleanup(httpd.server_close)
+    self.addCleanup(httpd.shutdown)
+    return f"http://127.0.0.1:{httpd.server_address[1]}", hits
+
+  def test_follows_redirects_on_the_apple_host(self):
+    base, _ = self.serve({"/p/short": (302, {"Location": "/p/hop"}, b""), "/p/hop": (301, {"Location": "/?ll=39.5%2C-86.5&q=Park"}, b""),
+                          "/": (200, {}, b"<html>ok</html>")})
+    assert places.fetch_apple(f"{base}/p/short") == (f"{base}/?ll=39.5%2C-86.5&q=Park", b"<html>ok</html>")
+    assert places.resolve_apple_maps(f"{base}/p/short") == {"latitude": 39.5, "longitude": -86.5, "name": "Park"}
+
+  def test_a_redirect_off_the_apple_host_is_never_requested(self):
+    other, other_hits = self.serve({"/": (200, {}, b"ll=1.5,2.5")})
+    port = other.rsplit(":", 1)[1]
+    for location in (f"http://localhost:{port}/", f"//localhost:{port}/", f"http://127.0.0.1@localhost:{port}/"):
+      base, hits = self.serve({"/p/x": (302, {"Location": location}, b"")})
+      with self.assertRaises(OSError):
+        places.fetch_apple(f"{base}/p/x")
+      assert places.resolve_apple_maps(f"{base}/p/x") is None
+      assert hits == ["/p/x", "/p/x"] and other_hits == [], location  # the Apple host was asked, the other host never was
+
+  def test_redirect_loops_end(self):
+    base, hits = self.serve({"/p/loop": (302, {"Location": "/p/loop"}, b"")})
+    with self.assertRaises(OSError):
+      places.fetch_apple(f"{base}/p/loop")
+    assert len(hits) <= 5
+
+  def test_gives_up_after_the_total_timeout(self):
+    def drip(handler):  # a server that never finishes: each read gets a byte in time, so only the total deadline stops it
+      handler.send_response(200)
+      handler.end_headers()
+      try:
+        for _ in range(60):
+          handler.wfile.write(b"x")
+          handler.wfile.flush()
+          time.sleep(0.05)
+      except OSError:
+        pass
+
+    def stall(handler):  # accepts the request and never answers
+      time.sleep(2)
+
+    def slow_hop(handler):  # the redirect arrives late, and the page behind it is slow too
+      time.sleep(0.4)
+      handler.send_response(302)
+      handler.send_header("Location", "/p/stall")
+      handler.send_header("Content-Length", "0")
+      handler.end_headers()
+
+    base, _ = self.serve({"/p/drip": drip, "/p/stall": stall, "/p/hop": slow_hop})
+    for path in ("/p/drip", "/p/stall", "/p/hop"):
+      start = time.monotonic()
+      with self.assertRaises(OSError):  # TimeoutError and URLError are both OSErrors
+        places.fetch_apple(base + path, total=0.7)
+      assert time.monotonic() - start < 1.5, path
+    assert places.APPLE_TIMEOUT < places.TIMEOUT
+
+
 class TestPairing(OpenpilotTestCase):
   def setup_method(self):
     self.params = Params()
@@ -406,8 +601,7 @@ class TestPairing(OpenpilotTestCase):
 
 
 class TestStatus(OpenpilotTestCase):
-  ROUTE = {"text": "Main St", "type": "turn", "modifier": "left", "maneuver_m": 310., "remaining_m": 6600., "remaining_s": 780.,
-           "points": 120}
+  ROUTE = {"text": "Main St", "type": "turn", "modifier": "left", "maneuver_m": 310., "remaining_m": 6600., "remaining_s": 780.}
   PLAN = {"state": "following", "reason": "", "shadow": False}
 
   def snap(self, **kw):
@@ -436,7 +630,19 @@ class TestStatus(OpenpilotTestCase):
     tp = status.format_status(self.snap(plan=plan), None, True, False, now=101.)["turnpilot"]
     assert (tp["state"], tp["label"], tp["reason"], tp["shadow"]) == ("holding", "Holding", "pedestrian in crosswalk", True)
     tp = status.format_status(self.snap(plan=None), None, False, False, now=101.)["turnpilot"]
-    assert tp == {"enabled": False, "state": "offline", "label": "Not running", "reason": "turnpilotd is not running", "shadow": False}
+    assert tp == {"enabled": False, "state": "offline", "label": "Not running", "reason": "TurnPilot is off", "shadow": False}
+
+  def test_offline_reason_names_the_cause(self):
+    def reason(onroad, enabled, plan=None, **kw):
+      return status.format_status(self.snap(onroad=onroad, plan=plan), None, enabled, False, **{"now": 101., **kw})["turnpilot"]["reason"]
+    assert reason(onroad=True, enabled=False) == "TurnPilot is off"
+    assert reason(onroad=False, enabled=False) == "TurnPilot is off"
+    assert reason(onroad=False, enabled=True) == "car is off"
+    assert reason(onroad=True, enabled=True) == "turnpilotd is not running"
+    assert reason(onroad=False, enabled=True, plan=self.PLAN) == ""  # a plan speaks for itself, whatever the car says
+    # a stale or missing snapshot has no onroad to go by, so it must not claim the car is off
+    assert reason(onroad=True, enabled=True, now=200.) == "car data is not available"
+    assert status.format_status(None, None, True, False)["turnpilot"]["reason"] == "car data is not available"
 
   def test_stale_or_missing_snapshot_reads_as_unavailable(self):
     for snap, now in [(None, 0.), (self.snap(), 100. + status.STALE_AFTER + 1)]:
@@ -468,7 +674,7 @@ class TestStatusReader(WebTestCase):
     reader.start()
     self.addCleanup(reader.stop)
 
-    pm = messaging.PubMaster(["deviceState", "navInstruction", "navRoute", "turnpilotPlan", "gpsLocation"])
+    pm = messaging.PubMaster(["deviceState", "navInstruction", "turnpilotPlan", "gpsLocation"])
     self.call("POST", "/api/destination", {"latitude": 39.1, "longitude": -86.2, "name": "Home"})
     self.params.put_bool("IsMetric", True)
 
@@ -481,9 +687,6 @@ class TestStatusReader(WebTestCase):
       ni.maneuverPrimaryText, ni.maneuverType, ni.maneuverModifier = "Main Street", "turn", "left"
       ni.maneuverDistance, ni.distanceRemaining, ni.timeRemaining = 250., 5400., 600.
       pm.send("navInstruction", msg)
-      msg = messaging.new_message("navRoute", valid=True)
-      msg.navRoute.init("coordinates", 3)
-      pm.send("navRoute", msg)
       msg = messaging.new_message("turnpilotPlan")  # turnpilotd leaves valid unset
       msg.turnpilotPlan.state = "approaching"
       msg.turnpilotPlan.reason = "waiting for oncoming"
@@ -507,3 +710,29 @@ class TestStatusReader(WebTestCase):
     assert (body["turnpilot"]["state"], body["turnpilot"]["reason"]) == ("approaching", "waiting for oncoming")
     assert body["gps"] == {"latitude": 39.7, "longitude": -86.1}
     assert self.app.position() == (39.7, -86.1)  # the live fix is what searches bias towards
+    assert "points" not in reader.get()["route"] and "navRoute" not in status.SERVICES
+
+  def test_snapshots_come_at_most_twice_a_second(self):
+    calls = []
+    real = status.read_services
+
+    def counting(sm):
+      calls.append(time.monotonic())
+      return real(sm)
+    patcher = mock.patch.object(status, "read_services", counting)
+    patcher.start()
+    self.addCleanup(patcher.stop)
+    reader = status.StatusReader()
+    reader.start()
+    self.addCleanup(reader.stop)
+
+    pm = messaging.PubMaster(["turnpilotPlan"])
+    sent, end = 0, time.monotonic() + 1.6
+    while time.monotonic() < end:  # a service at about 100 Hz used to mean a snapshot for every message
+      pm.send("turnpilotPlan", messaging.new_message("turnpilotPlan"))
+      sent += 1
+      time.sleep(0.01)
+    assert sent > 60
+    assert 2 <= len(calls) <= 5, calls
+    assert all(b - a >= 0.45 for a, b in zip(calls, calls[1:], strict=False)), calls
+    assert reader.get()["plan"] is not None  # and the newest message still gets through

@@ -47,6 +47,8 @@ code { display: block; word-break: break-all; margin: 4px 0 12px; padding: 8px; 
 </head>
 <body>
 <h1>TurnPilot</h1>
+<p id="unpaired" hidden>Not paired. Scan the QR code on the comma screen with the phone camera.</p>
+<div id="app">
 <div id="status"><div class="note">Connecting...</div></div>
 <div id="error" role="alert"></div>
 
@@ -68,13 +70,15 @@ code { display: block; word-break: break-all; margin: 4px 0 12px; padding: 8px; 
   URL<code id="endpoint"></code>
   Token<code id="token"></code>
 </details>
+</div>
 
 <script>
 "use strict";
-var token = new URLSearchParams(location.search).get("t");
-try {
-  if (token) localStorage.setItem("tp_token", token); else token = localStorage.getItem("tp_token");
-} catch (e) {}
+// The page holds no secrets and loads without a token. The token comes from the link the QR code opens, or from the
+// phone's storage after that. The link's copy is stored only once the comma accepts it, so a bad link can't replace a good token.
+var urlToken = new URLSearchParams(location.search).get("t");
+var token = urlToken, paired = true, timer;
+try { if (!token) token = localStorage.getItem("tp_token"); } catch (e) {}
 
 function $(id) { return document.getElementById(id); }
 function el(tag, cls, text) {
@@ -97,14 +101,27 @@ async function api(path, method, body) {
   }
   var data = {};
   try { data = await r.json(); } catch (e) {}
-  if (r.status === 401) throw new Error("Not paired. Scan the QR code on the comma screen.");
+  if (r.status === 401) { var denied = new Error("Not paired"); denied.unpaired = true; throw denied; }
   if (!r.ok) throw new Error(data.error || "Request failed (" + r.status + ")");
+  if (urlToken) {
+    try { localStorage.setItem("tp_token", urlToken); } catch (e) {}
+    urlToken = null;
+  }
   return data;
 }
 
+function unpair() {
+  paired = false;
+  clearInterval(timer);
+  if (!urlToken) { try { localStorage.removeItem("tp_token"); } catch (e) {} }  // the stored token was refused, but a refused link says nothing about it
+  $("app").hidden = true;
+  $("unpaired").hidden = false;
+}
+function fail(e) { if (e.unpaired) unpair(); else showError(e.message); }
+
 async function act(fn) {
   showError("");
-  try { await fn(); } catch (e) { showError(e.message); }
+  try { await fn(); } catch (e) { fail(e); }
 }
 
 function row(place, buttons) {
@@ -207,20 +224,21 @@ async function poll() {
     render(await api("/api/status"));
     if ($("error").textContent.indexOf("Cannot reach") === 0) showError("");
   } catch (e) {
-    showError(e.message);
+    fail(e);
   }
 }
 
 async function start() {
-  poll();
+  await poll();  // a 401 here means there is no valid token, so there is nothing else to load
+  if (!paired) return;
   act(loadPlaces);
   act(async function () {
     var p = await api("/api/pairing");
     $("endpoint").textContent = p.endpoint;
     $("token").textContent = p.token;
   });
-  setInterval(function () { if (!document.hidden) poll(); }, 2000);
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) poll(); });
+  timer = setInterval(function () { if (!document.hidden) poll(); }, 2000);
+  document.addEventListener("visibilitychange", function () { if (paired && !document.hidden) poll(); });
 }
 start();
 </script>

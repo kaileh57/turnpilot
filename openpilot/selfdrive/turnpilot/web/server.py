@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """turnpilot_web: the phone companion. One page and a small JSON API, standard library only.
 
-Chase's phone joins nothing: the comma joins the phone's hotspot, and this serves one page on port 8088. Every request
-needs the token in TurnPilotWebToken, as a Bearer header or as the cookie set by opening /?t=<token> once.
+Chase's phone joins nothing: the comma joins the phone's hotspot, and this serves one page on port 8088. The page holds
+no secrets, so / is open. Every /api/ request needs the token in TurnPilotWebToken, as a Bearer header or as the cookie set
+by opening /?t=<token> once.
 """
 import hmac
 import json
@@ -21,10 +22,8 @@ from openpilot.selfdrive.turnpilot.web.store import Store, ensure_token, valid_l
 INDEX = Path(__file__).with_name("index.html")
 COOKIE = "tp_token"
 MAX_BODY = 16 * 1024
+REQUEST_TIMEOUT = 10.  # s a client may stall on one socket read or write; Safari opens sockets it never uses
 LOOPBACK = ("127.0.0.1", "::1")
-UNPAIRED = b"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width">
-<title>TurnPilot</title><body style="font:20px system-ui;margin:24px">
-<h1>Not paired</h1><p>Scan the QR code on the comma screen with the phone camera.</p>"""
 
 
 class ApiError(Exception):
@@ -51,9 +50,15 @@ class App:
     self.search = search
     self.resolve = resolve
 
+  def valid_token(self, candidates) -> str | None:
+    """The stored token if any candidate matches it, else None."""
+    expected = self.store.token()
+    if expected and any(hmac.compare_digest(c.encode(), expected.encode()) for c in candidates):
+      return expected
+    return None
+
   def token_ok(self, candidates) -> bool:
-    expected = self.store.token().encode()
-    return bool(expected) and any(hmac.compare_digest(c.encode(), expected) for c in candidates)
+    return self.valid_token(candidates) is not None
 
   def position(self):
     """(latitude, longitude) to bias searches towards: the live fix, else the last one saved."""
@@ -68,6 +73,7 @@ class App:
 class Handler(BaseHTTPRequestHandler):
   app: App  # set on a subclass by make_handler
   server_version = "turnpilot-web"
+  timeout = REQUEST_TIMEOUT  # StreamRequestHandler puts this on the socket, so idle and half-open connections let go
 
   def log_message(self, format, *args):  # noqa: A002
     pass  # the first request line carries the pairing token
@@ -97,26 +103,33 @@ class Handler(BaseHTTPRequestHandler):
     self.send(code, json.dumps(obj).encode(), "application/json")
 
   def body(self) -> dict:
-    length = int(self.headers.get("Content-Length") or 0)
+    size = (self.headers.get("Content-Length") or "0").strip()
+    if not (size.isascii() and size.isdigit()):  # also catches -1, which read() would treat as "until the client hangs up"
+      raise ApiError(400, "bad Content-Length")
+    length = int(size)
     if length > MAX_BODY:
       raise ApiError(413, "body too large")
     try:
-      data = json.loads(self.rfile.read(length) or b"{}")
+      raw = self.rfile.read(length)
+    except TimeoutError:
+      self.close_connection = True
+      raise ApiError(408, "request timed out") from None
+    try:
+      data = json.loads(raw or b"{}")
     except ValueError:
       raise ApiError(400, "body is not JSON") from None
     if not isinstance(data, dict):
       raise ApiError(400, "body must be a JSON object")
     return data
 
-  def credentials(self, query, is_page) -> list[str]:
+  def credentials(self) -> list[str]:
+    """What the request offers as the token. The ?t= in a URL isn't one: it only pairs on the page, so it stays out of API request lines."""
     found = []
     auth = self.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
       found.append(auth[7:].strip())
     if morsel := SimpleCookie(self.headers.get("Cookie", "")).get(COOKIE):
       found.append(morsel.value)
-    if is_page:  # the token in the URL works on the page only, so it stays out of API request lines
-      found += query.get("t", [])
     return found
 
   def dispatch(self, method):
@@ -125,18 +138,15 @@ class Handler(BaseHTTPRequestHandler):
     try:
       if method == "GET" and path == "/icon.png":  # iOS fetches this without our cookie; it holds nothing private
         return self.send(200, icon_png(), "image/png", [("Cache-Control", "max-age=86400")])
-      is_page = method == "GET" and path == "/"
-      authorized = self.app.token_ok(self.credentials(query, is_page))
+      if method == "GET" and path == "/":  # no secrets in the page, so a launch that lost its ?t= can still load and use the stored token
+        return self.page(query)
+      authorized = self.app.token_ok(self.credentials())
       if path == "/pair.svg":  # shows the token, so only the token holder or the device itself may see it
         authorized = authorized or self.client_address[0] in LOOPBACK
       if not authorized:
-        if is_page:
-          return self.send(401, UNPAIRED, "text/html; charset=utf-8")
         raise ApiError(401, "unauthorized")
       if method == "POST" and not self.headers.get("Content-Type", "").lower().startswith("application/json"):
         raise ApiError(415, "send application/json")  # a cross-site form can't send this without a preflight
-      if is_page:
-        return self.page(query)
       if method == "GET" and path == "/pair.svg":
         with self.app.store.lock:
           url = pairing_url(self.app.store.params)
@@ -152,8 +162,8 @@ class Handler(BaseHTTPRequestHandler):
 
   def page(self, query):
     extra = []
-    if token := query.get("t"):  # visited with the token: remember it for the next visit
-      extra = [("Set-Cookie", f"{COOKIE}={token[0]}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict")]
+    if token := self.app.valid_token(query.get("t", [])):  # opened with the token: remember it for the next visit
+      extra = [("Set-Cookie", f"{COOKIE}={token}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict")]  # the stored token, never the query's
     self.send(200, INDEX.read_bytes(), "text/html; charset=utf-8", extra)
 
   def api(self, method, path, query):

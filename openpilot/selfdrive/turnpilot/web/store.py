@@ -65,9 +65,16 @@ class Store:
       return self.params.get_bool(key)
 
   def _load(self) -> dict:
+    """Both lists, keeping only entries with numeric coordinates: the param can be edited by hand or left by an older version."""
     data = self.params.get("TurnPilotFavorites")
     data = data if isinstance(data, dict) else {}
-    return {k: [p for p in data.get(k, []) if isinstance(p, dict)] for k in ("favorites", "recents")}
+    loaded = {}
+    for key in ("favorites", "recents"):
+      items = data.get(key)
+      items = items if isinstance(items, list) else []
+      usable = [p for p in items if isinstance(p, dict) and valid_latlon(p.get("latitude"), p.get("longitude"))]
+      loaded[key] = [{**p, "name": str(p.get("name") or "") or coords_text(p["latitude"], p["longitude"])} for p in usable]
+    return loaded
 
   def _save(self, data):
     self.params.put("TurnPilotFavorites", data, block=True)
