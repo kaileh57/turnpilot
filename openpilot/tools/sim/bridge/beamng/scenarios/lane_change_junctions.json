@@ -18,5 +18,15 @@
     "heading_deg": -177.1,
     "dest": [-841.58, -447.58, 96.79],
     "speed_kph": 45
+  },
+  {
+    "name": "DR290_1_left",
+    "note": "4-lane road (--++) through wpTown_5 into the junction DR290_1 at (-389.0, 433.1), from demo_junctions.py; spawn 364 m out in the right lane, so the left turn needs one lane change left",
+    "junction": [-389.0, 433.1],
+    "turn": "left",
+    "spawn": [-642.5, 171.8, 115.23],
+    "heading_deg": 45.1,
+    "dest": [-445.6, 489.6, 96.0],
+    "speed_kph": 45
   }
 ]

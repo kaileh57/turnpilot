@@ -5,13 +5,16 @@ Each run: teleport the car to the scenario's start, place its mannequin or cars,
 the way the phone does, engage, then watch turnpilotPlan, selfdriveState, carState, navInstruction and modelV2 until
 the car arrives, disengages, stops (where the scenario ends on a stop) or times out. A result JSON per invocation holds
 every run: outcome, maneuvers taken of attempted, disengagements with cause, holds with reason and duration, the
-closest the car came to the mannequin or another car, the rlog segments, and the 20 Hz rows it was scored from.
-Everything a run spawns is removed after it, and again from here after the bridge exits (a sweep by name).
+closest the car came to the mannequin or another car, the rlog segments, the 20 Hz rows it was scored from, and a
+20 Hz pose log of the car and the actors for chase_render.py. Everything a run spawns is removed after it, and again
+from here after the bridge exits (a sweep by name).
 
 Start openpilot first (navd, turnpilotd and turnpilot_web need NavigationEnabled and TurnPilotEnabled, which this sets):
   OPENPILOT_PREFIX=tpsim openpilot/tools/sim/bridge/beamng/launch_openpilot.sh
   OPENPILOT_PREFIX=tpsim python -m openpilot.tools.sim.bridge.beamng.scenarios.run ped_crosswalk_right --runs 3 --record ~/turnpilot-artifacts/demo
-Bridge options (--host, --capture, --signals, ...) pass through; --record sets --capture and records the UI as well.
+Bridge options (--host, --signals, ...) pass through. --record records the UI while the runs drive and renders each run's
+chase view after the bridge exits, from the pose log: a live chase camera (--capture) costs the driving cameras 6 to 9
+pairs a second, at which the model's turns fail.
 """
 import argparse
 import json
@@ -32,6 +35,7 @@ from openpilot.common.params import Params
 from openpilot.selfdrive.turnpilot.web.pairing import PORT
 from openpilot.selfdrive.turnpilot.web.store import ensure_token
 from openpilot.tools.sim.bridge.beamng import frame
+from openpilot.tools.sim.bridge.beamng.pose import beamng_quat
 from openpilot.tools.sim.bridge.beamng.scenario import heading_quat
 from openpilot.tools.sim.bridge.beamng.scenarios import score
 from openpilot.tools.sim.bridge.beamng.scenarios.catalog import DATA_JSON, SCENARIOS, Plan, build, hold_distance
@@ -45,6 +49,8 @@ ENGAGE_TIMEOUT_S = 30.
 ROLL_FRACTION = 0.8   # the driver rolls up to this much of the set speed before engaging, as gate1 does
 SERVICES = ['turnpilotPlan', 'selfdriveState', 'carState', 'navInstruction', 'navRoute', 'modelV2']
 OUT_ROOT = os.path.expanduser("~/turnpilot-artifacts/scenarios")
+POSE_FIELDS = ["wall_s", "t_s", "x", "y", "z", "qx", "qy", "qz", "qw"]  # route_drive's, which chase_render.py reads
+ACTOR_FIELDS = ["wall_s", "x", "y", "z", "heading"]
 
 
 def wall() -> float:
@@ -116,6 +122,8 @@ class Runner:
     if self.sm.updated['navInstruction'] and not self.sm.valid['navInstruction']:
       self.nav_cleared = True
     plan = self.plan
+    if self.phase not in ('next', 'done') and b.rk_frame % 5 == 0:  # 20 Hz, from the teleport to the end of the run
+      self.log_pose(b)
     if not self.director.is_alive() and self.phase not in ('next', 'done'):
       self.end_run(b, 'error', "the scenario director stopped (is the game reachable?)")
       self.finish(b)
@@ -174,6 +182,8 @@ class Runner:
     self.setup = self.director.submit(self.director.setup, plan.actors)
     self.t0, self.t0_wall, self.phase = time.monotonic(), wall(), 'settle'
     self.rows: list[dict] = []
+    self.poses: list[tuple] = []
+    self.actor_poses: dict[str, dict] = {}
     self.fired: set[str] = set()
     self.jobs: list = []  # trigger jobs: a failed one explains a failed run
     self.route_pts, self.route_id, self.nav_cleared = None, 0, False
@@ -208,6 +218,24 @@ class Runner:
       if a.trigger == 'pace':
         r['pacer_dx'] = round((pose[0] - x) * math.cos(h) + (pose[1] - y) * math.sin(h), 2)
     return r
+
+  def log_pose(self, b):
+    """The car's IMU pose as route_drive logs it, and each actor's pose from the director, for chase_render.py. An
+    actor's pose that holds keeps its first and last rows only, so a car standing until it is released starts on time."""
+    pose = b.world.pose
+    if pose is not None:
+      self.poses.append((round(wall(), 3), round(time.monotonic() - self.t0, 2), *(round(float(v), 3) for v in pose.pos),
+                         *(round(v, 5) for v in beamng_quat(pose.fwd, pose.up))))
+    for a in self.plan.actors:
+      p = self.director.poses.get(a.name)
+      if p is None:
+        continue
+      new = [round(wall(), 3), round(p[0], 3), round(p[1], 3), round(p[3], 3), round(p[2], 4)]
+      rows = self.actor_poses.setdefault(a.name, {'kind': a.kind, 'rows': []})['rows']
+      if len(rows) >= 2 and rows[-1][1:] == new[1:] and rows[-2][1:] == new[1:]:
+        rows[-1][0] = new[0]
+      else:
+        rows.append(new)
 
   def triggers(self, b, r):
     """Set the actors going when the car gets to them: the walker steps out as the car arrives, the oncoming cars go
@@ -247,7 +275,7 @@ class Runner:
     res = score.summarize(self.plan.name, self.rows, outcome)
     res.update(run=self.run_idx + 1, detail=detail, t_start_wall=self.t0_wall, t_engaged_wall=self.t_engaged_wall, t_end_wall=end_wall,
                duration_s=round(end_wall - (self.t_engaged_wall or self.t0_wall), 1), rlog_segments=rlog_segments(self.t0_wall - 60.),
-               rows=self.rows)
+               rows=self.rows, pose_fields=POSE_FIELDS, poses=self.poses, actor_fields=ACTOR_FIELDS, actor_poses=self.actor_poses)
     self.results.append(res)
     print(score.report(f"scenario {self.plan.name} run {res['run']}", res) + (f"\n  {detail}" if detail else ''), flush=True)
     self.director.submit(self.director.cleanup)
@@ -294,8 +322,9 @@ def main():
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   ap.add_argument('name', nargs='?', choices=sorted(SCENARIOS), help='scenario')
   ap.add_argument('--runs', type=int, default=1)
-  ap.add_argument('--record', default='', help='record the chase view and the UI into DIR/<scenario>-<time>/')
-  ap.add_argument('--no-ui', action='store_true', help='with --record, record the chase view only')
+  ap.add_argument('--record', default='', help="record the UI, and render each run's chase view after, into DIR/<scenario>-<time>/")
+  ap.add_argument('--no-ui', action='store_true', help='with --record, render the chase view only')
+  ap.add_argument('--no-chase', action='store_true', help='with --record, record the UI only (chase_render.py can render it later)')
   ap.add_argument('--out', default=OUT_ROOT, help='results go to OUT/<scenario>-<time>/result.json (or the --record directory)')
   ap.add_argument('--data', default=DATA_JSON, help='junction list for lane_change and occupied_lane')
   ap.add_argument('--entry', default='', help='entry of --data by name (default: the first)')
@@ -319,8 +348,6 @@ def main():
   from openpilot.tools.sim.bridge.common import control_cmd_gen
   cfg = config_from_args(bargs)
   cfg.spawn_pos, cfg.spawn_rot = plan.spawn, heading_quat(plan.heading)
-  if args.record:
-    cfg.capture = os.path.join(run_dir, 'chase.mp4')
 
   params = Params()
   token = ensure_token(params)
@@ -353,7 +380,24 @@ def main():
       sweep_game(bargs.host, bargs.port)  # the bridge process may have died before its own cleanup
     except Exception as e:
       print(f"warning: the final cleanup sweep failed ({e!r}); run with --cleanup once the game answers", flush=True)
-  print(f"results: {os.path.join(run_dir, 'result.json')}")
+  result = os.path.join(run_dir, 'result.json')
+  if args.record and not args.no_chase and os.path.exists(result):
+    render_chases(result, run_dir, bargs.host, bargs.port)
+  print(f"results: {result}")
+
+
+def render_chases(result: str, run_dir: str, host: str, port: int):
+  """Each run's chase view, chase_run<N>.mp4 with its sidecar, once the bridge has let go of the game."""
+  with open(result) as f:
+    runs = json.load(f)['runs']
+  for r in runs:
+    if len(r.get('poses', [])) < 2:
+      continue
+    out = os.path.join(run_dir, f"chase_run{r['run']}.mp4")
+    cmd = [sys.executable, '-m', 'openpilot.tools.sim.bridge.beamng.chase_render', result, '--run', str(r['run']), '-o', out,
+           '--host', host, '--port', str(port)]
+    if subprocess.run(cmd).returncode != 0:
+      print(f"warning: the chase render of run {r['run']} failed; rerun: {' '.join(cmd)}", flush=True)
 
 
 if __name__ == "__main__":

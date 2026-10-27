@@ -142,8 +142,9 @@ python -m openpilot.tools.sim.bridge.beamng.route_stats loop.json   # writes loo
 ```
 
 `--traffic N` spawns N BeamNG traffic cars and removes them at the end, even if the bridge dies. `--capture f.mp4
---capture-fps 5` records the chase view. A loop needs more than one leg, because on this map one leg from a start
-back near itself never has more than a few turns.
+--capture-fps 5` records the chase view live, at a camera rate the turns fail at; render it after the drive instead
+([Chase view](#chase-view)). A loop needs more than one leg, because on this map one leg from a start back near itself
+never has more than a few turns.
 
 A full drive stops telling you anything at its first missed turn, since the reroute goes elsewhere. `--screen` runs
 one short drive per turn and keep instead (`screen.py`): each starts 130 m before its maneuver in the lane for it,
@@ -225,6 +226,44 @@ Later on 2026-10-27 (H3), same setup, 19.2-20.0 model runs a second in every run
   20 Hz (`pose_fields`), from the IMU pose, which trails the game by 150-210 ms. Per-run stats are in
   `~/turnpilot-artifacts/phase3/h3/*_stats.json` and `stats_table.txt`.
 
+`route_stats.py` also says whether the detector was still running at the end of each run (`detector_up`: a
+`turnpilotDetections` in the last 5 s). Count a run only with the detector up and the model at 18 Hz or more.
+
+## Chase view
+
+A live chase camera (`--capture`) costs the driving cameras 6 to 9 pairs a second at any frame rate, and the model's
+turns fail at the 11 to 14 left, so the demo's chase view is rendered after the drive. `chase_render.py` reads a run's
+pose log (route_drive's `poses`, or the scenario runner's `poses` and `actor_poses`), teleports the car to each pose
+on a 20 Hz grid on the game's clock, takes one frame from capture.py's chase camera for each, and writes an mp4 with
+the sidecar `demo_video.py` aligns on. Run it with the bridge stopped, since it moves the same car:
+
+```sh
+python -m openpilot.tools.sim.bridge.beamng.chase_render demo.json --run 1 -o demo_chase.mp4
+python -m openpilot.tools.sim.bridge.beamng.route_stats demo.json   # demo_stats.json
+python -m openpilot.tools.turnpilot.demo_video --chase demo_chase.mp4 --ui demo_ui.mp4 --result demo_stats.json --run 1 -o demo.mp4
+```
+
+`record_route.sh` and `record_scenario.sh` do it all on a fresh stack (`restart_stack.sh`): the drive with the UI
+recorded by `record_ui.py`, the stats, the render and the composed video.
+
+Measured on 2026-10-27:
+
+- The log is the IMU's pose at the camera mount. It holds each IMU batch for one to three 20 Hz rows and trails the
+  game by 150 to 210 ms, so `chase_track.py` keeps the first row of each new value, moves it 0.16 s back, and fits
+  a Gaussian-weighted line (sigma 80 ms) through the rows within 0.25 s of each frame.
+- The teleport position is (0.33, -0.332, 1.066) m from the IMU in the vehicle frame (x left, -y forward, z up), not
+  `cameras.MOUNT`. Teleported with that offset, the IMU read back within 1 cm of the logged pose, and the car settled
+  by less than 1.2 cm.
+- After a teleport, the first one or two new chase frames still show the old pose; in 12 trials the third always
+  showed the new one. The render takes the fourth, with the game running. Paused, the camera renders only on a
+  physics step, and the frame after one step was sometimes the old pose and sometimes missing.
+- BeamNG's own replay (`core_replay`) records in this headless game, and the bridge kept its 20 pairs a second while it
+  did, with the car standing (not measured while driving). But a camera created while the replay is paused never
+  rendered, and the replay's own timeline came out shorter than the wall time it recorded, so it would need its own
+  alignment. The pose log works for any drive that logged poses, so the replay wasn't taken further.
+- The render shows the car's pose only: the wheels don't steer and the body doesn't roll, and BeamNG traffic that
+  isn't a scenario actor isn't there.
+
 ## Scenario hooks
 
 `scenario.py` works with any BeamNGpy client: in the bridge process use `world.bng` under `world.bng_lock`, from another
@@ -298,7 +337,7 @@ model sees about 12% less time pass than really does, with occasional 100 ms gap
   sensor axes (the yaw rate shows up in its third, "right", component).
 - The game's IMU has no noise or bias.
 - The ETK 800's steering lock (38 degrees) comes from yaw rate at low speed on one street; paramsd learns the rest.
-- `--capture` renders a third camera and costs about 8 camera pairs a second.
+- `--capture` renders a third camera and costs about 8 camera pairs a second; use `chase_render.py` after the drive.
 - modeld doesn't reconnect to a new VisionIPC server: restart it whenever you restart the bridge.
 - A teleport resets the car to P; the bridge shifts it back to D, but openpilot raises `wrongGear` in between and
   disengages, as a real Model 3 would.

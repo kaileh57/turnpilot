@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Stats of routed drives (route_drive.py) from their rlogs: maneuvers taken out of attempted, disengagements and the
-events behind them, TurnPilot holds, reroutes, desire pulses, lane changes, and arrival.
+events behind them, TurnPilot holds, reroutes, desire pulses, lane changes, arrival, and whether the detector in modeld
+was still running at the end (it turns itself off for the drive after a few slow frames).
 
 Every route navd publishes (navRoute) is a version; one whose end moved is a new leg, any other a reroute. A version's
 turn and keep maneuvers come from the first navInstruction after it (allManeuvers, placed along the route from the car's
@@ -22,11 +23,13 @@ from openpilot.selfdrive.turnpilot.route_follower import KEEP, TURN, classify
 from openpilot.tools.lib.logreader import LogReader
 
 REALDATA = os.path.expanduser(f"~/.comma{os.environ.get('OPENPILOT_PREFIX', 'tph1')}/media/0/realdata")
-SERVICES = ('gpsLocationExternal', 'navRoute', 'navInstruction', 'selfdriveState', 'onroadEvents', 'turnpilotPlan', 'modelV2', 'carState')
+SERVICES = ('gpsLocationExternal', 'navRoute', 'navInstruction', 'selfdriveState', 'onroadEvents', 'turnpilotPlan', 'modelV2', 'carState',
+            'turnpilotDetections')
 NEW_LEG_M = 30.     # a route whose end moved this far is a new destination
 REACHED_M = 5.      # progress within this of a maneuver: attempted
 TAKEN_PAST_M = 30.  # progress this far past it, on the route: taken
 ON_ROUTE_M = 10.    # lateral distance from the route that still counts as on it
+DETECTOR_GAP_S = 5.  # no turnpilotDetections for this long before the run's end: the detector was off by then
 
 
 def segments_for(wall_start: float, wall_end: float, realdata: str = REALDATA) -> list[str]:
@@ -188,6 +191,8 @@ def run_stats(run: dict, realdata: str = REALDATA) -> dict:
   overrides = episodes([t for t, _, _ in cs], [c.gasPressed and en_at(t) for t, _, c in cs])
 
   nav = [(t, ni.distanceRemaining) for t, valid, ni in msgs['navInstruction'] if valid]
+  t_det = [t for t, _, _ in msgs['turnpilotDetections']]
+  detector_up = bool(t_det) and run['mono_end'] - t_det[-1] < DETECTOR_GAP_S
   return {
     "run": run['run'], "route": run['route'], "end": run['end'], "arrived": run['end'] == 'arrived', "wall_start": wall0,
     "duration_s": run['duration_s'], "distance_m": run['distance_m'], "traffic": run.get('traffic', 0),
@@ -197,6 +202,8 @@ def run_stats(run: dict, realdata: str = REALDATA) -> dict:
     "holds": [{"t_s": round(a - run['mono_start'], 1), "dur_s": round(b - a, 1), "reason": r} for a, b, r in holds],
     "reroutes": sum(v[2] == 'reroute' for v in versions), "legs_routed": sum(v[2] in ('first', 'leg') for v in versions),
     "desire_pulses": pulses, "desire_clears": clears, "model_hz": round(model_hz, 1),
+    "detector_up": detector_up, "detector_runs": len(t_det),
+    "detector_last_s": round(t_det[-1] - run['mono_start'], 1) if t_det else None,
     "lane_change_prompts": len(prompts), "lane_changes": lane_changes,
     "plan_state_frames": states, "min_distance_remaining_m": round(min((d for _, d in nav), default=float('nan')), 1),
     "maneuvers": rows, "rlogs": files,
@@ -210,6 +217,7 @@ def summary_line(s: dict) -> str:
           f"disengagements {s['disengagement_count']}: {causes} | gas overrides {len(s['gas_overrides'])} | holds {holds} | " +
           f"reroutes {s['reroutes']} | " +
           f"desire pulses {s['desire_pulses']} | clears {s.get('desire_clears', 0)} | model {s.get('model_hz', 0)} Hz | " +
+          f"detector {'up' if s.get('detector_up') else 'OFF from ' + str(s.get('detector_last_s')) + ' s'} | " +
           f"lane changes {s['lane_changes']}/{s['lane_change_prompts']} prompted | " +
           f"{s['distance_m']:.0f} m in {s['duration_s']:.0f} s")
 
