@@ -75,7 +75,13 @@ class RouteDrive:
     self.web_call("POST", "/api/destination", {"latitude": lat, "longitude": lon, "name": f"{self.route.name} leg {i + 1}"})
     print(f"route_drive: leg {i + 1}/{len(self.route.legs)} destination set", flush=True)
 
-  def start_run(self, b):
+  def start_run(self, b) -> bool:
+    """False when the session can't go on."""
+    if Params().get("Offroad_ExcessiveActuation") is not None:
+      # a collision while engaged latches this in selfdrived and nothing engages again until it restarts; the run
+      # that collided is logged, and a new stack (route_drive.sh) picks up from the next run
+      print(f"route_drive: excessive actuation latched, stopping before run {self.run + 2}", flush=True)
+      return False
     self.run += 1
     self.route = self.plan[self.run]
     b.car.cancel()
@@ -89,7 +95,9 @@ class RouteDrive:
     self.rows, self.disengagements, self.legs_done, self.web = [], [], [], []
     self.engaged_once, self.enabled_prev, self.dis_t, self.still_t = False, False, None, 0.0
     self.dist, self.last_xy, self.rem_min = 0.0, None, float('inf')
+    self.nav_lost_t = None
     print(f"route_drive run {self.run + 1}/{self.runs}: {self.route.name} ({self.route.maneuvers})", flush=True)
+    return True
 
   def __call__(self, b) -> bool:
     if self.sm is None:
@@ -107,10 +115,9 @@ class RouteDrive:
     if self.phase == "next":
       if now - self.t_end < CANCEL_WAIT:
         return False
-      if self.run + 1 >= self.runs:
+      if self.run + 1 >= self.runs or not self.start_run(b):
         self.finish(b)
         return True
-      self.start_run(b)
       return False
 
     t = now - self.t0
@@ -159,6 +166,11 @@ class RouteDrive:
                         round(nav.maneuverDistance, 1) if nav_ok else None, f"{nav.maneuverType} {nav.maneuverModifier}" if nav_ok else "",
                         round(nav.distanceRemaining, 1) if nav_ok else None, self.leg + 1))
 
+    if self.screen and self.dist > 30.0:  # off the route (navd invalid): missed, before it drives into anything
+      self.nav_lost_t = None if nav_ok else (self.nav_lost_t or t)
+      if self.nav_lost_t is not None and t - self.nav_lost_t > 1.5:
+        self.end_run(b, "off route")
+        return
     if nav_ok and time.monotonic() - self.leg_t > 10.0:
       if self.screen and nav.distanceRemaining > self.rem_min + 40.0:
         self.end_run(b, "rerouted")
@@ -226,6 +238,7 @@ def main():
   ap.add_argument('--traffic', type=int, default=0, help='BeamNG traffic cars to spawn (removed at the end)')
   ap.add_argument('--screen', action='store_true', help="one short drive per maneuver of the route instead (screen.py)")
   ap.add_argument('--only', default='', help='with --screen, only maneuvers whose name contains one of these (comma-separated)')
+  ap.add_argument('--start-at', type=int, default=0, help='skip this many runs of the plan (a session cut short)')
   ap.add_argument('--out', default='route_drive.json')
   args, rest = ap.parse_known_args()
   route = ROUTES[args.route]
@@ -234,6 +247,7 @@ def main():
     plan = [r for r in screen_routes(route) if not args.only or any(k in r.name for k in args.only.split(','))] * args.runs
   else:
     plan = [route] * args.runs
+  plan = plan[args.start_at:]
   drive = RouteDrive(plan, args.speed, args.rolling, args.traffic, args.out)
   drive.screen = args.screen
   bargs = parse_args(rest)
