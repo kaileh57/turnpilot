@@ -6,7 +6,7 @@ The recordings line up by the wall-clock time of their first frames, from `<vide
 scenario runner writes it for the chase capture (bridge --capture) and record_ui.py for the UI (upstream RECORD=1). The
 UI recorder writes frames at its target rate however fast the UI really drew them, so the UI's sidecar also holds its
 frame count and real span, and the UI is retimed to real time. Without a sidecar, pass --chase-start/--ui-start (epoch
-seconds); the file's creation time is the last resort.
+seconds); the file's creation time (macOS st_birthtime) is the last resort.
 
   python -m openpilot.tools.turnpilot.demo_video --chase run/chase.mp4 --ui run/ui.mp4 --result run/result.json --run 1 \\
     -o ~/turnpilot-artifacts/demo/crosswalk.mp4

@@ -24,6 +24,9 @@ PACER_AHEAD_M = 2.     # the pacer settles this far ahead of the car's camera
 Z_ABOVE = 3.           # ground ray casts start this far above the road graph's height
 
 
+KNOWN = [f"{PREFIX}{n}" for n in ('ped', 'pacer', *(f'car{k}' for k in range(6)))]  # every name the catalog gives out
+
+
 def sweep(bng, log=print) -> int:
   """Delete every vehicle and object named with PREFIX: what a crashed or killed run left behind."""
   n = 0
@@ -31,6 +34,10 @@ def sweep(bng, log=print) -> int:
     if vid.startswith(PREFIX):
       scenario.lua(bng, f"local o = scenetree.findObject('{vid}') if o then o:delete() end")
       n += 1
+  # the known names first, by findObject as scenario.py does; then a scan of the mission group for anything else
+  for name in KNOWN:
+    r = scenario.lua(bng, f"local o = scenetree.findObject('{name}') if o then o:delete() return '1' end return '0'", response=True)
+    n += str(r) == '1'
   r = scenario.lua(bng, "local ok, n = pcall(function() local g, n = scenetree.MissionGroup, 0 " +
                         "for i = g:getCount() - 1, 0, -1 do local o = g:getObject(i) " +
                         f"if o and string.find(o:getName() or '', '^{PREFIX}') then o:delete() n = n + 1 end end return n end) " +

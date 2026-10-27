@@ -176,10 +176,17 @@ def lane_changes(rows) -> list[dict]:
   return out
 
 
-def stop_gap(rows):
-  """Camera-to-mannequin gap where the car first came to a stop near one, or None."""
-  r = next((r for r in rows if r['v'] < STOPPED_V and r.get('ped_gap') is not None and r['t'] > 1.0), None)
-  return None if r is None else round(r['ped_gap'], 2)
+def stop_gap(rows, outcome: str = ''):
+  """Camera-to-mannequin gap where the car stopped for one: where the run ended if it ended stopped, else where the car
+  first stood after moving (a pause at the rolling start is not a stop)."""
+  if outcome == 'stopped' and rows and rows[-1].get('ped_gap') is not None:
+    return round(rows[-1]['ped_gap'], 2)
+  moved = False
+  for r in rows:
+    moved = moved or r['v'] > RESUMED_V
+    if moved and r['v'] < STOPPED_V and r.get('ped_gap') is not None:
+      return round(r['ped_gap'], 2)
+  return None
 
 
 class EndCheck:
@@ -269,7 +276,7 @@ def summarize(name: str, rows, outcome: str) -> dict:
     'holds': holds(rows),
     'min_gap_ped_m': min_gap(rows, 'ped_gap'),
     'min_gap_car_m': min_gap(rows, 'car_gap'),
-    'stop_gap_m': stop_gap(rows),
+    'stop_gap_m': stop_gap(rows, outcome),
     'gap_reference': "camera mount (top of the windshield) to the mannequin, or to the other car's centre",
     'lane_changes': lane_changes(rows),
     'lane_blocked': any(r.get('reason') == 'car in target lane' for r in rows),

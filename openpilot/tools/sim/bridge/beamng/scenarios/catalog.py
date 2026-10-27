@@ -41,7 +41,7 @@ class Entry:
   speed_kph: float = 30.
   timeout_s: float = 150.
   actor: str = ''                 # 'crosswalk', 'oncoming', 'standing', 'pacer'
-  walker_lead_s: float = 4.       # the walker steps off the curb this long before the car would reach the crosswalk
+  walker_lead_s: float = 4.       # the walker steps off the curb this long before the car would reach its hold line
   crosswalk_m: float = 0.         # crosswalk centre from the junction along the exit road; 0: road edge + 2.5 m (unverified)
   ped_before_m: float = 40.       # standing mannequin, this far before the junction
   oncoming: int = 2               # cars

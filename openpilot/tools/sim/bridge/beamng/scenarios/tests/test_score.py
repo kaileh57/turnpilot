@@ -141,10 +141,13 @@ class TestChecks:
 
   @pytest.mark.parametrize("gap,ok", [(5.0, True), (2.0, False), (9.5, False)])
   def test_ped_in_path_gap(self, gap, ok):
-    rows = drive([(4.0, {'v': lambda tau: 8.0 - 2.0 * tau, 'ped_gap': lambda tau, g=gap: g + 16.0 - 8.0 * tau + tau * tau}),
+    # a pause at the rolling start 80 m out is not the stop for the pedestrian
+    rows = drive([(2.0, {'v': 0.0, 'ped_gap': 80.0}), (6.0, {'v': 8.0, 'ped_gap': lambda tau, g=gap: g + 64.0 - 8.0 * tau}),
+                  (4.0, {'v': lambda tau: 8.0 - 2.0 * tau, 'ped_gap': lambda tau, g=gap: g + 16.0 - 8.0 * tau + tau * tau}),
                   (4.0, {'v': 0.0, 'ped_gap': gap})])
     res = score.summarize('ped_in_path', rows, 'stopped')
     assert res['stop_gap_m'] == pytest.approx(gap, abs=0.05) and res['passed'] == ok
+    assert score.stop_gap(rows, 'timeout') == pytest.approx(gap, abs=0.05)  # without the end, the first stop after moving
 
   def test_occupied_lane_waits_for_the_pacer(self):
     blocked = drive([(4.0, {'reason': 'car in target lane', 'pacer_dx': 1.0, 'v': 12.0})])

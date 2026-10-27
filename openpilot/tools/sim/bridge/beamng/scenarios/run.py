@@ -175,6 +175,7 @@ class Runner:
     self.t0, self.t0_wall, self.phase = time.monotonic(), wall(), 'settle'
     self.rows: list[dict] = []
     self.fired: set[str] = set()
+    self.jobs: list = []  # trigger jobs: a failed one explains a failed run
     self.route_pts, self.route_id, self.nav_cleared = None, 0, False
     self.t_engaged = self.t_engaged_wall = None
     self.end_check = score.EndCheck(plan.timeout_s, plan.end_on_stop_s)
@@ -227,7 +228,7 @@ class Runner:
         go, job = True, (d.release_pacer, a.name, (r['x'], r['y']), r['v'])
       if go:
         self.fired.add(a.name)
-        d.submit(*job)
+        self.jobs.append((a.name, d.submit(*job)))
         print(f"scenario: {a.name} goes at t={r['t']:.1f} s, {hold_distance(plan, r['x'], r['y']):.0f} m from the hold line", flush=True)
 
   def driver(self, b):
@@ -241,6 +242,8 @@ class Runner:
     b.car.cancel()
     b.blinker = (False, False)
     end_wall = wall()
+    failed = [f"{name}: {f.exception()!r}" for name, f in getattr(self, 'jobs', []) if f.done() and f.exception() is not None]
+    detail = '; '.join([detail] * bool(detail) + failed)
     res = score.summarize(self.plan.name, self.rows, outcome)
     res.update(run=self.run_idx + 1, detail=detail, t_start_wall=self.t0_wall, t_engaged_wall=self.t_engaged_wall, t_end_wall=end_wall,
                duration_s=round(end_wall - (self.t_engaged_wall or self.t0_wall), 1), rlog_segments=rlog_segments(self.t0_wall - 60.),
@@ -346,7 +349,10 @@ def main():
           ui.wait(timeout=30)
         except subprocess.TimeoutExpired:
           ui.kill()
-    sweep_game(bargs.host, bargs.port)  # the bridge process may have died before its own cleanup
+    try:
+      sweep_game(bargs.host, bargs.port)  # the bridge process may have died before its own cleanup
+    except Exception as e:
+      print(f"warning: the final cleanup sweep failed ({e!r}); run with --cleanup once the game answers", flush=True)
   print(f"results: {os.path.join(run_dir, 'result.json')}")
 
 
