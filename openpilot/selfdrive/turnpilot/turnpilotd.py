@@ -53,7 +53,8 @@ class TurnPilot:
 
     lanes = model_lanes_from_msg(model)
     plan.desire = self.desires.update(maneuver, rf.distance, rf.maneuver_id, rf.passed, v_ego, cs.steeringAngleDeg,
-                                      lanes.keep_left_ok, lanes.keep_right_ok, DT_MDL, default_yaw_rate(cs, model))
+                                      lanes.keep_left_ok, lanes.keep_right_ok, DT_MDL, default_yaw_rate(cs, model),
+                                      float(model.position.y[-1]) if len(model.position.y) else None)
     plan.laneChange, plan.signalPrompt, lane_reason = self.lanes.update(
       maneuver, rf.distance, lanes, model.meta.laneChangeState, v_ego, cs.leftBlinker, cs.rightBlinker, objects,
       driver_signals, right_hand_traffic, DT_MDL)
