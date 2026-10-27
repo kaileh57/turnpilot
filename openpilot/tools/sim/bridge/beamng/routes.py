@@ -35,6 +35,9 @@ ROUTES = {r.name: r for r in (
                                (39.773957, -86.1651128)),
         "15 maneuvers, about 2.2 km in four legs in the town: left, left, right, right; keep right, right, left; " +
         "right, right, slight left, left; right, right, left, right. Ends about 60 m from the start"),
+  Route("town14", (-629.47, 459.21, 116.2), -0.7875, ((39.7707207, -86.1626724), (39.7699151, -86.1657233),
+                                                     (39.7723673, -86.167217), (39.773957, -86.1651128)),
+        "town15 from just past its first junction (g62), whose left the model takes in some runs and not in others"),
   Route("loop", *G62_START, ((39.7661729, -86.1647217), (39.7737206, -86.1659774)),
         "18 maneuvers, about 5.6 km: out (left, left, right, right, keep left, keep left, keep right, 1.5 km) and back " +
         "(keep right, keep left, left, keep left, left, keep right, keep left, right, keep left, right, left, 4.0 km), " +
