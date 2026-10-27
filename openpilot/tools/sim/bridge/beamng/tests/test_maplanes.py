@@ -10,7 +10,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from openpilot.selfdrive.navigation.navd import RouteEngine
 from openpilot.selfdrive.turnpilot.lane_planner import ModelLanes, lane_changes_needed
 from openpilot.selfdrive.turnpilot.route_follower import maneuver_from_instruction
 from openpilot.selfdrive.turnpilot.routing.valhalla_source import ValhallaSource
@@ -191,6 +190,7 @@ class TestWestCoastUSA:
     assert len(demo_junctions.approach_lanes(lanes["lanes"], 0, demo.start_m)) == demo.lanes
 
   def test_navd_fills_the_lanes_before_a_left_and_the_planner_changes_lane(self, tiles, demos):
+    from openpilot.selfdrive.navigation.navd import RouteEngine  # needs the params library, which the geometry tests don't
     demo = demos["left"][0]
     values = {"TurnPilotValhallaTiles": tiles["lanes"], "TurnPilotRouteSource": "valhalla", "LanguageSetting": "main_en"}
     params, pm = MagicMock(), MagicMock()
