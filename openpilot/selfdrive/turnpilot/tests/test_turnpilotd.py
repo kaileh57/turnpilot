@@ -16,8 +16,7 @@ THREE_LANES_LEFT_TURN = ((("left",), True), (("straight",), False), (("straight"
 
 class FakeSM:
   def __init__(self):
-    self.data = {'carState': car_state(0.), 'navInstruction': nav_instruction(0., valid=False), 'modelV2': model_v2(),
-                 'turnpilotScene': scene(available=False)}
+    self.data = {'carState': car_state(0.), 'navInstruction': nav_instruction(0., valid=False), 'modelV2': model_v2()}
     self.updated = dict.fromkeys(self.data, False)
     self.valid = dict.fromkeys(self.data, True)
     self.alive = dict.fromkeys(self.data, True)
@@ -43,8 +42,7 @@ class Sim:
       self.sm.put('navInstruction', instr)
     self.sm.put('carState', car_state(self.v, steer, left_blinker=blinker))
     self.sm.put('modelV2', model_v2(*self.model_lanes))
-    self.sm.put('turnpilotScene', scene(objects, available))
-    plan = self.tp.update(self.sm, True, self.shadow, self.driver_signals).as_reader().turnpilotPlan
+    plan = self.tp.update(self.sm, scene(objects, available), True, self.shadow, self.driver_signals).as_reader().turnpilotPlan
     a = min(plan_accel(plan.accelCap, plan.speedCap, self.v), (self.cruise - self.v) / 2., 1.5)
     if plan.shouldStop:
       a = min(a, -1.)
@@ -75,11 +73,11 @@ def rising(trace, field, value):
 
 def test_disabled_and_no_route():
   sm = FakeSM()
-  plan = TurnPilot().update(sm, False, False).as_reader().turnpilotPlan
+  plan = TurnPilot().update(sm, scene(available=False), False, False).as_reader().turnpilotPlan
   assert plan.state == State.disabled and plan.desire == Desire.none
   assert (plan.accelCap, plan.speedCap, plan.shouldStop) == (NO_ACCEL_CAP, NO_SPEED_CAP, False)
   sm.put('navInstruction', nav_instruction(100., valid=False), valid=False)
-  plan = TurnPilot().update(sm, True, False).as_reader().turnpilotPlan
+  plan = TurnPilot().update(sm, scene(available=False), True, False).as_reader().turnpilotPlan
   assert plan.state == State.noRoute and not plan.routeValid
 
 

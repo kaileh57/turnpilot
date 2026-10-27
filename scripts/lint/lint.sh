@@ -46,7 +46,7 @@ function run_tests() {
   run "check_shell" python3 "$DIR/check_shell.py" "${SHELL_FILES[@]}"
   run "check_dependencies" python3 "$DIR/check_dependencies.py"
   run "check_indentation" "$DIR/check_indentation.py" "${PYTHON_FILES[@]}"
-  run "check_added_large_files" "$DIR/check_added_large_files.py" --maxkb=120 "${ALL_FILES[@]}"
+  run "check_added_large_files" "$DIR/check_added_large_files.py" --maxkb=120 "${SMALL_FILES[@]}"
   run "check_shebang_scripts_are_executable" "$DIR/check_shebang_scripts_are_executable.py" "${ALL_FILES[@]}"
   run "check_shebang_format" "$DIR/check_shebang_format.sh" "${ALL_FILES[@]}"
   run "check_nomerge_comments" "$DIR/check_nomerge_comments.sh" "${ALL_FILES[@]}"
@@ -106,10 +106,13 @@ RUN=$([ -z "$RUN" ] && echo "" || echo "!($(echo "$RUN" | sed 's/ /|/g'))")
 SKIP="@($(echo "$SKIP" | sed 's/ /|/g'))"
 
 ALL_FILES=()
+SMALL_FILES=()
 PYTHON_FILES=()
 while IFS= read -r -d '' f; do
   if [[ -f $f ]]; then
     ALL_FILES+=("$f")
+    # TurnPilot's YOLO26 models are plain blobs (comma's LFS remote is read-only)
+    [[ $f == openpilot/selfdrive/turnpilot/models/*.onnx ]] || SMALL_FILES+=("$f")
     if [[ $f == *.py ]]; then
       PYTHON_FILES+=("$f")
     fi

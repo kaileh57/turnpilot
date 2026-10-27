@@ -58,6 +58,9 @@ def only_onroad(started: bool, params: Params, CP: car.CarParams) -> bool:
 def navigation(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and params.get_bool("NavigationEnabled")
 
+def turnpilot(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return params.get_bool("TurnPilotEnabled")
+
 def only_offroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not started
 
@@ -89,6 +92,7 @@ procs = [
   PythonProcess("navd", "openpilot.selfdrive.navigation.navd", navigation),
   PythonProcess("mapsd", "openpilot.selfdrive.navigation.mapsd", navigation),
   PythonProcess("turnpilotd", "openpilot.selfdrive.turnpilot.turnpilotd", only_onroad),
+  PythonProcess("turnpilot_web", "openpilot.selfdrive.turnpilot.web.server", turnpilot),
   PythonProcess("dmonitoringmodeld", "openpilot.selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(WEBCAM or not PC)),
 
   PythonProcess("sensord", "openpilot.system.sensord.sensord", only_onroad, enabled=not PC),
