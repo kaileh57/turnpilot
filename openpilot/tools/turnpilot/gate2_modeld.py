@@ -7,7 +7,6 @@ then stops modeld and checks that chestnut is released. Nothing else may hold ch
   python -m openpilot.tools.turnpilot.gate2_modeld [--frames 600]
 """
 import argparse
-import os
 import signal
 import subprocess
 import sys
@@ -105,7 +104,8 @@ def main():
   parser.add_argument('--frames', type=int, default=600)
   parser.add_argument('--timeout', type=float, default=240.)
   args = parser.parse_args()
-  with OpenpilotPrefix(os.environ.get("OPENPILOT_PREFIX", "gate2")):
+  # its own prefix: the exit cleanup deletes the prefix's params, msgq and logs
+  with OpenpilotPrefix("gate2"):
     sys.exit(run(args.frames, args.timeout))
 
 
