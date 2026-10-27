@@ -399,8 +399,11 @@ def main(demo=False):
     tp = active_plan(sm)
     tp_desire, clear = plan_desire(tp.desire) if tp is not None else (log.Desire.none, False)
     if clear and not desire_cleared:
-      model.clear_desire_history([log.Desire.turnLeft, log.Desire.turnRight])
-      cloudlog.info("turnpilot: turn desires cleared from the model's desire queue")
+      try:
+        model.clear_desire_history([log.Desire.turnLeft, log.Desire.turnRight])
+        cloudlog.info("turnpilot: turn desires cleared from the model's desire queue")
+      except Exception:
+        cloudlog.exception("turnpilot: desire clear failed")  # the pulse ages out of the queue as before
     desire_cleared = clear
     if desire == log.Desire.none:
       desire = tp_desire
