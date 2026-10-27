@@ -15,6 +15,26 @@ def after_last_jump(readings: list, jump: float = TELEPORT_JUMP) -> int:
   return 0
 
 
+def beamng_quat(fwd, up) -> tuple:
+  """BeamNG's rotation quaternion (x, y, z, w) of a vehicle with these world-space forward and up axes: its local -y
+  is forward and z up, and BeamNG turns a quaternion the other way round from the usual (see scenario.heading_quat)."""
+  y, z = -np.asarray(fwd, dtype=float), np.asarray(up, dtype=float)
+  x = np.cross(y, z)
+  m = np.array([x, y, z]).T  # columns: the local axes in world space
+  w = math.sqrt(max(1. + m[0, 0] + m[1, 1] + m[2, 2], 1e-12)) / 2
+  q = np.array([(m[2, 1] - m[1, 2]) / (4 * w), (m[0, 2] - m[2, 0]) / (4 * w), (m[1, 0] - m[0, 1]) / (4 * w)])
+  if w < 1e-3:  # near a half turn: from the largest diagonal instead
+    i = int(np.argmax(np.diag(m)))
+    j, k = (i + 1) % 3, (i + 2) % 3
+    r = math.sqrt(max(1. + m[i, i] - m[j, j] - m[k, k], 1e-12))
+    q = np.zeros(3)
+    q[i], q[j], q[k] = r / 2, (m[j, i] + m[i, j]) / (2 * r), (m[k, i] + m[i, k]) / (2 * r)
+    w = (m[k, j] - m[j, k]) / (2 * r)
+  q, w = -q, w  # BeamNG's sense: the conjugate
+  n = math.sqrt(float(q @ q) + w * w)
+  return (float(q[0] / n), float(q[1] / n), float(q[2] / n), float(w / n))
+
+
 class Pose:
   """Pose, velocity, specific force and angular rate from AdvancedIMU readings (100 Hz sim time, sensor X forward, Y up,
   Z right in world space). The angular rate comes from differencing the sensor axes, not from the readings' angVel:
@@ -28,7 +48,7 @@ class Pose:
     self.t_sim = r1['time']
     self.pos = np.array(r1['pos'])
     fwd, up, right = (np.array(r1[k]) for k in ('dirX', 'dirY', 'dirZ'))
-    self.fwd = fwd
+    self.fwd, self.up = fwd, up
     dt = r1['time'] - r0['time']
     if dt > 0:
       self.vel = (self.pos - np.array(r0['pos'])) / dt

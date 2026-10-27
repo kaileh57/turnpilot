@@ -5,7 +5,7 @@ import numpy as np
 # no beamngpy here: these run without the game's client library installed
 from openpilot.tools.sim.bridge.beamng import frame
 from openpilot.tools.sim.bridge.beamng.control import AccelController
-from openpilot.tools.sim.bridge.beamng.pose import Pose, after_last_jump
+from openpilot.tools.sim.bridge.beamng.pose import Pose, after_last_jump, beamng_quat
 from openpilot.tools.sim.bridge.beamng.scenario import heading_quat
 
 
@@ -68,3 +68,10 @@ class TestAccelController:
     assert br > 0 and th == 0
     th, br = c.update(-0.5, 0.1, 0.01)
     assert th == 0 and br > 0  # standstill hold
+
+
+def test_beamng_quat_matches_heading_quat():
+  for heading in (0., 0.7, math.pi / 2, 2.5, math.pi, -2.0):
+    fwd = (math.cos(heading), math.sin(heading), 0.)
+    q, ref = np.array(beamng_quat(fwd, (0., 0., 1.))), np.array(heading_quat(heading))
+    assert min(np.abs(q - ref).max(), np.abs(q + ref).max()) < 1e-9, heading

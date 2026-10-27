@@ -28,6 +28,7 @@ from openpilot.tools.sim.bridge.beamng import scenario
 from openpilot.tools.sim.bridge.beamng.bridge import BeamNGBridge
 from openpilot.tools.sim.bridge.beamng.frame import from_latlon
 from openpilot.tools.sim.bridge.beamng.gate1 import CANCEL_WAIT
+from openpilot.tools.sim.bridge.beamng.pose import beamng_quat
 from openpilot.tools.sim.bridge.beamng.routes import ROUTES
 from openpilot.tools.sim.bridge.beamng.run_bridge import config_from_args, parse_args
 from openpilot.tools.sim.bridge.common import control_cmd_gen
@@ -94,7 +95,7 @@ class RouteDrive:
     b.world.teleport((x, y, z), scenario.heading_quat(self.route.heading))
     self.t0, self.phase, self.leg = time.monotonic(), "settle", -1
     self.wall0 = time.time()  # noqa: TID251
-    self.rows, self.disengagements, self.legs_done, self.web = [], [], [], []
+    self.rows, self.disengagements, self.legs_done, self.web, self.poses = [], [], [], [], []
     self.engaged_once, self.enabled_prev, self.dis_t, self.still_t = False, False, None, 0.0
     self.dist, self.last_xy, self.rem_min = 0.0, None, float('inf')
     self.nav_lost_t = None
@@ -166,6 +167,10 @@ class RouteDrive:
     if not enabled and self.dis_t is not None and t - self.dis_t > REENGAGE_WAIT and not b.auto_engage:
       b.auto_engage = True  # the driver takes it again and engages
 
+    pose = b.world.pose
+    if b.rk_frame % 5 == 0 and pose is not None:  # 20 Hz, to re-render a chase view offline: wall s, x y z m, BeamNG quat
+      self.poses.append((round(time.time(), 3), round(t, 2), *(round(float(v), 3) for v in pose.pos),  # noqa: TID251
+                         *(round(v, 5) for v in beamng_quat(pose.fwd, pose.up))))
     if b.rk_frame % 10 == 0:
       self.rows.append((round(t, 2), round(float(xy[0]), 2), round(float(xy[1]), 2), round(s.wheel_speed, 2), bool(enabled),
                         str(plan.state), str(plan.desire), str(plan.laneChange), str(plan.signalPrompt), plan.reason,
@@ -222,7 +227,8 @@ class RouteDrive:
            "mono_end": self.t_end, "duration_s": round(t, 1), "distance_m": round(self.dist, 1),
            "engaged_at_s": getattr(self, "engage_t", None), "legs_reached": self.legs_done, "legs": len(self.route.legs),
            "disengagements": self.disengagements, "stop_confirmations": self.confirmations, "lane_change_prompts_signalled": b.driver.signals, "web": self.web,
-           "traffic": self.traffic, "speed_kph": self.speed_kph, "path": self.rows}
+           "traffic": self.traffic, "speed_kph": self.speed_kph, "path": self.rows,
+           "pose_fields": ["wall_s", "t_s", "x", "y", "z", "qx", "qy", "qz", "qw"], "poses": self.poses}
     self.results.append(res)
     print(f"route_drive run {res['run']}: {reason} after {t:.0f} s, {self.dist:.0f} m, {len(self.disengagements)} disengagements, " +
           f"legs {len(self.legs_done)}/{len(self.route.legs)}", flush=True)
