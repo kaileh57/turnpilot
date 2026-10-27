@@ -177,7 +177,13 @@ Results on 2026-10-27, big model on the chestnut, 20 camera pairs a second, set 
 - `town15b` (15 maneuvers in 4 legs, every leg ending on a two-way street): 3 runs without traffic, legs 1/4 in
   each, maneuvers 4/5, 6/7, 6/7 taken, no disengagement. Every run ended stuck in leg 2, at (-706, 131) or just
   after the left at (-539, 157), with the driver's gas taps unable to move the car. That is a takeover in a car,
-  although no openpilot disengagement was logged.
+  although no openpilot disengagement was logged. With 3 BeamNG traffic cars: 4/5, 3/3 and 1/2, all stuck in leg 1
+  or 2 (one just after the left at (-601, 221), where the car had turned on into the curb).
+- `short2` (3 turns, 550 m) on the final code: arrived with no disengagement, no gas tap and no hold in 3 of 4
+  runs. The fourth took all 3 turns and then stopped 50 m short of the destination, on the divided road.
+- The chase capture halves the camera rate, to 11-13 pairs a second at `--capture-fps 5` and at 2, and the first
+  turn of `short2` failed at that rate. The demo run was recorded without the chase capture.
+- Per-run stats are in `~/turnpilot-artifacts/phase2/h2/*_stats.json` and `stats_table.txt`.
 
 ## Scenario hooks
 
