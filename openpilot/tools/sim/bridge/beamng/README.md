@@ -1,0 +1,168 @@
+# BeamNG.tech bridge
+
+openpilot on the Mac drives a car in stock BeamNG.tech on the Windows PC, as a comma four in a Tesla Model 3. The bridge
+runs on the Mac and talks to the game over BeamNGpy 1.36 at `192.168.137.1:25252`. It loads `west_coast_usa` with one
+ETK 800 (the stock sedan closest to a Model 3: 4.67 m long and 1.39 m tall, against 4.69 m and 1.44 m) and publishes:
+
+- `can` and `pandaStates` for a Model 3 on 3-bit DAS firmware, including `DI_autonomyHealth` (0x054) on bus 0, so card
+  fingerprints `TESLA_MODEL_3` with `dashcamOnly` false and alpha longitudinal
+- road and wide frames on VisionIPC at 1344x760 with `narrowRoadCameraState` and `wideRoadCameraState` (`sensor` os04c10)
+- `accelerometer` and `gyroscope` at 100 Hz, `gpsLocationExternal` at 10 Hz (with a fix, in `frame.py`'s projection),
+  and upstream's fake driver monitoring and peripheral state
+
+openpilot's own `DAS_steeringControl` and `DAS_control` come back from `sendcan`, after openpilot's stock Tesla limits,
+and drive the game car. The steering angle goes through the Model 3's 12:1 ratio and the ETK 800's 38 degree road-wheel
+lock. The acceleration goes through `control.py`, a feedforward plus a PI controller that holds the car's speed on the
+integral of the requested acceleration. It doesn't use the game's measured acceleration, which arrives in 100 ms batches
+and bounces with the suspension.
+
+The bridge never closes the game. On exit it removes its sensors, brakes the car and disconnects, and the scenario stays
+loaded so the next start takes seconds instead of a minute. It does leave the game's global state as it set it (see
+[Known limits](#known-limits)) unless you pass `--restore-on-exit`.
+
+## Requirements
+
+- BeamNGpy 1.36 in the repo venv. It isn't in `pyproject.toml`:
+
+  ```sh
+  uv pip install --python /Users/kaileh57/Projects/turnpilot/.venv/bin/python beamngpy==1.36
+  ```
+
+  `cameras.py` reads camera frames through BeamNGpy's private `connection._pack_data` and `connection.skt`, so keep to
+  1.36 or check those two before upgrading.
+- An openpilot checkout with the `("pc", "os04c10")` camera config in `common/transformations/camera.py` (turnpilot
+  commit 353f4d3), since the bridge publishes os04c10 frames at 1344x760.
+- `ffmpeg` on `PATH`, for `--capture` only.
+
+## Run it
+
+Use the repo venv, from the repo root. `OPENPILOT_PREFIX` keeps msgq, params and logs apart from other runs on the Mac.
+
+1. Start openpilot as a comma four in a Model 3:
+
+   ```sh
+   OPENPILOT_PREFIX=tpsim openpilot/tools/sim/bridge/beamng/launch_openpilot.sh
+   ```
+
+   It is upstream's sim launch with `FINGERPRINT=TESLA_MODEL_3`, alpha longitudinal on, and loggerd kept, so every run
+   leaves an rlog in `~/.commatpsim/media/0/realdata`. Add more processes to block with `BLOCK=...`.
+
+2. In a second terminal, start the bridge:
+
+   ```sh
+   OPENPILOT_PREFIX=tpsim python -m openpilot.tools.sim.bridge.beamng.run_bridge --engage --rolling-start 20 --set-speed 30
+   ```
+
+   `--engage` pulls the cruise stalk as soon as openpilot is engageable. With `--rolling-start`, the bridge first plays
+   a driver who presses the gas up to that speed (km/h): the driving model holds a car that stands on an empty road,
+   because its standstill acceleration stays under the 0.1 m/s^2 of `drive_helpers.should_stop`.
+
+modeld doesn't reconnect to a new VisionIPC server. Restart openpilot (or at least modeld) whenever you restart the
+bridge, or modeld keeps waiting on the old one.
+
+Other options: `--spawn x,y,z --rot qx,qy,qz,qw` (BeamNG world meters; the default is 140 m before the junction
+`group_80_81_82_83`, eastbound in the right-hand lane), `--reload`, `--signals` (leave the traffic lights running; by
+default every light is forced green and held), `--capture chase.mp4`, `--duration`, `--restore-on-exit`, and
+`--camera-update` and `--camera-poll` for the camera timing.
+
+Without a TTY, the bridge reads one command per line on stdin: `cruise_up` (engage, or raise the set speed by 5 km/h),
+`cruise_down`, `cruise_cancel`, `blinker_left`, `blinker_right`, `throttle_0.5`, `brake_1`, `steer_-0.2`, `reset` and
+`quit`. At the end of stdin (`< /dev/null`, `nohup`, a closed pipe) it keeps running until `quit`, Ctrl-C, SIGTERM or
+`--duration`, as with `--no-keyboard`. With a TTY, the keys are upstream's (`tools/sim/README.md`).
+
+## Gate 1
+
+`gate1.py` checks whether one desire pulse makes the driving model take a 90-degree junction. It spawns the car on the
+approach to a junction from the road-graph export, engages, and publishes `turnpilotPlan` at 20 Hz with the desire set
+for `--pulse-frames` messages once the car is `--leads` meters from the junction. It logs the heading change, the path
+and whether the car left on the exit road, to `--out`. Block turnpilotd, the other `turnpilotPlan` publisher:
+
+```sh
+BLOCK=turnpilotd OPENPILOT_PREFIX=tpsim openpilot/tools/sim/bridge/beamng/launch_openpilot.sh
+OPENPILOT_PREFIX=tpsim python -m openpilot.tools.sim.bridge.beamng.gate1 --junction group_80_81_82_83 --turn left --leads 10,20,30,40
+```
+
+`--list` prints the signalized junctions with legal 90-degree turns. The road graph is read from
+`~/pc_relay/incoming/osm_export/west_coast_usa_graph.json`.
+
+## Scenario hooks
+
+`scenario.py` works with any BeamNGpy client: in the bridge process use `world.bng` under `world.bng_lock`, from another
+script open a second client. It can teleport the ego, read its pose, spawn BeamNG traffic, spawn and move the Italy
+mannequin (the only human-shaped stock asset) as a pedestrian prop, remove the traffic again, and force or release
+traffic signals. `restore_game` undoes the bridge's global changes, and running the module does that from the shell after
+a run that crashed or didn't restore:
+
+```sh
+python -m openpilot.tools.sim.bridge.beamng.scenario  # signals running, HUD and particles on, 08:52 light
+```
+
+`BeamNGBridge(scenario=...)` runs a callable in the bridge loop at 100 Hz; gate1 is the example.
+
+## Check it without openpilot
+
+```sh
+OPENPILOT_PREFIX=tpcheck python -m openpilot.tools.sim.bridge.beamng.check_bridge
+```
+
+It starts the bridge and plays the parts of openpilot the bridge talks to: a VisionIPC client, a camera-turn test that
+times a frame from the game to VisionIPC, opendbc's Tesla CarState on `can`, the GPS against the game's own position,
+and openpilot's Tesla commands on `sendcan`. `check_vipc.py` is the VisionIPC client on its own. Unit tests are in
+`tests/`.
+
+## Cameras
+
+Both cameras sit at one mount near the top of the windshield, 1.34 m above the road, level and pointing straight
+ahead: the road camera at a 36.82 degree vertical field of view and the wide one at 83.57 degrees, a pinhole stand-in
+for the fisheye with the focal length modeld's warp assumes.
+
+The game renders a camera on its frame once the camera's update time has passed. With a 0.02 s update time both cameras
+render on every frame. A poll returns the newest render and the game answers it on its main thread, once a frame, so
+polling costs frame time: polling each camera every 10 ms on its own connection dropped the game to 9 fps. The bridge
+polls both cameras in one pipelined burst on their own connection every 30 ms, which puts both answers on the same game
+frame. The publisher sends a pair as soon as both frames are new by hash and its 20 Hz slot is due, converts RGB to NV12
+with upstream's `rgb_to_nv12`, and stamps both frames with one time. After 150 ms without a new pair it republishes the
+last pair (a standing car can render identical frames), but only while polls succeed: when the cameras go away, frames
+stop within a second, the poller reconnects, and after 5 s of failed polls the bridge stops.
+
+The game's frame rate with both cameras sets the ceiling. Rendering both 1344x760 cameras without reading them back
+already holds the PC to about 23 fps, and at 896x506 or 672x380 it reaches only about 27 fps, so the cost is per render,
+not per pixel or in the transfer. On 2026-10-27 the game ran at 48 to 50 fps idle and 16 to 25 fps with both cameras (a
+day earlier: 62 to 77 idle, 23 to 24 with cameras). Measured on 2026-10-27, game on the PC, bridge on the Mac over the
+USB4 link:
+
+| What | Value |
+| --- | --- |
+| With openpilot and modeld (small model on METAL), driving at 25 km/h, 140 s | 17.5 pairs a second at `narrowRoadCameraState` and `modelV2`, median interval 54 ms, p95 104 ms, max 119 ms, 10 s windows 15.1 to 18.8; game at 19.3 fps on average |
+| Same, standing still, 90 s | 17.9 a second, 10 s windows 13.7 to 20.0 |
+| Bridge alone, standing still, VisionIPC client, game at 20.3 fps | 19.7 a second, none repeated, no frame id gaps, p90 interval 52 ms; the earlier fixed 20 Hz publisher gave 18.0 and 18.8 back to back |
+| Road and wide from the same game frame | 17 of 17 camera-turn trials over three runs |
+| Frame age, game frame to VisionIPC | 102 to 131 ms, from the camera-turn test |
+| Frame age, first sight on the Mac to a VisionIPC client | median 62 to 73 ms |
+| RGB to NV12, upstream `rgb_to_nv12` | 3.9 ms a frame on the bench, 4.2 to 4.4 ms in the running bridge |
+| Ad-hoc polling, for comparison | 8 to 10.5 pairs a second, 100 to 570 ms old |
+| With `--capture` | about 12 pairs a second |
+
+The comma four's cameras run at exactly 20 Hz and modeld steps its temporal context by 50 ms per frame, so at 17.5 Hz the
+model sees about 12% less time pass than really does, with occasional 100 ms gaps.
+
+## Known limits
+
+- The camera rate is below 20 Hz whenever the game runs below 20 fps with both cameras, which it did for most of
+  2026-10-27 (see [Cameras](#cameras)). Pointing the game's own view at the sky added about 1 fps; it isn't done.
+- The game's render pipeline adds about 120 ms between a game frame and its VisionIPC publish, and published timestamps
+  are 40 to 50 ms later than the true render time; the comma four's cameras add far less.
+- The pose behind the GPS and IMU lags the game by 150 to 210 ms (heading against the game's own, in a 16 to 38 deg/s turn):
+  BeamNG ships its 100 Hz IMU readings in batches about every 100 ms, so the 100 Hz IMU messages hold each batch's
+  values. The gyro comes from differencing the IMU's world-space axes; the readings' `angVel` doesn't use the documented
+  sensor axes (the yaw rate shows up in its third, "right", component).
+- The game's IMU has no noise or bias.
+- The ETK 800's steering lock (38 degrees) comes from yaw rate at low speed on one street; paramsd learns the rest.
+- `--capture` renders a third camera and costs about 8 camera pairs a second.
+- modeld doesn't reconnect to a new VisionIPC server: restart it whenever you restart the bridge.
+- A teleport resets the car to P; the bridge shifts it back to D, but openpilot raises `wrongGear` in between and
+  disengages, as a real Model 3 would.
+- The bridge changes global game state on the shared PC and leaves it that way: every traffic signal forced green and
+  held, the HUD hidden, particles off, and the time of day held at 13:12. Pass `--restore-on-exit`, or run
+  `python -m openpilot.tools.sim.bridge.beamng.scenario` afterwards.
+- The World base class allocates two unused 1928x1208 image buffers, and SimulatorBridge an unused Ratekeeper.
