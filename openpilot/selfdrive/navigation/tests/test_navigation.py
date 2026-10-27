@@ -346,6 +346,20 @@ class TestRouteEngine(unittest.TestCase):
     self.engine.send_instruction()
     self.assertTrue(self.last_message('navInstruction').valid)
 
+  def test_sharp_turn_moves_on_to_the_next_step(self):
+    distance = 111.195
+    self.response = mapbox_response([
+      {'geometry': {'coordinates': [[0, 0], [0.001, 0]]}, 'distance': distance, 'duration': 10,
+       'bannerInstructions': [{'distanceAlongGeometry': 100, 'primary': {'text': 'Turn left', 'type': 'turn', 'modifier': 'left'}}]},
+      {'geometry': {'coordinates': [[0.001, 0], [0.001, 0.002]]}, 'distance': 2 * distance, 'duration': 20, 'bannerInstructions': []},
+    ])
+    self.load_route()
+    # 22 m up the road it turned into: along the first step that is short of its end + 10 m, but it is on the second
+    self.engine.last_position = (0.001, 0.0002)
+    self.engine.send_instruction()
+    self.assertEqual(self.engine.step_idx, 1)
+    self.assertTrue(self.last_message('navInstruction').valid)
+
   def test_failed_request_clears_route(self):
     self.load_route()
     self.response.raise_for_status.side_effect = requests.HTTPError('test failure')

@@ -15,6 +15,7 @@ from openpilot.selfdrive.turnpilot.routing.sources import MapboxSource, RouteSou
 
 REROUTE_DISTANCE = 25
 OFF_ROUTE_DISTANCE = 20  # TurnPilot: further than this off the step, its distances mean nothing until the reroute
+NEXT_STEP_NEAR = 6  # TurnPilot: this near the next step and further from this one by as much again, the car is on it
 MANEUVER_TRANSITION_THRESHOLD = 10
 REROUTE_COUNTER_MIN = 3
 ROUTE_RESEND_PERIOD = 10  # updates (seconds); a restarted mapsd gets the route within this
@@ -130,6 +131,14 @@ class RouteEngine:
     step = self.route[self.step_idx]
     along_geometry, lateral = along_path(self.route_geometry[self.step_idx], self.last_position)
     distance_to_maneuver_along_geometry = step['distance'] - along_geometry
+    # a sharp turn leaves the step sideways, and along it the car never gets past its end: it moved on once it is on
+    # the next step's geometry and off this one's (otherwise navd rerouted after every such turn)
+    if self.step_idx + 1 < len(self.route) and distance_to_maneuver_along_geometry < MANEUVER_TRANSITION_THRESHOLD:
+      _, next_lateral = along_path(self.route_geometry[self.step_idx + 1], self.last_position)
+      if next_lateral < NEXT_STEP_NEAR and lateral > next_lateral + NEXT_STEP_NEAR:
+        self.step_idx += 1
+        self.recompute_hold = 0
+        return self.send_instruction()
     # a missed turn: no instruction until rerouted (past the step's end the lateral is the distance from it, and it advances)
     if lateral > OFF_ROUTE_DISTANCE and distance_to_maneuver_along_geometry >= -MANEUVER_TRANSITION_THRESHOLD and \
        self.step_idx < len(self.route) - 1:
