@@ -15,6 +15,8 @@ from openpilot.system.ui.widgets.label import UnifiedLabel, gui_label
 PANEL_WIDTH = 261
 STALE_SECONDS = 3
 MARKER_MARGIN = 18  # pixels kept below the ego so its marker stays visible
+HEADER_HEIGHT = 61
+STREET_HEIGHT = 28  # TurnPilot's street name row under the header
 
 # Recolor the model's grayscale frame for people: dim the white roads and make the grey route pop. Only the route's
 # exact level (and its neighbors) is recolored, so antialiased road edges passing through that grey stay grey.
@@ -81,6 +83,7 @@ class NavigationPanel(Widget):
     x, y = rect.x, rect.y
     rl.draw_rectangle_rec(rect, rl.Color(7, 13, 18, 255))
     instruction = ui_state.sm['navInstruction']
+    street = instruction.maneuverPrimaryText if self.routing and ui_state.turnpilot_enabled else ''
     if self.routing:
       direction = instruction.maneuverModifier
       flip = -1 if 'left' in direction else 1
@@ -99,7 +102,12 @@ class NavigationPanel(Widget):
     else:
       gui_label(rl.Rectangle(x+12, y+18, rect.width-24, 30), 'Waiting for route', 26, rl.WHITE, FontWeight.BOLD,
                 alignment_vertical=TextAlignmentVertical.TOP)
-    map_rect = rl.Rectangle(x+8, y+61, rect.width-16, rect.height-111)
+    top = HEADER_HEIGHT
+    if street:
+      gui_label(rl.Rectangle(x+12, y+top-6, rect.width-24, STREET_HEIGHT), street, 24, self._muted, FontWeight.MEDIUM,
+                alignment_vertical=TextAlignmentVertical.TOP)
+      top += STREET_HEIGHT
+    map_rect = rl.Rectangle(x+8, y+top, rect.width-16, rect.height-top-50)
     rl.draw_rectangle_rec(map_rect, rl.BLACK)
     if self.map_ready:
       # A 1:1 crop of the model's frame, centered horizontally with the ego near the bottom.
