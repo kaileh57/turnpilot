@@ -1,0 +1,33 @@
+TurnPilot
+
+TurnPilot is a fork of openpilot (https://github.com/commaai/openpilot). The fork as a whole is distributed under the GNU Affero General Public License, version 3. The full text is in LICENSE-AGPL-3.0.
+
+The reason is the detector. TurnPilot finds pedestrians and cars with YOLO26 from Ultralytics (https://github.com/ultralytics/ultralytics). Its code and weights are AGPL-3.0, and so are models trained or exported with its code, so the combined work is distributed under AGPL-3.0.
+
+Source: https://github.com/kaileh57/turnpilot
+
+Parts, by license
+
+openpilot, Copyright (c) 2018, Comma.ai, Inc., MIT. The notice is in LICENSE and stays. Code that came from openpilot keeps its MIT license, which allows it to be part of this AGPL-3.0 work. TurnPilot's edits to upstream files are AGPL-3.0.
+
+TurnPilot's own code, AGPL-3.0:
+  openpilot/selfdrive/turnpilot/
+  openpilot/tools/turnpilot/
+  openpilot/tools/sim/bridge/beamng/
+  tools/turnpilot/
+  docs/turnpilot/
+
+YOLO26 models and what is built from them, AGPL-3.0, Copyright (c) Ultralytics:
+  openpilot/selfdrive/turnpilot/models/ (yolo26n.onnx, yolo26s.onnx, export_yolo26.py)
+  the compiled detectors, detector_*_tinygrad.pkl and big_detector_*_tinygrad.pkl
+  Nothing that uses these files can go upstream to openpilot.
+
+Submodules, under their own licenses: opendbc, panda, msgq, rednose and teleoprtc from comma.ai (MIT), and tinygrad (MIT).
+
+Not in the repository, installed on the device:
+  pyvalhalla and Valhalla (MIT, https://github.com/valhalla/valhalla), installed by tools/turnpilot/install_valhalla_device.sh.
+  Map tiles built from OpenStreetMap extracts. The data is (c) OpenStreetMap contributors, under the Open Database License 1.0 (https://www.openstreetmap.org/copyright). Anything that shows a map or route made from the tiles has to credit OpenStreetMap.
+
+The AGPL network clause
+
+Section 13 of the AGPL applies to the phone app that turnpilot_web serves. If you modify TurnPilot and let other people use it over a network, the modified version has to offer them its source.
