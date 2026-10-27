@@ -5,7 +5,6 @@ import struct
 import threading
 import time
 import zlib
-from http.server import ThreadingHTTPServer
 
 import numpy as np
 
@@ -42,7 +41,7 @@ class WebTestCase(OpenpilotTestCase):
     self.search = FakeSearch([{"name": "Cafe", "detail": "1 Main St", "latitude": 39.1, "longitude": -86.2}])
     self.app = server.App(self.params, reader=None, search=self.search, resolve=places.resolve_apple_maps)
     self.token = ensure_token(self.params)
-    self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(self.app))
+    self.httpd = server.Server(("127.0.0.1", 0), server.make_handler(self.app))
     self.port = self.httpd.server_address[1]
     threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
 
@@ -245,6 +244,23 @@ class TestFavorites(WebTestCase):
     assert len(recents) == 10
     assert recents[0]["name"] == "Place 5 again" and recents[1]["name"] == "Place 14"
     assert sum(p["latitude"] == 35 for p in recents) == 1
+
+  def test_concurrent_requests_do_not_lose_writes(self):
+    codes = []
+
+    def add(i):
+      body = {"name": f"Place {i}", "latitude": 30 + i, "longitude": -80}
+      codes.append(self.call("POST", "/api/favorites", body)[0])
+      codes.append(self.call("POST", "/api/destination", body)[0])
+    threads = [threading.Thread(target=add, args=(i,)) for i in range(20)]
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join()
+    assert codes == [200] * 40
+    places = self.call("GET", "/api/favorites")[1]
+    assert sorted(p["latitude"] for p in places["favorites"]) == [30 + i for i in range(20)]
+    assert len(places["recents"]) == 10
 
   def test_survives_garbage_in_the_param(self):
     self.params.put("TurnPilotFavorites", ["not", "a", "dict"], block=True)

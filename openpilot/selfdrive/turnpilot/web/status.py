@@ -6,6 +6,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.navigation.helpers import latest_gps_source
 
 SERVICES = ["deviceState", "navInstruction", "navRoute", "turnpilotPlan", "gpsLocation", "gpsLocationExternal"]
+SERVICE_TIMEOUT = 3.  # s since a service last published before it counts as not running
 STALE_AFTER = 5.  # s without a new snapshot means the reader thread is stuck or dead
 
 STATE_LABELS = {
@@ -19,8 +20,8 @@ MANEUVER_NAMES = {"new name": "continue", "end of road": "turn", "on ramp": "tak
 
 def read_services(sm) -> dict:
   """Plain values out of a SubMaster. Nothing else in the web app touches cereal."""
-  def up(s):
-    return sm.seen[s] and sm.alive[s]
+  def up(s):  # SubMaster's own alive is 10 periods, which is half a second for turnpilotPlan; the phone only needs a few seconds
+    return sm.seen[s] and time.monotonic() - sm.recv_time[s] < SERVICE_TIMEOUT
 
   # navd sends navInstruction with valid=False when it has no route, and turnpilotd doesn't set valid at all
   ni, plan = sm["navInstruction"], sm["turnpilotPlan"]
@@ -112,19 +113,20 @@ class StatusReader(threading.Thread):
       return self.snapshot
 
   def run(self):
-    try:
-      # imported here so a missing messaging build leaves the search and destination working
-      from openpilot.cereal import messaging
-      sm = messaging.SubMaster(SERVICES)
-    except Exception:
-      cloudlog.exception("turnpilot_web.status_unavailable")
-      return
+    sm, logged = None, False
     while not self.stopped.is_set():
       try:
+        if sm is None:
+          # imported here so a missing messaging build leaves the search and destination working
+          from openpilot.cereal import messaging
+          sm = messaging.SubMaster(SERVICES)
         sm.update(500)
         snap = read_services(sm)
         with self.lock:
           self.snapshot = snap
       except Exception:
-        cloudlog.exception("turnpilot_web.status_failed")
-        time.sleep(1)
+        if not logged:
+          cloudlog.exception("turnpilot_web.status_failed")
+          logged = True
+        sm = None
+        self.stopped.wait(5)

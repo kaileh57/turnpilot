@@ -213,12 +213,16 @@ def make_handler(app: App):
   return type("BoundHandler", (Handler,), {"app": app})
 
 
+class Server(ThreadingHTTPServer):
+  request_queue_size = 64  # the default of 5 resets connections when a page opens several at once
+
+
 def main():
   params = Params()
   ensure_token(params)
   reader = StatusReader()
   reader.start()
-  server = ThreadingHTTPServer(("", PORT), make_handler(App(params, reader)))
+  server = Server(("", PORT), make_handler(App(params, reader)))
   cloudlog.info(f"turnpilot_web listening on :{PORT}")
   server.serve_forever()
 
