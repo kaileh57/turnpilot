@@ -44,6 +44,12 @@ ROUTES = {r.name: r for r in (
         "that ended on a divided road had Valhalla start the next one on the other carriageway) and no junction that " +
         "failed in screening: right, left, right; right, right, right, left, right, slight left; left, left, right; " +
         "left, right, right. Ends about 230 m from the start"),
+  Route("town15b2", (-629.47, 459.21, 116.2), -0.7875, ((39.7694848, -86.1648298), (39.7698616, -86.1639357)),
+        "town15b's first leg and its second up to 39 m past the left at (-539, 157), short of the fork at DR272_7: " +
+        "7 turns, about 1.1 km: right, left, right; right, right, right, left"),
+  Route("fork272", (-525.4, 161.7, 102.0), 0.2, ((39.7680603, -86.1612328),),
+        "the rest of town15b's leg 2 from just past its left at (-539, 157), about 700 m: the fork at DR272_7 (-486, " +
+        "159) that the route goes straight through (no maneuver; the model took the right branch), right, slight left"),
   Route("loop", *G62_START, ((39.7661729, -86.1647217), (39.7737206, -86.1659774)),
         "18 maneuvers, about 5.6 km: out (left, left, right, right, keep left, keep left, keep right, 1.5 km) and back " +
         "(keep right, keep left, left, keep left, left, keep right, keep left, right, keep left, right, left, 4.0 km), " +
