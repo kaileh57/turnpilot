@@ -3,22 +3,35 @@
 Which lane the car is in comes from what the model sees: lanes either side counted from the room between the
 ego lane's line and the road edge, at about 3.6 m a lane, but only where the next line out is painted (room
 alone counts shoulders and parking strips as lanes). modelV2 can't tell a yellow line from a white one, and on
-an undivided road its far road edge lies beyond the oncoming lanes, so without the map's lane list
-(NavInstruction.lanes) the car only ever changes toward the curb, and only for an exit: before a junction turn
-the painted strip at the curb is as often a parking lane as a lane (BeamNG, 2026-10-27: the change put the car
-in it and the right turn from there ended against the corner). With the list, the car's lane is counted from
-the curb side, which is always its own direction's.
+an undivided road its far road edge lies beyond the oncoming lanes; the lane paint read off the road camera
+(scene/lane_paint.py, one entry per modelV2 lane line) can. US markings say what is beyond a line: broken white
+is a lane going the same way, solid white an edge, shoulder, bike or parking lane, yellow oncoming traffic or a
+divided road's left edge.
+
+- Always: no change is requested across a line read yellow, and lanes beyond a yellow line count 0, also in the
+  count used with the map's lane list (NavInstruction.lanes).
+- With the list, the car's lane is counted from the curb side, which is always its own direction's.
+- Without it (the usual case: OSM tags lanes on few roads), the car moves toward the maneuver's side, turns as
+  well as exits, while the ego lane's line on that side reads broken white with good confidence: one change at a
+  time, looked at again after each change's cooldown, so it keeps moving over while that line stays broken white
+  inside the lane change window. Solid, yellow, no line or unknown on that side means no change; that, and toward
+  the curb for an exit by the model's lane count, is what it did before the paint was read, and is the fallback.
+  Paint alone isn't enough: the model must also see a lane that way (a California bike lane's line turns broken
+  before a junction, but the strip beyond is too narrow to count as a lane). Before the paint, a change toward
+  the curb before a junction turn put the car in a parking strip (BeamNG, 2026-10-27), which is why a turn needs
+  the broken white line.
 
 DesireHelper executes the change: a request stands in for the blinker and the nudge, and is dropped the moment
 the change starts, or DesireHelper would chain a second one. On cars where openpilot can't signal, the driver
 is prompted to signal and the request waits for that blinker.
 """
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from openpilot.cereal import custom, log
 from openpilot.selfdrive.controls.lib.desire_helper import LANE_CHANGE_SPEED_MIN
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, LEFT, RIGHT, TURN
+from openpilot.selfdrive.turnpilot.scene.lane_paint import LinePaint
 
 LaneChange = custom.TurnpilotPlan.LaneChange
 LaneChangeState = log.LaneChangeState
@@ -29,6 +42,8 @@ LINE_PROB_MIN = 0.5
 EDGE_STD_MAX = 1.2          # a road edge is trusted when its std is under this
 SHOULDER_LANES = 0.75       # room narrower than this many lane widths beyond the ego line is a shoulder
 KEEP_MIN_ROOM_M = 1.0       # a keep desire toward a trusted edge closer than this beyond the ego line drives off the road
+BROKEN_WHITE_CONF_MIN = 0.6  # the ego line toward a turn read broken white at this confidence allows a change without map lanes
+YELLOW_CONF_MIN = 0.3        # a line read yellow at this confidence vetoes changes across it (the cautious answer, so a lower bar)
 
 LC_START_S, LC_START_MIN_M, LC_START_MAX_M = 20., 150., 400.  # lane changes start this far before the maneuver...
 LC_END_S, LC_END_MIN_M, LC_END_MAX_M = 6., 60., 120.          # ...and none start closer than this
@@ -85,10 +100,32 @@ def model_lanes_from_msg(model) -> ModelLanes:
                      [e.y[SAMPLE_IDX] for e in edges], list(model.roadEdgeStds))
 
 
-def lane_changes_needed(maneuver, lanes: ModelLanes, right_hand_traffic: bool = True) -> int:
-  """Lane changes the maneuver still needs: positive left, negative right."""
+def _yellow(p: LinePaint) -> bool:
+  return p.kind in ('broken', 'solid') and p.color == 'yellow' and p.confidence >= YELLOW_CONF_MIN
+
+
+def paint_lanes(lanes: ModelLanes, paint) -> ModelLanes:
+  """The model's lane counts with every lane beyond a yellow line taken out. paint: one LinePaint per modelV2 lane line,
+  [far left, left, right, far right], or empty when it wasn't read."""
+  if len(paint) != 4:
+    return lanes
+  def side(n, ego, outer):
+    return 0 if _yellow(ego) else min(n, 1) if _yellow(outer) else n
+  return replace(lanes, left=side(lanes.left, paint[1], paint[0]), right=side(lanes.right, paint[2], paint[3]))
+
+
+def broken_white_toward(paint, side) -> bool:
+  """The ego lane's line toward side (LEFT or RIGHT) reads broken white: a lane going the same way is beyond it."""
+  if len(paint) != 4 or side not in (LEFT, RIGHT):
+    return False
+  return paint[1 if side == LEFT else 2].is_('broken', 'white', BROKEN_WHITE_CONF_MIN)
+
+
+def lane_changes_needed(maneuver, lanes: ModelLanes, right_hand_traffic: bool = True, paint=()) -> int:
+  """Lane changes the maneuver still needs: positive left, negative right. paint: as for paint_lanes."""
   if maneuver is None or not (maneuver.kind == TURN or (maneuver.kind == KEEP and maneuver.type == "off ramp")):
     return 0
+  lanes = paint_lanes(lanes, paint)
   curb = RIGHT if right_hand_traffic else LEFT
   nav = maneuver.lanes
   if len(nav) >= 2:
@@ -98,10 +135,10 @@ def lane_changes_needed(maneuver, lanes: ModelLanes, right_hand_traffic: bool = 
     idx = len(nav) - 1 - lanes.right if curb == RIGHT else lanes.left  # from the left, counted from the curb
     idx = min(max(idx, 0), len(nav) - 1)
     need = idx - max(valid) if idx > max(valid) else idx - min(valid) if idx < min(valid) else 0
-  elif maneuver.side == curb and maneuver.kind == KEEP:
-    need = lanes.left if curb == LEFT else -lanes.right
   else:
-    return 0
+    exit_need = (lanes.left if curb == LEFT else -lanes.right) if maneuver.side == curb and maneuver.kind == KEEP else 0
+    paint_need = (1 if maneuver.side == LEFT else -1) if broken_white_toward(paint, maneuver.side) else 0
+    need = exit_need if abs(exit_need) >= abs(paint_need) else paint_need
   if (need > 0 and lanes.left == 0) or (need < 0 and lanes.right == 0):
     return 0  # never toward a side where the model sees no lane
   return need
@@ -147,9 +184,9 @@ class LanePlanner:
     return self.requested != LaneChange.none or self.prompt != LaneChange.none or self.ours
 
   def update(self, maneuver, distance: float, lanes: ModelLanes, lc_state, v_ego: float, left_blinker: bool,
-             right_blinker: bool, objects, driver_signals: bool, right_hand_traffic: bool, dt: float):
+             right_blinker: bool, objects, driver_signals: bool, right_hand_traffic: bool, dt: float, paint=()):
     """(laneChange, signalPrompt, reason). lc_state: modelV2.meta.laneChangeState; objects: tracked scene objects,
-    empty when the scene is unavailable (DesireHelper's blindspot check still applies)."""
+    empty when the scene is unavailable (DesireHelper's blindspot check still applies); paint: as for paint_lanes."""
     if lc_state in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing):
       self.ours = self.ours or self.requested != LaneChange.none
       return self._none()
@@ -162,7 +199,7 @@ class LanePlanner:
       self._confirm = 0
       return self._none()
 
-    need = lane_changes_needed(maneuver, lanes, right_hand_traffic) if v_ego > LANE_CHANGE_SPEED_MIN + LC_SPEED_MARGIN else 0
+    need = lane_changes_needed(maneuver, lanes, right_hand_traffic, paint) if v_ego > LANE_CHANGE_SPEED_MIN + LC_SPEED_MARGIN else 0
     start, end = lane_change_window(v_ego, abs(need))
     if not end < distance < start:
       need = 0

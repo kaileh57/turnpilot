@@ -56,11 +56,30 @@ struct TurnpilotDetections @0xaedffd8f31e7b55d {
     x1 @4 :Float32;
     y1 @5 :Float32;
   }
+  struct LanePaint {
+    # What one of modelV2's lane lines is painted as, read off the road camera (selfdrive/turnpilot/scene/lane_paint.py)
+    enum Kind {
+      unknown @0;  # not readable: out of view, hidden, low line probability, uncalibrated, too few samples
+      none @1;     # readable road, no paint
+      broken @2;   # dashes or Botts' dots
+      solid @3;
+    }
+    enum Color {
+      unknown @0;
+      white @1;
+      yellow @2;
+    }
+    kind @0 :Kind;
+    color @1 :Color;
+    confidence @2 :Float32;  # 0-1
+    coverage @3 :Float32;    # share of the sampled road with paint, over the last 1.5 s
+  }
   frameId @0 :UInt32;
   timestampEof @1 :UInt64;
   camera @2 :Camera;
   executionTime @3 :Float32;   # s
   detections @4 :List(Detection);
+  lanePaint @5 :List(LanePaint);  # on the road camera's frame of this step, aligned with modelV2.laneLines; empty when not read
 }
 
 struct TurnpilotScene @0xf35cc4560bbf6ec2 {

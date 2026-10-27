@@ -3,6 +3,7 @@ from openpilot.cereal import custom, log
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot.hooks import plan_accel
 from openpilot.selfdrive.turnpilot.lane_planner import lane_change_window
+from openpilot.selfdrive.turnpilot.scene.lane_paint import UNKNOWN, LinePaint
 from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP, ONCOMING_TTA_S, PED_STOP_GAP_M
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_state, model_v2, nav_instruction, scene
 from openpilot.selfdrive.turnpilot.desire_timing import TURN_DESIRE_LEAD_M
@@ -30,8 +31,9 @@ class FakeSM:
 
 
 class Sim:
-  def __init__(self, maneuvers, cruise=13., nav_lanes=None, model_lanes=(0, 0), shadow=False, driver_signals=False):
+  def __init__(self, maneuvers, cruise=13., nav_lanes=None, model_lanes=(0, 0), shadow=False, driver_signals=False, paint=()):
     self.navd, self.tp, self.sm = FakeNavd(maneuvers, nav_lanes), TurnPilot(), FakeSM()
+    self.paint = paint
     self.s, self.v, self.cruise, self.t = 0., cruise, cruise, 0.
     self.model_lanes, self.shadow, self.driver_signals = model_lanes, shadow, driver_signals
     self.trace = []
@@ -43,7 +45,8 @@ class Sim:
       self.sm.put('navInstruction', instr)
     self.sm.put('carState', car_state(self.v, steer, left_blinker=blinker))
     self.sm.put('modelV2', model_v2(*self.model_lanes))
-    plan = self.tp.update(self.sm, scene(objects, available), True, self.shadow, self.driver_signals).as_reader().turnpilotPlan
+    plan = self.tp.update(self.sm, scene(objects, available), True, self.shadow, self.driver_signals,
+                          paint=self.paint).as_reader().turnpilotPlan
     a = min(plan_accel(plan.accelCap, plan.speedCap, self.v), (self.cruise - self.v) / 2., 1.5)
     if plan.shouldStop:
       a = min(a, -1.)
@@ -165,6 +168,20 @@ def test_lane_change_request_and_driver_prompt():
   assert all(plan.laneChange == LaneChange.none for _, _, plan in sim.trace)
   plan = sim.step(blinker=True)
   assert plan.laneChange == LaneChange.left
+
+
+def test_lane_change_from_lane_paint():
+  # no map lanes: the broken white line on the left lets the car over toward a left turn; none read, no change
+  broken_white_left = (UNKNOWN, LinePaint('broken', 'white', 0.9, 0.3), LinePaint('solid', 'white', 0.9, 0.95), UNKNOWN)
+  sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., model_lanes=(1, 0), paint=broken_white_left)
+  sim.run(15.)
+  requests = [s for s, _, plan in sim.trace if plan.laneChange == LaneChange.left]
+  start, end = lane_change_window(15.)
+  assert requests and 500. - start < requests[0] < 500. - end
+  assert all(plan.laneChange != LaneChange.right for _, _, plan in sim.trace)
+  sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., model_lanes=(1, 0))
+  sim.run(15.)
+  assert all(plan.laneChange == LaneChange.none for _, _, plan in sim.trace)
 
 
 def test_shadow_computes_the_same_plan():

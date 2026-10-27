@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """turnpilotd: turns the active route and the scene into desire pulses, lane-change requests and longitudinal limits.
 
-modeld takes the plan's desire and lane change, plannerd its accel and speed caps (see hooks.py). In shadow mode
+modeld takes the plan's desire and lane change, plannerd its accel and speed caps (see hooks.py). The lane paint the
+detector reads comes in with its detections, and is used only while those are fresh (the scene is available). In shadow mode
 (TurnPilotShadowMode) everything is computed and published with shadow=True, and nothing acts on it.
 """
 from opendbc.car.structs import car
@@ -12,6 +13,7 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.desire_timing import DesireTiming
 from openpilot.selfdrive.turnpilot.lane_planner import OPENPILOT_SIGNALS_BRANDS, LanePlanner, lane_change_window, model_lanes_from_msg
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, TURN, RouteFollower
+from openpilot.selfdrive.turnpilot.scene.lane_paint import lane_paint_from_msg
 from openpilot.selfdrive.turnpilot.scene.tracker import SceneTracker, default_yaw_rate
 from openpilot.selfdrive.turnpilot.scene_policy import NO_ACCEL_CAP, scene_policy
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, turn_speed_cap
@@ -30,8 +32,9 @@ class TurnPilot:
     self.desires = DesireTiming()
     self.lanes = LanePlanner()
 
-  def update(self, sm, scene, enabled: bool, shadow: bool, driver_signals: bool = True, right_hand_traffic: bool = True):
-    """A turnpilotPlan message from sm's carState, navInstruction and modelV2, and a TurnpilotScene."""
+  def update(self, sm, scene, enabled: bool, shadow: bool, driver_signals: bool = True, right_hand_traffic: bool = True, paint=()):
+    """A turnpilotPlan message from sm's carState, navInstruction and modelV2, a TurnpilotScene, and the lane paint of
+    modelV2's four lane lines (empty when unknown)."""
     msg = messaging.new_message('turnpilotPlan')
     plan = msg.turnpilotPlan
     plan.shadow = shadow
@@ -56,7 +59,7 @@ class TurnPilot:
                                       lanes.keep_left_ok, lanes.keep_right_ok, DT_MDL, default_yaw_rate(cs, model))
     plan.laneChange, plan.signalPrompt, lane_reason = self.lanes.update(
       maneuver, rf.distance, lanes, model.meta.laneChangeState, v_ego, cs.leftBlinker, cs.rightBlinker, objects,
-      driver_signals, right_hand_traffic, DT_MDL)
+      driver_signals, right_hand_traffic, DT_MDL, paint)
     decision = scene_policy(objects, available, maneuver, rf.distance, v_ego, right_hand_traffic)
     plan.accelCap = decision.accel_cap
     plan.speedCap = min(decision.speed_cap, turn_speed_cap(maneuver, rf.distance, v_ego, right_hand_traffic))
@@ -125,7 +128,9 @@ def main():
       tracker.fill_scene(scene_msg.turnpilotScene)
     pm.send('turnpilotScene', scene_msg)
 
-    msg = tp.update(sm, scene_msg.as_reader().turnpilotScene, enabled, shadow, driver_signals, right_hand_traffic)
+    scene = scene_msg.as_reader().turnpilotScene
+    paint = lane_paint_from_msg(sm['turnpilotDetections'].lanePaint) if scene.available and sm.seen['turnpilotDetections'] else ()
+    msg = tp.update(sm, scene, enabled, shadow, driver_signals, right_hand_traffic, paint)
     msg.valid = sm.all_checks(['carState', 'modelV2'])
     pm.send('turnpilotPlan', msg)
     rk.keep_time()
