@@ -199,9 +199,13 @@ Later on 2026-10-27 (H3), same setup, 19.2-20.0 model runs a second in every run
   clear went out at 42-50 degrees and the car peaked at 50-55 degrees, 8 runs of 8. At the 90-degree turns it went
   out at 46-83 degrees and the car ended at 85-97, except at short2's last right (below).
 - `town15b2` (town15b's first leg and its second up to just past that left, 7 turns, 0.9 km): arrived with no
-  disengagement, gas tap or hold in 3 of 3 runs, and in 1 of 3 recorded with the UI (one gas tap at the leg-2 right
-  at (-706, 115); one stuck there). At that right the model sees a lead at 6.5-8.6 m (prob 0.76-0.91) partway round
-  and stops: 2 of 6 runs today, 2 of 5 in H2's.
+  disengagement, gas tap or hold in 5 of 8 valid runs (3 recorded with the UI); 1 more arrived after one gas tap,
+  and 2 ended stuck, all three at the leg-2 right at (-706, 115). There the car sometimes starts turning only 2-3 m
+  before the maneuver point (4-5 m when it gets round), ends up pointing at the storefront across the street, and
+  the model sees it as a lead at 6.5-8.6 m (prob 0.76-0.91) and stops: 5 of 11 passes today in all routes (3 stuck,
+  2 going on after a tap), 2 of 5 in H2's. The late starts had the car 0.4 m further from the right road edge 10 m
+  out (3.2-3.6 m against 2.7-3.3, the model's own estimate) and 4.2-4.6 m/s there against 3.0-4.6. Screened alone
+  from 73 m out it passed 12 of 12, at a 3.5 or 4.3 m/s corner speed alike, so the slower corner was not kept.
 - `town15b` itself stops at the fork DR272_7 (-486, 159), 55 m past that left: the route goes on at 108 degrees
   between roads at 82 and 130, with no maneuver. The model took 130 with no desire (3 runs of 3) and 82 with a
   keepLeft held from 20 m (2 of 2, reverted), so no keep desire fixes it. `fork272` starts just before it.
@@ -210,6 +214,10 @@ Later on 2026-10-27 (H3), same setup, 19.2-20.0 model runs a second in every run
 - `short2`: 3 of 4 clean; the fourth turned the last right on to 127 degrees into the curb after a late start
   (51 degrees turned at the maneuver point), with the clear at 81 degrees. Gate 1 at group_46_47_48_49, 40 m:
   left 3 of 4, right 2 of 2.
+- The detector in modeld stops for good after a burst of slow frames: it skips a frame when the model time plus
+  the median of its last 5 run times passes 45 ms, and it only adds a time when it runs. After 3 runs of 37-92 ms
+  (model runs of 58-122 ms, while other work loaded the Mac) it never ran again, and TurnPilot then holds before
+  every left for "detector unavailable" (one town15b2 run held 374 s). Seen in the last 3 sessions today.
 - `control.py` now drops its wound-up speed reference when the car accelerates 1.5 m/s^2 past the request: out of
   a tight turn the ETK 800 surged at 4.5-4.8 m/s^2 on a 1.0 request, and openpilot latched excessiveActuation.
 - route_drive's JSON has `poses` per run: wall-clock and run time, position and BeamNG's rotation quaternion at
