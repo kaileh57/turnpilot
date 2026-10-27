@@ -26,7 +26,7 @@ class ChaseCapture:
     if ffmpeg is None:
       raise RuntimeError("capture needs ffmpeg on PATH")
     self.proc = subprocess.Popen([ffmpeg, "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{CW}x{CH}",
-                                  "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", path],
+                                  "-r", str(FPS), "-i", "pipe:0", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", path],
                                  stdin=subprocess.PIPE)
     self.frames = 0
     self.threads: list[threading.Thread] = []
