@@ -178,6 +178,21 @@ class TestHandlerDefaults(OpenpilotTestCase):
     assert server.Handler.timeout == server.REQUEST_TIMEOUT and 0 < server.REQUEST_TIMEOUT <= 30
 
 
+class TestMain(OpenpilotTestCase):
+  def test_a_taken_port_is_retried(self):
+    # the manager doesn't restart a dead process, so a failed bind must not end it
+    failures, served = [OSError(48, "Address already in use")], []
+
+    def make_server(address, handler):
+      if failures:
+        raise failures.pop()
+      return mock.Mock(serve_forever=lambda: served.append(address))
+    with mock.patch.object(server, "Server", side_effect=make_server), mock.patch.object(server, "StatusReader"), \
+         mock.patch.object(server.time, "sleep") as sleep:
+      server.main()
+    assert served == [("", pairing.PORT)] and sleep.call_count == 1
+
+
 class TestConnections(WebTestCase):
   """Sockets that stall or lie about their length must not hold a handler thread for good."""
   HANDLER_TIMEOUT = 0.4

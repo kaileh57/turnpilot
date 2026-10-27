@@ -7,6 +7,7 @@ by opening /?t=<token> once.
 """
 import hmac
 import json
+import time
 import urllib.parse
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,6 +25,7 @@ COOKIE = "tp_token"
 MAX_BODY = 16 * 1024
 REQUEST_TIMEOUT = 10.  # s a client may stall on one socket read or write; Safari opens sockets it never uses
 LOOPBACK = ("127.0.0.1", "::1")
+BIND_RETRY_S = 5.  # s between tries to listen: the manager doesn't restart a dead process, and a dead one soft-disables openpilot
 
 
 class ApiError(Exception):
@@ -232,7 +234,13 @@ def main():
   ensure_token(params)
   reader = StatusReader()
   reader.start()
-  server = Server(("", PORT), make_handler(App(params, reader)))
+  while True:
+    try:
+      server = Server(("", PORT), make_handler(App(params, reader)))
+      break
+    except OSError as e:  # the port still held by another instance
+      cloudlog.warning(f"turnpilot_web can't listen on :{PORT} ({e}), retrying")
+      time.sleep(BIND_RETRY_S)
   cloudlog.info(f"turnpilot_web listening on :{PORT}")
   server.serve_forever()
 

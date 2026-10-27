@@ -3,11 +3,17 @@
 
 modeld takes the plan's desire and lane change, plannerd its accel and speed caps (see hooks.py). In shadow mode
 (TurnPilotShadowMode) everything is computed and published with shadow=True, and nothing acts on it.
+It runs onroad only while TurnPilotEnabled. The manager doesn't restart a process that died, and a dead one
+soft-disables openpilot for the rest of the drive (processNotRunning), so an exception in the plan or the scene is
+logged and a disabled plan or an empty scene goes out instead.
 """
+import time
+
 from opendbc.car.structs import car
 from openpilot.cereal import custom, messaging
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL, Ratekeeper
+from openpilot.common.swaglog import cloudlog
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.desire_timing import DesireTiming
 from openpilot.selfdrive.turnpilot.lane_planner import OPENPILOT_SIGNALS_BRANDS, LanePlanner, lane_change_window, model_lanes_from_msg
@@ -20,6 +26,23 @@ State = custom.TurnpilotPlan.State
 
 APPROACH_M = 150.  # a turn or keep this close (or inside its lane change window) is being approached
 NO_LONG_REASON = "openpilot longitudinal is off"
+ERROR_REASON = "TurnPilot error"
+ERROR_LOG_PERIOD_S = 10.  # s between logged exceptions from one place, so one that fails every frame doesn't flood the log
+
+
+class ErrorLog:
+  """cloudlog.exception for the exception being handled, at most once per ERROR_LOG_PERIOD_S for each event."""
+  def __init__(self):
+    self.last: dict[str, float] = {}
+
+  def __call__(self, event: str):
+    now = time.monotonic()
+    if now - self.last.get(event, -ERROR_LOG_PERIOD_S) >= ERROR_LOG_PERIOD_S:
+      self.last[event] = now
+      cloudlog.exception(event)
+
+
+log_error = ErrorLog()
 
 
 class TurnPilot:
@@ -94,7 +117,12 @@ class TurnPilot:
     if enabled and not long_control:
       self.reset()
       return disabled_plan(shadow, NO_LONG_REASON)
-    return self.update(sm, scene, enabled, shadow, *args, **kwargs)
+    try:
+      return self.update(sm, scene, enabled, shadow, *args, **kwargs)
+    except Exception:
+      log_error("turnpilotd.plan_failed")
+      self.reset()
+      return disabled_plan(shadow, ERROR_REASON)
 
 
 def disabled_plan(shadow: bool, reason: str):
@@ -106,18 +134,28 @@ def disabled_plan(shadow: bool, reason: str):
   return msg
 
 
-def driver_signals_for(params) -> bool:
-  """True unless the car's port signals for openpilot's lane changes; unknown cars prompt the driver."""
+def car_params(params):
+  """CarParams as card last wrote them, or None: not yet written, or unreadable."""
   cp_bytes = params.get("CarParams")
   if cp_bytes is None:
-    return True
-  return messaging.log_from_bytes(cp_bytes, car.CarParams).brand not in OPENPILOT_SIGNALS_BRANDS
+    return None
+  try:
+    return messaging.log_from_bytes(cp_bytes, car.CarParams)
+  except Exception:
+    log_error("turnpilotd.car_params_unreadable")
+    return None
+
+
+def driver_signals_for(params) -> bool:
+  """True unless the car's port signals for openpilot's lane changes; unknown cars prompt the driver."""
+  cp = car_params(params)
+  return cp is None or cp.brand not in OPENPILOT_SIGNALS_BRANDS
 
 
 def long_control_for(params) -> bool:
   """CarParams.openpilotLongitudinalControl; False until card has written CarParams."""
-  cp_bytes = params.get("CarParams")
-  return cp_bytes is not None and messaging.log_from_bytes(cp_bytes, car.CarParams).openpilotLongitudinalControl
+  cp = car_params(params)
+  return cp is not None and cp.openpilotLongitudinalControl
 
 
 def main():
@@ -143,13 +181,17 @@ def main():
       long_control = long_control_for(params)
 
     scene_msg = messaging.new_message('turnpilotScene')
-    if tracker is None and sm.seen['deviceState'] and sm.seen['narrowRoadCameraState']:
-      device_type = str(sm['deviceState'].deviceType)
-      tracker = SceneTracker(DEVICE_CAMERAS[(device_type, str(sm['narrowRoadCameraState'].sensor))], device_type)
-    if tracker is not None:
-      tracker.update(sm['turnpilotDetections'] if sm.seen['turnpilotDetections'] else None, sm['extrinsicsCalibration'],
-                     sm['carState'], sm['modelV2'])
-      tracker.fill_scene(scene_msg.turnpilotScene)
+    try:
+      if tracker is None and sm.seen['deviceState'] and sm.seen['narrowRoadCameraState']:
+        device_type = str(sm['deviceState'].deviceType)
+        tracker = SceneTracker(DEVICE_CAMERAS[(device_type, str(sm['narrowRoadCameraState'].sensor))], device_type)
+      if tracker is not None:
+        tracker.update(sm['turnpilotDetections'] if sm.seen['turnpilotDetections'] else None, sm['extrinsicsCalibration'],
+                       sm['carState'], sm['modelV2'])
+        tracker.fill_scene(scene_msg.turnpilotScene)
+    except Exception:
+      log_error("turnpilotd.scene_failed")
+      tracker, scene_msg = None, messaging.new_message('turnpilotScene')  # unavailable: as with no detector, lefts hold
     pm.send('turnpilotScene', scene_msg)
 
     msg = tp.plan(sm, scene_msg.as_reader().turnpilotScene, enabled, shadow, driver_signals, right_hand_traffic, long_control=long_control)
