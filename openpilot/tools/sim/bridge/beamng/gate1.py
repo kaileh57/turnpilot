@@ -96,7 +96,7 @@ class Gate1:
 
     if self.phase == "settle":
       if now - self.t0 > SETTLE:
-        b.set_speed_kph, b.auto_engage, self.phase = self.speed_kph, True, "engage"
+        b.set_speed_kph, b.rolling_start_kph, b.auto_engage, self.phase = self.speed_kph, self.speed_kph * 0.8, True, "engage"
     elif self.phase == "engage":
       if enabled:
         self.phase, self.engaged_t = "approach", now
@@ -130,7 +130,7 @@ class Gate1:
     b.auto_engage = False
     rows = self.rows
     res = {"run": self.run + 1, "lead": self.lead, "direction": self.turn.direction, "junction": self.turn.junction, "end": reason,
-               "disengaged": self.disengaged, "expected_deg": round(math.degrees(self.turn.angle), 1)}
+           "disengaged": self.disengaged, "expected_deg": round(math.degrees(self.turn.angle), 1)}
     moving = [r for r in rows if r[4] > 1.0]
     if self.t_pulse is not None and moving:
       t_pulse = self.t_pulse - self.t0
@@ -150,7 +150,7 @@ class Gate1:
   def finish(self, b):
     took = sum(r.get('took_turn', False) for r in self.results)
     summary = {"turns_taken": took, "runs": len(self.results), "junction": self.turn.junction, "direction": self.turn.direction,
-                   "pulse_frames": self.pulse_frames, "speed_kph": self.speed_kph, "runs_detail": self.results}
+               "pulse_frames": self.pulse_frames, "speed_kph": self.speed_kph, "runs_detail": self.results}
     with open(self.out, 'w') as f:
       json.dump(summary, f, indent=1)
     print(f"gate1: {took}/{len(self.results)} turns taken, results in {self.out}", flush=True)

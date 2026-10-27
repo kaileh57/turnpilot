@@ -43,6 +43,7 @@ class BeamNGConfig:
   spawn_pos: tuple = (-908.82, 659.67, 112.25)
   spawn_rot: tuple = (0.0, 0.0, -0.7068525, 0.7073609)
   green: bool = True  # force every traffic signal green and hold it (nav runs don't test the model on lights)
+  tod: float = 0.05  # BeamNG time of day, held (0 is noon): 13:12, high sun; the level's 08:52 start blinds an eastbound camera
   reload: bool = False  # reload the scenario even if ours is already loaded (a load takes about a minute)
   camera_update: float = 0.02  # s; below the game's frame time, so both cameras render on every frame
   camera_poll: float = 0.04  # s between polls of both cameras; each poll costs game frame time (sweep: 0.04 gives 20 pairs/s)
@@ -83,7 +84,14 @@ class Pose:
     else:
       self.vel, omega = np.zeros(3), np.zeros(3)
     acc = np.mean([r['accSmooth'] for r in latest], axis=0)  # kinematic, in sensor axes (is_using_gravity=False)
-    self.a_long = float(acc[0])
+    # the car's acceleration for the throttle and brake controller, from its forward speed across the history:
+    # accSmooth bounces with the suspension (single readings of +-3 m/s^2 at a steady speed)
+    t = np.array([r['time'] for r in history])
+    if len(t) >= 6 and t[-1] - t[0] > 0.08:
+      v_fwd = (np.diff(np.array([r['pos'] for r in history]), axis=0) @ fwd) / np.maximum(np.diff(t), 1e-4)
+      self.a_long = float(np.polyfit((t[1:] + t[:-1]) / 2 - t[-1], v_fwd, 1)[0])
+    else:
+      self.a_long = float(acc[0])
     # an accelerometer reads specific force, a - g; a comma four's sensor axes are (up, left, back), see locationd
     f = acc + GRAVITY * np.array([fwd[2], up[2], right[2]])
     self.accel = (float(f[1]), float(-f[2]), float(-f[0]))
@@ -157,6 +165,7 @@ class BeamNGWorld(World):
       if cfg.lean:
         self.bng.ui.hide_hud()
         self.bng.settings.set_particles_enabled(False)
+      self.bng.env.set_tod(tod=cfg.tod, play=False)
       if cfg.green and cfg.level == 'west_coast_usa':
         scenario.all_green(self.bng)
       self.bng.vehicles.teleport('ego', cfg.spawn_pos, cfg.spawn_rot)

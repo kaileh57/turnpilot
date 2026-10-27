@@ -29,15 +29,16 @@ class TestNV12:
 class TestPose:
   def test_left_turn_and_rest(self):
     # 10 m/s north, turning left at 0.2 rad/s, accelerating forward at 1 m/s^2
-    v, r = 10.0, 0.2
+    v, r, a = 10.0, 0.2, 1.0
     hist = []
     for i in range(10):
       t = i * 0.01
       yaw = math.pi / 2 + r * t
-      hist.append(imu_reading(t, (0.0, v * t, 0.0), yaw, acc=(1.0, 0.0, 0.0)))
+      hist.append(imu_reading(t, (0.0, v * t + a * t * t / 2, 0.0), yaw, acc=(a, 0.0, 0.0)))
     p = Pose(hist, hist[-2:])
     assert abs(p.yaw_rate - r) < 1e-3
-    assert abs(p.vel[1] - v) < 1e-6
+    assert abs(p.vel[1] - (v + a * 0.065)) < 0.01  # average over the 50 ms window
+    assert abs(p.a_long - a) < 0.05
     assert abs(p.bearing - (90.0 - math.degrees(math.pi / 2 + r * 0.09)) % 360.0) < 1e-6  # compass
     up, left, back = p.accel
     # comma four sensor axes (up, left, back): at rest the accelerometer reads +g up; locationd's meas = [-v2, -v1, -v0]

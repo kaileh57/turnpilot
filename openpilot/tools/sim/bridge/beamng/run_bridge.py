@@ -29,6 +29,7 @@ def parse_args(add_args=None):
   p.add_argument('--reload', action='store_true', help='reload the scenario even if ours is loaded')
   p.add_argument('--engage', action='store_true', help='engage openpilot as soon as it is engageable')
   p.add_argument('--set-speed', type=float, default=0.0, help='cruise set speed on engage, km/h (default: current speed)')
+  p.add_argument('--rolling-start', type=float, default=0.0, help='with --engage, drive up to this speed (km/h) before engaging')
   p.add_argument('--camera-update', type=float, default=d.camera_update, help='BeamNG camera requested update time, s')
   p.add_argument('--camera-poll', type=float, default=d.camera_poll, help='period between polls of both cameras, s')
   p.add_argument('--no-lean', action='store_true', help='keep the HUD and particles on')
@@ -48,7 +49,7 @@ def config_from_args(args) -> BeamNGConfig:
 def main():
   args = parse_args()
   q: Queue = Queue()
-  bridge = BeamNGBridge(config_from_args(args), engage=args.engage, set_speed_kph=args.set_speed)
+  bridge = BeamNGBridge(config_from_args(args), engage=args.engage, set_speed_kph=args.set_speed, rolling_start_kph=args.rolling_start)
   p = bridge.run(q)
 
   def stop(*_):

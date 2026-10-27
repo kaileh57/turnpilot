@@ -12,6 +12,7 @@ MANUAL_STEER_DEG = 90.0  # steering wheel degrees for a full manual steer input
 STEER_NM_PER_UNIT = 12.5  # manual steer input as torsion bar torque; the port reads > 1 Nm as the driver steering
 SET_SPEED_STEP_KPH = 5.0
 DT = 0.01
+ROLLING_START_ACCEL = 1.0  # m/s^2, the driver pulling away before engaging
 
 
 class BeamNGBridge(SimulatorBridge):
@@ -23,11 +24,13 @@ class BeamNGBridge(SimulatorBridge):
   `scenario` runs in the bridge process with the world after the first sensor data: scenario(bridge) -> None, called at
   100 Hz until it returns True (done)."""
 
-  def __init__(self, cfg: BeamNGConfig, engage: bool = False, set_speed_kph: float = 0.0, scenario=None, test_run: bool = False):
+  def __init__(self, cfg: BeamNGConfig, engage: bool = False, set_speed_kph: float = 0.0, rolling_start_kph: float = 0.0,
+               scenario=None, test_run: bool = False):
     super().__init__(dual_camera=True, high_quality=False)
     self.cfg = cfg
     self.auto_engage = engage
     self.set_speed_kph = set_speed_kph
+    self.rolling_start_kph = rolling_start_kph
     self.scenario = scenario
     self.test_run = test_run
     self.engage_t = 0.0
@@ -66,6 +69,7 @@ class BeamNGBridge(SimulatorBridge):
     self.car = SimulatedTesla()
     self.sensors = BeamNGSensors()
     self.accel = AccelController()
+    self.driver_accel = AccelController()
     state = self.simulator_state = BeamNGState()
     self.manual = [0.0, 0.0, 0.0]  # steer -1..1 (right positive, like upstream's keyboard), throttle, brake
     self.blinker = (False, False)
@@ -82,15 +86,14 @@ class BeamNGBridge(SimulatorBridge):
 
       self.world.read_sensors(state)
       steer_in, gas, brake = self.manual
+      if self.auto_engage and state.valid:
+        gas = max(gas, self.engage_step(state))
       state.user_gas, state.user_brake = gas, brake
       state.user_torque_nm = -steer_in * STEER_NM_PER_UNIT
       state.left_blinker, state.right_blinker = self.blinker
 
       self.sensors.update(state, self.world)
       self.car.update(state)
-
-      if self.auto_engage and state.valid:
-        self.engage_step()
 
       # what the Model 3's EPS and drive inverter would do with openpilot's DAS_steeringControl and DAS_control
       if self.car.lat_active() and steer_in == 0.0:
@@ -121,19 +124,26 @@ class BeamNGBridge(SimulatorBridge):
       self.started.value = True
       rk.keep_time()
 
-  def engage_step(self):
-    """Engage once openpilot can: cruise on when engageable; if openpilot didn't take the rising edge, cancel and retry."""
+  def engage_step(self, state: BeamNGState) -> float:
+    """Engage like a driver: with a rolling start, press the gas up to that speed first (the driving model holds a car
+    that stands on an empty road: its standstill accel stays under drive_helpers.should_stop's 0.1), then pull the stalk
+    when openpilot is engageable; if openpilot didn't take the rising edge, cancel and retry. Returns the driver's gas."""
     sm = self.car.sm
     sm.update(0)
     now = time.monotonic()
     if sm['selfdriveState'].enabled:
       self.auto_engage = False
+    elif not self.car.engaged and state.wheel_speed < self.rolling_start_kph / 3.6 - 0.5:
+      throttle, _ = self.driver_accel.update(ROLLING_START_ACCEL, state.a_long, state.wheel_speed, DT)
+      return max(throttle, 0.05)
     elif not self.car.engaged and sm['selfdriveState'].engageable and now - self.engage_t > 1.0:
-      self.car.engage(self.simulator_state.wheel_speed, self.set_speed_kph)
+      self.car.engage(state.wheel_speed, self.set_speed_kph)
       self.engage_t = now
     elif self.car.engaged and now - self.engage_t > 2.0:
       self.car.cancel()
       self.engage_t = now
+    self.driver_accel.reset()
+    return 0.0
 
   def print_status(self):
     s = self.simulator_state
