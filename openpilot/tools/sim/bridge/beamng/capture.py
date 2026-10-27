@@ -3,6 +3,7 @@ ffmpeg. Every chase render costs the driving cameras game frame time: at 10 Hz t
 import shutil
 import subprocess
 import threading
+import time
 
 from beamngpy.sensors import Camera
 
@@ -37,6 +38,7 @@ class ChaseCapture:
                     threading.Thread(target=self.write_loop, args=(exit_event,), daemon=True)]
     for t in self.threads:
       t.start()
+    self.log(f"capture: started at {time.time():.3f} (wall clock, unix s) to {self.path}")  # noqa: TID251
 
   def write_loop(self, exit_event: threading.Event):
     # one frame per tick, repeating the last when the game is slow, so the video plays in real time
