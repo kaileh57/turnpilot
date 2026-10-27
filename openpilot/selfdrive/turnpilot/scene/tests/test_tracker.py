@@ -8,7 +8,9 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.detector.decoder import CAR, PERSON, fill_detections
 from openpilot.selfdrive.turnpilot.scene.ranging import calib_from_view
 from openpilot.selfdrive.turnpilot.scene import tracker as tracker_module
-from openpilot.selfdrive.turnpilot.scene.tracker import CLOSE_HOLD_MIN_HITS, CLOSE_HOLD_S, MAX_COAST_S, PATH_X, SceneTracker, predicted_path
+from openpilot.selfdrive.turnpilot.scene.tracker import (CLASS_GROUP, CLOSE_HOLD_MIN_HITS, CLOSE_HOLD_S, GROUND_GATE_FRAC, GROUND_GATE_M,
+                                                         HIGH_CONF, IOU_FIRST, IOU_SECOND, MAX_COAST_S, MAX_TRACKS, PATH_X, Measurement,
+                                                         SceneTracker, Track, greedy_match, iou, predicted_path)
 
 CAMS = DEVICE_CAMERAS[('mici', 'os04c10')]
 RPY, WIDE_EULER, HEIGHT = [0.0, 0.03, 0.01], [0.0, 0.005, -0.003], 1.3
@@ -249,3 +251,70 @@ class TestSceneTracker(OpenpilotTestCase):
       tracks = self.tracker.update(det, self.cal, car_state(v), model, now=10 + t)
     assert len(tracks) == 1 and tracks[0].x is not None
     assert np.hypot(*tracks[0].x[2:]) < 0.7
+
+  def test_association_scores_all_pairs_at_once(self):
+    # 64 detections against 64 tracks: one IoU call for the lot (a call per pair took 18.7 ms a frame), the same pairs as
+    # scoring each pair on its own
+    rng = np.random.default_rng(3)
+    tracker = SceneTracker(CAMS, 'mici')
+    for i in range(64):
+      b = np.r_[rng.uniform(0, 1800, 2), 0, 0]
+      b[2:] = b[:2] + rng.uniform(20, 200, 2)
+      trk = Track(i, 'road' if i % 5 else 'wide', b, b, 0.0, 0.8, {[PERSON, CAR, 1][i % 3]: 1.0})
+      if i % 7:
+        trk.x, trk.P = np.r_[rng.uniform(5, 60), rng.uniform(-10, 10), 0, 0], np.eye(4)
+      tracker.tracks.append(trk)
+    meas = []
+    for j in range(64):
+      trk = tracker.tracks[rng.integers(64)]
+      xy = None if j % 6 == 0 or trk.x is None else trk.x[:2] + rng.normal(0, 1.5, 2)
+      meas.append(Measurement(trk.box + rng.normal(0, 15, 4), float(rng.uniform(0.35, 0.95)), [PERSON, CAR, 1, 3][j % 4], xy))
+    with mock.patch.object(tracker_module, 'iou', wraps=iou) as calls:
+      pairs, unmatched = tracker.associate(meas, 'road')
+    assert calls.call_count == 1
+    assert (pairs, unmatched) == pairwise_associate(tracker.tracks, meas, 'road') and len(pairs) > 20
+
+  def test_track_count_is_capped(self):
+    # a burst of false positives, new ones every frame: the count stays capped, and a close-held pedestrian stays
+    def objects(t):
+      k = int(round(t / DT))
+      rng = np.random.default_rng(k)
+      noise = [(CAR, float(rng.uniform(15, 120)), float(rng.uniform(-40, 40)), 0.6) for _ in range(60)] if k >= 6 else []
+      return ([(PERSON, 6.5, 0.2, 0.8)] if k < 6 else []) + noise
+    with mock.patch.object(tracker_module, 'MAX_TRACKS', 10 ** 6):
+      self.run_frames(16, objects)
+    assert len(self.tracker.tracks) > MAX_TRACKS  # uncapped
+    self.tracker = SceneTracker(CAMS, 'mici')
+    self.run_frames(16, objects)
+    assert len(self.tracker.tracks) <= MAX_TRACKS
+    assert any(trk.cls == PERSON and trk.in_path for trk in self.tracker.published())
+
+
+def pairwise_associate(tracks, meas, camera):
+  """The association scored one pair at a time, as before it was vectorized."""
+  pairs, free_t, free_m = [], set(range(len(tracks))), set(range(len(meas)))
+
+  def run(ms, score_fn, min_score):
+    ts = sorted(free_t)
+    if not ts or not ms:
+      return
+    for a, b in greedy_match(np.array([[score_fn(tracks[i], meas[j]) for j in ms] for i in ts]), min_score):
+      pairs.append((ts[a], ms[b]))
+      free_t.discard(ts[a])
+      free_m.discard(ms[b])
+
+  def iou_score(trk, m):
+    if trk.camera != camera or CLASS_GROUP[trk.cls] != CLASS_GROUP[m.cls]:
+      return -1.0
+    return float(iou(trk.box[None], m.box[None])[0, 0])
+
+  def ground_score(trk, m):
+    if trk.x is None or m.xy is None or CLASS_GROUP[trk.cls] != CLASS_GROUP[m.cls]:
+      return -np.inf
+    d = float(np.hypot(*(trk.x[:2] - m.xy)))
+    return -d if d <= GROUND_GATE_M + GROUND_GATE_FRAC * float(np.hypot(*m.xy)) else -np.inf
+
+  run(sorted(j for j in free_m if meas[j].conf >= HIGH_CONF), iou_score, IOU_FIRST)
+  run(sorted(j for j in free_m if meas[j].conf < HIGH_CONF), iou_score, IOU_SECOND)
+  run(sorted(free_m), ground_score, -1e9)
+  return pairs, sorted(free_m)

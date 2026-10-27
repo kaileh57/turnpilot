@@ -13,7 +13,7 @@ import numpy as np
 
 from openpilot.cereal import custom
 from openpilot.common.transformations.camera import DeviceCameraConfig
-from openpilot.selfdrive.turnpilot.detector.decoder import BICYCLE, BUS, CAR, MOTORCYCLE, PERSON, TRUCK
+from openpilot.selfdrive.turnpilot.detector.decoder import BICYCLE, BUS, CAR, MAX_DETECTIONS, MOTORCYCLE, PERSON, TRUCK
 from openpilot.selfdrive.turnpilot.scene.ranging import Lens, calib_from_view, camera_height, ground_point, road_lens, wide_lens
 
 ObjectClass = custom.TurnpilotScene.ObjectClass
@@ -32,6 +32,7 @@ GROUND_GATE_FRAC = 0.15  # plus this fraction of the range
 MIN_HITS = 2             # a track is published after this many matched detections
 MAX_COAST_S = 0.5        # and for this long after its last match;
 MAX_AGE_S = 1.5          # it's dropped after this
+MAX_TRACKS = 3 * MAX_DETECTIONS // 2  # a full message's worth and then some coasting; past it, the soonest to expire go
 # a pedestrian in the path this close can drop out of view (feet below the frame, or YOLO loses a person filling the
 # frame: the BeamNG mannequin at 5.3 m from the camera). The car is stopping for them, so keep them, carried along with
 # the car's own motion, for this long instead of releasing the stop.
@@ -246,27 +247,28 @@ class SceneTracker:
     """(track index, measurement index) pairs, and the unmatched measurements."""
     pairs: list[tuple[int, int]] = []
     free_t, free_m = set(range(len(self.tracks))), set(range(len(meas)))
+    if not self.tracks or not meas:
+      return pairs, sorted(free_m)
+    # score every track against every measurement at once: IoU for boxes in the same camera and class group, the
+    # distance between ground positions within the gate
+    same_group = np.array([CLASS_GROUP[trk.cls] for trk in self.tracks])[:, None] == np.array([CLASS_GROUP[m.cls] for m in meas])[None]
+    same_camera = np.array([trk.camera == camera for trk in self.tracks])[:, None]
+    iou_score = np.where(same_group & same_camera, iou(np.array([trk.box for trk in self.tracks]), np.array([m.box for m in meas])), -1.)
+    trk_xy = np.array([trk.x[:2] if trk.x is not None else (np.nan, np.nan) for trk in self.tracks])
+    m_xy = np.array([m.xy if m.xy is not None else (np.nan, np.nan) for m in meas])
+    dist = np.linalg.norm(trk_xy[:, None] - m_xy[None], axis=2)
+    gate = GROUND_GATE_M + GROUND_GATE_FRAC * np.hypot(m_xy[:, 0], m_xy[:, 1])[None]
+    with np.errstate(invalid='ignore'):
+      ground_score = np.where(same_group & (dist <= gate), -dist, -np.inf)
 
-    def run(ms, score_fn, min_score):
+    def run(ms, score, min_score):
       tracks = sorted(free_t)
       if not tracks or not ms:
         return
-      score = np.array([[score_fn(self.tracks[i], meas[j]) for j in ms] for i in tracks])
-      for a, b in greedy_match(score, min_score):
+      for a, b in greedy_match(score[np.ix_(tracks, ms)], min_score):
         pairs.append((tracks[a], ms[b]))
         free_t.discard(tracks[a])
         free_m.discard(ms[b])
-
-    def iou_score(trk: Track, m: Measurement) -> float:
-      if trk.camera != camera or CLASS_GROUP[trk.cls] != CLASS_GROUP[m.cls]:
-        return -1.0
-      return float(iou(trk.box[None], m.box[None])[0, 0])
-
-    def ground_score(trk: Track, m: Measurement) -> float:
-      if trk.x is None or m.xy is None or CLASS_GROUP[trk.cls] != CLASS_GROUP[m.cls]:
-        return -np.inf
-      d = float(np.hypot(*(trk.x[:2] - m.xy)))
-      return -d if d <= GROUND_GATE_M + GROUND_GATE_FRAC * float(np.hypot(*m.xy)) else -np.inf
 
     run(sorted(j for j in free_m if meas[j].conf >= HIGH_CONF), iou_score, IOU_FIRST)
     run(sorted(j for j in free_m if meas[j].conf < HIGH_CONF), iou_score, IOU_SECOND)
@@ -298,6 +300,8 @@ class SceneTracker:
         if meas[j].conf >= NEW_TRACK_CONF and meas[j].xy is not None:
           self.new_track(meas[j], camera, t)
       self.tracks = [trk for trk in self.tracks if t - trk.t_seen <= max(MAX_AGE_S, self.hold_s(trk))]
+      if len(self.tracks) > MAX_TRACKS:  # a burst of false positives: the close-held pedestrian expires last, so it stays
+        self.tracks = sorted(self.tracks, key=lambda trk: (trk.t_seen + self.hold_s(trk), trk.hits), reverse=True)[:MAX_TRACKS]
       self.last_t = t
       self.update_in_path(model_v2)
     self.available = self.last_recv is not None and now - self.last_recv <= STALE_S
