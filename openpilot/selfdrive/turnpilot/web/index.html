@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="TurnPilot">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="color-scheme" content="light dark">
+<link rel="apple-touch-icon" href="/icon.png">
+<link rel="icon" href="/icon.png">
+<title>TurnPilot</title>
+<style>
+:root { --fg: #000; --bg: #fff; --dim: #555; --line: #000; --accent: #0057ff; }
+@media (prefers-color-scheme: dark) { :root { --fg: #fff; --bg: #000; --dim: #aaa; --line: #fff; --accent: #2f6bff; } }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 16px max(16px, env(safe-area-inset-right)) calc(32px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  max-width: 640px; margin: 0 auto; background: var(--bg); color: var(--fg);
+  font: 17px/1.35 -apple-system, system-ui, "Helvetica Neue", sans-serif; -webkit-text-size-adjust: 100%; }
+h1 { font-size: 20px; margin: 0 0 12px; }
+h2 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; margin: 28px 0 8px; }
+button, input { font: inherit; color: var(--fg); border-radius: 0; -webkit-appearance: none; appearance: none; touch-action: manipulation; }
+button { min-height: 52px; padding: 0 16px; border: 2px solid var(--line); background: var(--bg); font-weight: 600; }
+button:active { background: var(--fg); color: var(--bg); }
+button.go { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.stop { background: var(--fg); color: var(--bg); width: 100%; margin-top: 12px; }
+button:disabled { opacity: .4; }
+input[type=search] { width: 100%; min-height: 52px; padding: 0 12px; border: 2px solid var(--line); background: var(--bg); }
+form { display: flex; gap: 8px; }
+form input { flex: 1; min-width: 0; }
+#status { border: 2px solid var(--line); padding: 12px; }
+#status dl { margin: 0; display: grid; grid-template-columns: 6.5em 1fr; gap: 6px 8px; }
+#status dt { color: var(--dim); }
+#status dd { margin: 0; word-break: break-word; }
+.row { border-top: 2px solid var(--line); padding: 10px 0; }
+.row:last-child { border-bottom: 2px solid var(--line); }
+.name { font-weight: 700; word-break: break-word; }
+.detail { color: var(--dim); font-size: 15px; word-break: break-word; }
+.btns { display: flex; gap: 8px; margin-top: 8px; }
+.btns button { flex: 1; }
+.note { color: var(--dim); font-size: 15px; margin: 8px 0; }
+#error { color: var(--accent); font-weight: 600; min-height: 1.35em; margin: 8px 0 0; }
+details { margin-top: 28px; } summary { min-height: 44px; font-weight: 600; }
+code { display: block; word-break: break-all; margin: 4px 0 12px; padding: 8px; border: 1px solid var(--line); font: 14px ui-monospace, Menlo, monospace; }
+</style>
+</head>
+<body>
+<h1>TurnPilot</h1>
+<div id="status"><div class="note">Connecting...</div></div>
+<div id="error" role="alert"></div>
+
+<h2>Search</h2>
+<form id="searchform">
+  <input id="q" type="search" placeholder="Place or address" autocomplete="off" autocapitalize="none" enterkeyhint="search">
+  <button class="go" type="submit">Search</button>
+</form>
+<div id="results"></div>
+
+<h2>Favorites</h2>
+<div id="favorites"></div>
+<h2>Recent</h2>
+<div id="recents"></div>
+
+<details>
+  <summary>Shortcut setup</summary>
+  <div class="note">Use these in the Send to TurnPilot shortcut. Keep the token private.</div>
+  URL<code id="endpoint"></code>
+  Token<code id="token"></code>
+</details>
+
+<script>
+"use strict";
+var token = new URLSearchParams(location.search).get("t");
+try {
+  if (token) localStorage.setItem("tp_token", token); else token = localStorage.getItem("tp_token");
+} catch (e) {}
+
+function $(id) { return document.getElementById(id); }
+function el(tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+function showError(msg) { $("error").textContent = msg || ""; }
+
+async function api(path, method, body) {
+  var headers = {};
+  if (token) headers.Authorization = "Bearer " + token;
+  if (method && method !== "GET") headers["Content-Type"] = "application/json";
+  var r;
+  try {
+    r = await fetch(path, { method: method || "GET", headers: headers, body: body ? JSON.stringify(body) : (method === "POST" ? "{}" : undefined) });
+  } catch (e) {
+    throw new Error("Cannot reach the comma. Is the phone hotspot on?");
+  }
+  var data = {};
+  try { data = await r.json(); } catch (e) {}
+  if (r.status === 401) throw new Error("Not paired. Scan the QR code on the comma screen.");
+  if (!r.ok) throw new Error(data.error || "Request failed (" + r.status + ")");
+  return data;
+}
+
+async function act(fn) {
+  showError("");
+  try { await fn(); } catch (e) { showError(e.message); }
+}
+
+function row(place, buttons) {
+  var r = el("div", "row");
+  r.appendChild(el("div", "name", place.name));
+  if (place.detail) r.appendChild(el("div", "detail", place.detail));
+  var b = el("div", "btns");
+  buttons.forEach(function (x) {
+    var btn = el("button", x[2] || "", x[0]);
+    btn.type = "button";
+    btn.onclick = function () { act(x[1]); };
+    b.appendChild(btn);
+  });
+  r.appendChild(b);
+  return r;
+}
+
+function navigate(p) {
+  return async function () {
+    await api("/api/destination", "POST", { latitude: p.latitude, longitude: p.longitude, name: p.name });
+    await Promise.all([poll(), loadPlaces()]);
+  };
+}
+function save(p) {
+  return async function () {
+    await api("/api/favorites", "POST", { latitude: p.latitude, longitude: p.longitude, name: p.name });
+    await loadPlaces();
+  };
+}
+function remove(p) {
+  return async function () { await api("/api/favorites/" + p.id, "DELETE"); await loadPlaces(); };
+}
+function fill(id, list, empty, make) {
+  var box = $(id);
+  box.replaceChildren();
+  if (!list.length) box.appendChild(el("div", "note", empty));
+  list.forEach(function (p) { box.appendChild(make(p)); });
+}
+
+async function loadPlaces() {
+  var d = await api("/api/favorites");
+  fill("favorites", d.favorites, "None saved. Search for a place and tap Save.", function (p) {
+    return row(p, [["Navigate", navigate(p), "go"], ["Remove", remove(p)]]);
+  });
+  fill("recents", d.recents, "Nothing yet.", function (p) {
+    return row(p, [["Navigate", navigate(p), "go"], ["Save", save(p)]]);
+  });
+}
+
+$("searchform").onsubmit = function (ev) {
+  ev.preventDefault();
+  var q = $("q").value.trim();
+  if (q.length < 2) return;
+  act(async function () {
+    var d = await api("/api/search?q=" + encodeURIComponent(q));
+    fill("results", d.results, "No places found.", function (p) {
+      return row(p, [["Navigate", navigate(p), "go"], ["Save", save(p)]]);
+    });
+  });
+};
+
+function line(dl, label, value) {
+  if (!value) return;
+  dl.appendChild(el("dt", "", label));
+  dl.appendChild(el("dd", "", value));
+}
+
+function render(s) {
+  var box = $("status"), dl = el("dl");
+  box.replaceChildren();
+  line(dl, "Car", s.onroad ? "Driving" : "Parked");
+  var tp = s.turnpilot;
+  line(dl, "TurnPilot", tp.label + (tp.shadow ? " (shadow)" : "") + (tp.enabled ? "" : ", not enabled"));
+  line(dl, "Reason", tp.reason);
+  if (s.destination) {
+    line(dl, "To", s.destination.name);
+    if (s.maneuver) line(dl, "Next", s.maneuver.text + (s.maneuver.distance ? ", in " + s.maneuver.distance : ""));
+    if (s.remaining) {
+      var eta = new Date(Date.now() + s.remaining.seconds * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      line(dl, "Left", s.remaining.distance + ", " + s.remaining.duration);
+      line(dl, "Arrive", eta);
+    } else {
+      line(dl, "Route", "Waiting for a route");
+    }
+  } else {
+    line(dl, "To", "No destination");
+  }
+  box.appendChild(dl);
+  if (!s.reading) box.appendChild(el("div", "note", "Car data is not available."));
+  if (s.destination) {
+    var stop = el("button", "stop", "Stop navigation");
+    stop.type = "button";
+    stop.onclick = function () { act(async function () { await api("/api/stop", "POST"); await poll(); }); };
+    box.appendChild(stop);
+  }
+}
+
+async function poll() {
+  try {
+    render(await api("/api/status"));
+    if ($("error").textContent.indexOf("Cannot reach") === 0) showError("");
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+async function start() {
+  poll();
+  act(loadPlaces);
+  act(async function () {
+    var p = await api("/api/pairing");
+    $("endpoint").textContent = p.endpoint;
+    $("token").textContent = p.token;
+  });
+  setInterval(function () { if (!document.hidden) poll(); }, 2000);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) poll(); });
+}
+start();
+</script>
+</body>
+</html>
