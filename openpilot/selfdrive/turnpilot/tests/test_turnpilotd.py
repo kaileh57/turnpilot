@@ -5,7 +5,8 @@ from openpilot.selfdrive.turnpilot.hooks import plan_accel
 from openpilot.selfdrive.turnpilot.lane_planner import lane_change_window
 from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP, ONCOMING_TTA_S, PED_STOP_GAP_M
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_state, model_v2, nav_instruction, scene
-from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP
+from openpilot.selfdrive.turnpilot.desire_timing import TURN_DESIRE_LEAD_M
+from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, V_TURN_MIN
 from openpilot.selfdrive.turnpilot.turnpilotd import TurnPilot
 
 State = custom.TurnpilotPlan.State
@@ -87,8 +88,8 @@ def test_left_turn_drive():
   states = [str(plan.state) for _, _, plan in sim.trace]
   assert states[0] == 'following' and 'approaching' in states and 'turning' in states
   assert len(rising(sim.trace, 'desire', Desire.turnLeft)) == 1
-  at_corner = [v for s, v, _ in sim.trace if 300. - 12. < s < 300.]  # a left's corner starts 12 m out
-  assert max(at_corner) < 5.2
+  at_desire = [v for s, v, _ in sim.trace if 300. - TURN_DESIRE_LEAD_M < s < 300.]  # gate 1's speed from the pulse on
+  assert max(at_desire) < V_TURN_MIN + 0.3
   after = [plan for s, _, plan in sim.trace if s > 320.]
   assert after and all(plan.maneuverModifier == "right" for plan in after)
   assert all(plan.desire == Desire.none for plan in after)
