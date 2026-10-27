@@ -14,6 +14,7 @@ from openpilot.selfdrive.turnpilot.routing.guidance import fill_guidance
 from openpilot.selfdrive.turnpilot.routing.sources import MapboxSource, RouteSources
 
 REROUTE_DISTANCE = 25
+OFF_ROUTE_DISTANCE = 20  # TurnPilot: further than this off the step, its distances mean nothing until the reroute
 MANEUVER_TRANSITION_THRESHOLD = 10
 REROUTE_COUNTER_MIN = 3
 ROUTE_RESEND_PERIOD = 10  # updates (seconds); a restarted mapsd gets the route within this
@@ -127,8 +128,14 @@ class RouteEngine:
 
     assert self.route is not None and self.route_geometry is not None and self.last_position is not None
     step = self.route[self.step_idx]
-    along_geometry, _ = along_path(self.route_geometry[self.step_idx], self.last_position)
+    along_geometry, lateral = along_path(self.route_geometry[self.step_idx], self.last_position)
     distance_to_maneuver_along_geometry = step['distance'] - along_geometry
+    # a missed turn: no instruction until rerouted (past the step's end the lateral is the distance from it, and it advances)
+    if lateral > OFF_ROUTE_DISTANCE and distance_to_maneuver_along_geometry >= -MANEUVER_TRANSITION_THRESHOLD and \
+       self.step_idx < len(self.route) - 1:
+      msg.valid = False
+      self.pm.send('navInstruction', msg)
+      return
 
     # Banner instructions are for the following maneuver step, don't use empty last step
     banner_step = step

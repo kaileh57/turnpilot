@@ -336,6 +336,16 @@ class TestRouteEngine(unittest.TestCase):
     self.assertIsNone(self.engine.route)
     self.assertNotIn('NavDestination', self.values)
 
+  def test_off_route_instruction_is_invalid(self):
+    self.load_route()
+    self.engine.last_position = (0.0005, 0.0003)  # 33 m beside the first step: a missed turn, before the reroute
+    self.engine.send_instruction()
+    self.assertFalse(self.last_message('navInstruction').valid)
+    self.assertEqual(self.engine.step_idx, 0)
+    self.engine.last_position = (0.0005, 0.00005)  # back on it
+    self.engine.send_instruction()
+    self.assertTrue(self.last_message('navInstruction').valid)
+
   def test_failed_request_clears_route(self):
     self.load_route()
     self.response.raise_for_status.side_effect = requests.HTTPError('test failure')
