@@ -9,6 +9,7 @@ from openpilot.selfdrive.turnpilot.tests.synthetic import car_state, model_v2, r
 
 LaneChange = custom.TurnpilotPlan.LaneChange
 THREE_LANES_LEFT_TURN = ((("left",), True), (("straight",), False), (("straight", "right"), False))
+TWO_LANES_RIGHT_TURN = ((("straight",), False), (("right",), True))
 
 
 def counts(lanes):
@@ -42,9 +43,11 @@ def test_lanes_needed():
   assert lane_changes_needed(left, model_lanes(*road(2, 0))) == 2
   assert lane_changes_needed(left, model_lanes(*road(1, 1))) == 1
   assert lane_changes_needed(left, model_lanes(*road(0, 2))) == 0
-  # without the map's lanes, never toward oncoming traffic; toward the curb by what the model sees
+  # without the map's lanes, never toward oncoming traffic, and toward the curb only for an exit (a junction's curb
+  # strip is often parking)
   assert lane_changes_needed(maneuver("turn", "left"), model_lanes(*road(2, 0))) == 0
-  assert lane_changes_needed(maneuver("turn", "right"), model_lanes(*road(0, 2))) == -2
+  assert lane_changes_needed(maneuver("turn", "right"), model_lanes(*road(0, 2))) == 0
+  assert lane_changes_needed(maneuver("turn", "right", TWO_LANES_RIGHT_TURN), model_lanes(*road(0, 1))) == -1
   assert lane_changes_needed(maneuver("off ramp", "slight right"), model_lanes(*road(0, 1))) == -1
   assert lane_changes_needed(maneuver("fork", "slight right"), model_lanes(*road(0, 1))) == 0
   # the map says left, but the model sees no lane there
@@ -111,7 +114,7 @@ def test_left_turn_on_three_lane_road_requests_two_lane_changes():
 
 def test_car_in_target_lane_blocks_the_request():
   drive = Drive(lanes_left=0, lanes_right=1)
-  m = maneuver("turn", "right")
+  m = maneuver("turn", "right", TWO_LANES_RIGHT_TURN)
   beside = scene([{'cls': 'car', 'x': -3., 'y': -3.6, 'vx': 15.}]).objects
   drive.run(m, 300., 5., objects=beside)
   assert not drive.requests and drive.lp.update(m, 200., model_lanes(*road(0, 1)), 0, 15., False, False, beside,
@@ -123,7 +126,7 @@ def test_car_in_target_lane_blocks_the_request():
 
 def test_driver_signals_on_cars_openpilot_cant_signal_for():
   drive = Drive(lanes_left=0, lanes_right=1, driver_signals=True)
-  m = maneuver("turn", "right")
+  m = maneuver("turn", "right", TWO_LANES_RIGHT_TURN)
   distance = drive.run(m, 300., 3.)
   assert not drive.requests and drive.prompts[-1] == LaneChange.right
   drive.run(m, distance, 5., blinker=LaneChange.right)
@@ -132,5 +135,5 @@ def test_driver_signals_on_cars_openpilot_cant_signal_for():
 
 def test_no_request_below_lane_change_speed():
   drive = Drive(lanes_left=0, lanes_right=2, v=7.)
-  drive.run(maneuver("turn", "right"), 200., 10.)
+  drive.run(maneuver("turn", "right", TWO_LANES_RIGHT_TURN), 200., 10.)
   assert not drive.requests

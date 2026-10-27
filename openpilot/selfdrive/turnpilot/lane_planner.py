@@ -4,8 +4,10 @@ Which lane the car is in comes from what the model sees: lanes either side count
 ego lane's line and the road edge, at about 3.6 m a lane, but only where the next line out is painted (room
 alone counts shoulders and parking strips as lanes). modelV2 can't tell a yellow line from a white one, and on
 an undivided road its far road edge lies beyond the oncoming lanes, so without the map's lane list
-(NavInstruction.lanes) the car only ever changes toward the curb. With the list, the car's lane is counted
-from the curb side, which is always its own direction's.
+(NavInstruction.lanes) the car only ever changes toward the curb, and only for an exit: before a junction turn
+the painted strip at the curb is as often a parking lane as a lane (BeamNG, 2026-10-27: the change put the car
+in it and the right turn from there ended against the corner). With the list, the car's lane is counted from
+the curb side, which is always its own direction's.
 
 DesireHelper executes the change: a request stands in for the blinker and the nudge, and is dropped the moment
 the change starts, or DesireHelper would chain a second one. On cars where openpilot can't signal, the driver
@@ -96,7 +98,7 @@ def lane_changes_needed(maneuver, lanes: ModelLanes, right_hand_traffic: bool = 
     idx = len(nav) - 1 - lanes.right if curb == RIGHT else lanes.left  # from the left, counted from the curb
     idx = min(max(idx, 0), len(nav) - 1)
     need = idx - max(valid) if idx > max(valid) else idx - min(valid) if idx < min(valid) else 0
-  elif maneuver.side == curb:
+  elif maneuver.side == curb and maneuver.kind == KEEP:
     need = lanes.left if curb == LEFT else -lanes.right
   else:
     return 0
