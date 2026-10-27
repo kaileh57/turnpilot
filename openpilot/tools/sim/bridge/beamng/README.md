@@ -85,6 +85,19 @@ OPENPILOT_PREFIX=tpsim python -m openpilot.tools.sim.bridge.beamng.gate1 --junct
 `--list` prints the signalized junctions with legal 90-degree turns. The road graph is read from
 `~/pc_relay/incoming/osm_export/west_coast_usa_graph.json`.
 
+Gate 1 passed on 2026-10-27 with the big model (`big_driving_tinygrad.pkl`, LFS oid `f0667cf6`, Flip Flop) on the
+chestnut, the detector running beside it, 20 camera pairs a second, 25 km/h and a 4-message `turnLeft`/`turnRight` pulse:
+
+| Junction | Turn | Lead | Taken |
+| --- | --- | --- | --- |
+| `group_80_81_82_83` | left | 10 / 20 / 30 / 40 m | 0/2, 1/2, 2/2, 2/2 |
+| `group_80_81_82_83` | right | 10 / 20 / 30 / 40 m | 0/2, 0/2, 2/2, 2/2 |
+| `group_46_47_48_49` | left | 40 m | 5/5, heading change 89.0 to 89.8 degrees |
+| `group_46_47_48_49` | right | 40 m | 5/5, heading change -89.5 to -91.4 degrees |
+
+At 10 m the car goes straight; at 20 m it turns late and clips the corner. With `--capture` (about 12 pairs a second)
+the same right turn at `group_46_47_48_49` was taken once in three runs: run gates at full camera rate.
+
 ## Gate 3
 
 `gate3.py` stands the Italy mannequin in the ego's lane `--ped-ahead` m ahead on a junction's approach, engages at
@@ -97,6 +110,17 @@ block turnpilotd and keep `TurnPilotEnabled` set, so modeld still runs the detec
 BLOCK=turnpilotd OPENPILOT_PREFIX=tpsim openpilot/tools/sim/bridge/beamng/launch_openpilot.sh
 OPENPILOT_PREFIX=tpsim python -m openpilot.tools.sim.bridge.beamng.gate3 --runs 2 --speed 35 --out gate3.json
 ```
+
+The road graph's lane centre can be a parking lane away from where the model drives, so once the car drives, gate3
+moves the mannequin sideways onto the car's own line at 90 m, beyond the detector's range. Results on 2026-10-27, at
+`group_80_81_82_83`, the mannequin 115 m ahead, 35 km/h, two runs each:
+
+- The big model alone never set `shouldStop`. Once it didn't brake (hit at 25 km/h); once it braked from 28 m and
+  touched the mannequin at about 2.5 km/h. It does see a lead there, at the wrong range.
+- YOLO26n sees the mannequin as a person from 47 to 60 m on the road camera, confidence 0.5 to 0.85, and loses it
+  closer than 5.3 m from the camera.
+- With turnpilotd and no route, the scene tracks it in the path from 41 to 55 m and the car stops 3.5 to 3.6 m from the
+  camera (2.0 m from the bumper), short of the 5 m target, and holds.
 
 ## Scenario hooks
 
