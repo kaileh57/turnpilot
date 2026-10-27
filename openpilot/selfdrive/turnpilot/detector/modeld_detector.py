@@ -6,6 +6,7 @@ Nothing here runs unless TurnPilotEnabled is set and the compiled pkl for this d
 (compile_detector.py builds it; the pkls are not in git).
 """
 import time
+from collections import deque
 
 import numpy as np
 
@@ -19,7 +20,7 @@ STEP_BUDGET_S = 0.045      # driving model + detector must finish within this of
 WIDE_CURVATURE = 0.01      # 1/m (a 100 m radius): at or above this, look through the wide camera
 WIDE_HOLD_S = 2.0          # and keep looking through it this long after the turn ends
 TURN_DESIRES = (log.Desire.turnLeft, log.Desire.turnRight)
-TIME_FILTER = 0.2          # weight of the latest run in the detector time estimate
+TIME_WINDOW = 5            # the detector time estimate is the median of this many runs, so one slow run can't stop it
 
 
 def frame_view(model_state, index: int):
@@ -46,7 +47,11 @@ class ModeldDetector:
     self.model_state = model_state
     self.cameras = cameras
     self.frames = {cam: frame_view(model_state, i) for cam, i in cameras.items()}
-    self.det_time = 0.0
+    self.times: deque[float] = deque(maxlen=TIME_WINDOW)
+    for _ in range(3):  # warm up, and a first time estimate
+      t0 = time.perf_counter()
+      self.run(input_frame=self.frames[next(iter(self.frames))]).numpy()
+      self.times.append(time.perf_counter() - t0)
     self.since_run = RUN_EVERY
     self.wide_until = -1.0
     self.enabled = True
@@ -66,14 +71,14 @@ class ModeldDetector:
       self.enabled = False
       return
     self.since_run += 1
-    if self.since_run < RUN_EVERY or model_execution_time + self.det_time > STEP_BUDGET_S:
+    if self.since_run < RUN_EVERY or model_execution_time + float(np.median(self.times)) > STEP_BUDGET_S:
       return
     try:
       cam = self.choose_camera(desired_curvature, desire, time.monotonic())
       t0 = time.perf_counter()
       raw = self.run(input_frame=self.frames[cam]).numpy()
       dt = time.perf_counter() - t0
-      self.det_time = dt if self.det_time == 0 else (1 - TIME_FILTER) * self.det_time + TIME_FILTER * dt
+      self.times.append(dt)
       self.since_run = 0
       meta = metas[self.cameras[cam]]
       msg = messaging.new_message('turnpilotDetections', valid=bool(np.isfinite(raw).all()))
