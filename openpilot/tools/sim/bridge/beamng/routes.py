@@ -26,6 +26,15 @@ ROUTES = {r.name: r for r in (
         "4 turns, about 750 m: left, left, right, right"),
   Route("short2", (-629.47, 459.21, 116.2), -0.7875, ((39.770761, -86.1626246),),
         "3 turns, about 450 m: left, right, right (short without its first junction, group_62, which the model won't turn at)"),
+  Route("town18", *G62_START, ((39.7730509, -86.1600557), (39.7713386, -86.1617554), (39.7699151, -86.1657233),
+                               (39.7739997, -86.16245)),
+        "18 maneuvers, about 2.9 km in four legs, all in the town west of the highway: left, left, right, left, " +
+        "slight right; left, left, right, left, right; keep right, right, left; right, right, left, right, keep right. " +
+        "Ends about 180 m from the start"),
+  Route("town15", *G62_START, ((39.7707207, -86.1626724), (39.7699151, -86.1657233), (39.7723673, -86.167217),
+                               (39.773957, -86.1651128)),
+        "15 maneuvers, about 2.2 km in four legs in the town: left, left, right, right; keep right, right, left; " +
+        "right, right, slight left, left; right, right, left, right. Ends about 60 m from the start"),
   Route("loop", *G62_START, ((39.7661729, -86.1647217), (39.7737206, -86.1659774)),
         "18 maneuvers, about 5.6 km: out (left, left, right, right, keep left, keep left, keep right, 1.5 km) and back " +
         "(keep right, keep left, left, keep left, left, keep right, keep left, right, keep left, right, left, 4.0 km), " +
