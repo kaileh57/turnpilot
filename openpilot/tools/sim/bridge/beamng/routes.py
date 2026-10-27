@@ -24,6 +24,8 @@ G62_START = ((-550.16, 586.97, 90.49), -2.3374)
 ROUTES = {r.name: r for r in (
   Route("short", *G62_START, ((39.770761, -86.1626246),),
         "4 turns, about 750 m: left, left, right, right"),
+  Route("short2", (-629.47, 459.21, 116.2), -0.7875, ((39.770761, -86.1626246),),
+        "3 turns, about 450 m: left, right, right (short without its first junction, group_62, which the model won't turn at)"),
   Route("loop", *G62_START, ((39.7661729, -86.1647217), (39.7737206, -86.1659774)),
         "18 maneuvers, about 5.6 km: out (left, left, right, right, keep left, keep left, keep right, 1.5 km) and back " +
         "(keep right, keep left, left, keep left, left, keep right, keep left, right, keep left, right, left, 4.0 km), " +

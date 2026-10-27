@@ -54,9 +54,11 @@ def post(method, path, body=None):
 class RouteDrive:
   """Runs in the bridge process, called at 100 Hz (BeamNGBridge scenario hook)."""
 
-  def __init__(self, route, runs: int, speed_kph: float, rolling_kph: float, traffic: int, out: str):
-    self.route, self.runs, self.speed_kph, self.rolling_kph, self.traffic, self.out = route, runs, speed_kph, rolling_kph, traffic, out
-    self.length = 0.0
+  def __init__(self, routes: list, speed_kph: float, rolling_kph: float, traffic: int, out: str):
+    """routes: the route of each run, in order."""
+    self.plan, self.runs, self.speed_kph, self.rolling_kph, self.traffic, self.out = routes, len(routes), speed_kph, rolling_kph, traffic, out
+    self.route = routes[0]
+    self.screen = False  # end a run at its first reroute, and sooner when stuck
     self.results, self.run, self.phase, self.t_end = [], -1, "init", 0.0
     self.sm = None
     self.web: list = []
@@ -69,21 +71,25 @@ class RouteDrive:
 
   def set_leg(self, i):
     lat, lon = self.route.legs[i]
-    self.leg, self.leg_t = i, time.monotonic()
+    self.leg, self.leg_t, self.rem_min = i, time.monotonic(), float('inf')
     self.web_call("POST", "/api/destination", {"latitude": lat, "longitude": lon, "name": f"{self.route.name} leg {i + 1}"})
     print(f"route_drive: leg {i + 1}/{len(self.route.legs)} destination set", flush=True)
 
   def start_run(self, b):
     self.run += 1
+    self.route = self.plan[self.run]
     b.car.cancel()
     b.driver_brake = 0.0
-    b.world.teleport(self.route.start, scenario.heading_quat(self.route.heading))
+    x, y, z = self.route.start
+    with b.world.bng_lock:  # the road under the start, from just above the given height (tunnels and bridges cross)
+      z = scenario.ground_z(b.world.bng, x, y, z + 4.0) + 0.3
+    b.world.teleport((x, y, z), scenario.heading_quat(self.route.heading))
     self.t0, self.phase, self.leg = time.monotonic(), "settle", -1
     self.wall0 = time.time()  # noqa: TID251
     self.rows, self.disengagements, self.legs_done, self.web = [], [], [], []
     self.engaged_once, self.enabled_prev, self.dis_t, self.still_t = False, False, None, 0.0
-    self.dist, self.last_xy = 0.0, None
-    print(f"route_drive run {self.run + 1}/{self.runs}: {self.route.name}", flush=True)
+    self.dist, self.last_xy, self.rem_min = 0.0, None, float('inf')
+    print(f"route_drive run {self.run + 1}/{self.runs}: {self.route.name} ({self.route.maneuvers})", flush=True)
 
   def __call__(self, b) -> bool:
     if self.sm is None:
@@ -153,6 +159,12 @@ class RouteDrive:
                         round(nav.maneuverDistance, 1) if nav_ok else None, f"{nav.maneuverType} {nav.maneuverModifier}" if nav_ok else "",
                         round(nav.distanceRemaining, 1) if nav_ok else None, self.leg + 1))
 
+    if nav_ok and time.monotonic() - self.leg_t > 10.0:
+      if self.screen and nav.distanceRemaining > self.rem_min + 40.0:
+        self.end_run(b, "rerouted")
+        return
+      self.rem_min = min(self.rem_min, nav.distanceRemaining)
+
     # arrival of this leg: navd's distance left, once the car is well under way on this leg
     if nav_ok and nav.distanceRemaining < ARRIVE_M and time.monotonic() - self.leg_t > 10.0 and self.dist > 50.0:
       self.legs_done.append({"leg": self.leg + 1, "t": round(t, 2), "x": round(float(xy[0]), 1), "y": round(float(xy[1]), 1)})
@@ -164,9 +176,10 @@ class RouteDrive:
 
     holding = str(plan.state) == 'holding'
     self.still_t = self.still_t + 0.01 if s.wheel_speed < 0.3 and not holding else 0.0
-    timeout = SETTLE + ROUTE_TIMEOUT + 60.0 + self.length / MIN_SPEED
-    if self.still_t > STUCK_S or t > timeout:
-      self.end_run(b, "stuck" if self.still_t > STUCK_S else "timeout")
+    timeout = SETTLE + ROUTE_TIMEOUT + 60.0 + route_length(self.route) / MIN_SPEED
+    stuck_s = 20.0 if self.screen else STUCK_S
+    if self.still_t > stuck_s or t > timeout:
+      self.end_run(b, "stuck" if self.still_t > stuck_s else "timeout")
 
   def end_run(self, b, reason):
     b.auto_engage = False
@@ -184,7 +197,7 @@ class RouteDrive:
     print(f"route_drive run {res['run']}: {reason} after {t:.0f} s, {self.dist:.0f} m, {len(self.disengagements)} disengagements, " +
           f"legs {len(self.legs_done)}/{len(self.route.legs)}", flush=True)
     with open(self.out, 'w') as f:
-      json.dump({"route": self.route.name, "runs": self.results}, f, indent=1)
+      json.dump({"route": self.plan[0].name, "runs": self.results}, f, indent=1)
     self.phase = "next"
 
   def finish(self, b):
@@ -211,13 +224,20 @@ def main():
   ap.add_argument('--speed', type=float, default=40.0, help='cruise set speed, km/h')
   ap.add_argument('--rolling', type=float, default=20.0, help='rolling start speed before engaging, km/h')
   ap.add_argument('--traffic', type=int, default=0, help='BeamNG traffic cars to spawn (removed at the end)')
+  ap.add_argument('--screen', action='store_true', help="one short drive per maneuver of the route instead (screen.py)")
+  ap.add_argument('--only', default='', help='with --screen, only maneuvers whose name contains one of these (comma-separated)')
   ap.add_argument('--out', default='route_drive.json')
   args, rest = ap.parse_known_args()
   route = ROUTES[args.route]
-  drive = RouteDrive(route, args.runs, args.speed, args.rolling, args.traffic, args.out)
-  drive.length = route_length(route)
+  if args.screen:
+    from openpilot.tools.sim.bridge.beamng.screen import screen_routes
+    plan = [r for r in screen_routes(route) if not args.only or any(k in r.name for k in args.only.split(','))] * args.runs
+  else:
+    plan = [route] * args.runs
+  drive = RouteDrive(plan, args.speed, args.rolling, args.traffic, args.out)
+  drive.screen = args.screen
   bargs = parse_args(rest)
-  bargs.spawn, bargs.rot = route.start, scenario.heading_quat(route.heading)
+  bargs.spawn, bargs.rot = plan[0].start, scenario.heading_quat(plan[0].heading)
   q: Queue = Queue()
   bridge = BeamNGBridge(config_from_args(bargs), scenario=drive)
   p = bridge.run(q)
