@@ -21,7 +21,7 @@ from openpilot.selfdrive.turnpilot.route_follower import KEEP, TURN, classify
 from openpilot.tools.lib.logreader import LogReader
 
 REALDATA = os.path.expanduser(f"~/.comma{os.environ.get('OPENPILOT_PREFIX', 'tph1')}/media/0/realdata")
-SERVICES = ('gpsLocationExternal', 'navRoute', 'navInstruction', 'selfdriveState', 'onroadEvents', 'turnpilotPlan', 'modelV2')
+SERVICES = ('gpsLocationExternal', 'navRoute', 'navInstruction', 'selfdriveState', 'onroadEvents', 'turnpilotPlan', 'modelV2', 'carState')
 NEW_LEG_M = 30.     # a route whose end moved this far is a new destination
 REACHED_M = 5.      # progress within this of a maneuver: attempted
 TAKEN_PAST_M = 30.  # progress this far past it, on the route: taken
@@ -178,12 +178,18 @@ def run_stats(run: dict, realdata: str = REALDATA) -> dict:
   for _, _, p in plan:
     states[str(p.state)] = states.get(str(p.state), 0) + 1
 
+  # the driver's gas while engaged: an override (DisengageOnAccelerator off), e.g. going on after a stop sign
+  cs = msgs['carState']
+  en_at = lambda t: enabled[min(max(int(np.searchsorted(t_sd, t)) - 1, 0), len(enabled) - 1)] if enabled else False  # noqa: E731
+  overrides = episodes([t for t, _, _ in cs], [c.gasPressed and en_at(t) for t, _, c in cs])
+
   nav = [(t, ni.distanceRemaining) for t, valid, ni in msgs['navInstruction'] if valid]
   return {
     "run": run['run'], "route": run['route'], "end": run['end'], "arrived": run['end'] == 'arrived', "wall_start": wall0,
     "duration_s": run['duration_s'], "distance_m": run['distance_m'], "traffic": run.get('traffic', 0),
     "maneuvers_taken": taken, "maneuvers_attempted": attempted, "maneuvers_missed": attempted - taken,
     "disengagements": dis, "disengagement_count": len(dis),
+    "gas_overrides": [round(a - run['mono_start'], 1) for a, _, _ in overrides],
     "holds": [{"t_s": round(a - run['mono_start'], 1), "dur_s": round(b - a, 1), "reason": r} for a, b, r in holds],
     "reroutes": sum(v[2] == 'reroute' for v in versions), "legs_routed": sum(v[2] in ('first', 'leg') for v in versions),
     "desire_pulses": pulses, "lane_change_prompts": len(prompts), "lane_changes": lane_changes,
@@ -196,7 +202,8 @@ def summary_line(s: dict) -> str:
   causes = "; ".join(f"{d['t_s']}s {','.join(d['events']) or d['alert']}" for d in s['disengagements']) or "-"
   holds = f"{len(s['holds'])} ({sum(h['dur_s'] for h in s['holds']):.0f} s)"
   return (f"{s['route']} run {s['run']} | traffic {s['traffic']} | end {s['end']} | maneuvers {s['maneuvers_taken']}/{s['maneuvers_attempted']} | " +
-          f"disengagements {s['disengagement_count']}: {causes} | holds {holds} | reroutes {s['reroutes']} | " +
+          f"disengagements {s['disengagement_count']}: {causes} | gas overrides {len(s['gas_overrides'])} | holds {holds} | " +
+          f"reroutes {s['reroutes']} | " +
           f"desire pulses {s['desire_pulses']} | lane changes {s['lane_changes']}/{s['lane_change_prompts']} prompted | " +
           f"{s['distance_m']:.0f} m in {s['duration_s']:.0f} s")
 

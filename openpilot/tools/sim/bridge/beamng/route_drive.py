@@ -40,6 +40,8 @@ ARRIVE_M = 25.0       # navInstruction.distanceRemaining under this is the leg's
 STUCK_S = 45.0        # standing this long, not holding for anything, ends the run
 MIN_SPEED = 2.5       # m/s, the slowest average a run may take before it times out
 REENGAGE_WAIT = 2.0   # s after a disengagement before the driver engages again
+CONFIRM_S = 4.0       # standing engaged this long, not held by TurnPilot, the driver taps the gas to go on...
+CONFIRM_GAS, CONFIRM_TAP_S = 0.25, 1.0  # ...this hard, this long: the model stops for stop signs and waits for that
 
 
 def post(method, path, body=None):
@@ -96,6 +98,7 @@ class RouteDrive:
     self.engaged_once, self.enabled_prev, self.dis_t, self.still_t = False, False, None, 0.0
     self.dist, self.last_xy, self.rem_min = 0.0, None, float('inf')
     self.nav_lost_t = None
+    self.confirmations, self.stand_t, self.tap_t = [], 0.0, None
     print(f"route_drive run {self.run + 1}/{self.runs}: {self.route.name} ({self.route.maneuvers})", flush=True)
     return True
 
@@ -188,6 +191,14 @@ class RouteDrive:
 
     holding = str(plan.state) == 'holding'
     self.still_t = self.still_t + 0.01 if s.wheel_speed < 0.3 and not holding else 0.0
+    # the driver confirms a stop the model made on its own (a stop sign): a gas tap, an override, not a disengagement
+    self.stand_t = self.stand_t + 0.01 if enabled and s.wheel_speed < 0.3 and not holding else 0.0
+    if self.tap_t is not None and t - self.tap_t > CONFIRM_TAP_S:
+      b.driver_gas, self.tap_t = 0.0, None
+    if self.stand_t > CONFIRM_S and self.tap_t is None:
+      b.driver_gas, self.tap_t, self.stand_t = CONFIRM_GAS, t, 0.0
+      self.confirmations.append({"t": round(t, 1), "x": round(float(xy[0]), 1), "y": round(float(xy[1]), 1), "leg": self.leg + 1})
+      print(f"route_drive: driver confirms a stop at ({xy[0]:.0f}, {xy[1]:.0f}) with the gas", flush=True)
     timeout = SETTLE + ROUTE_TIMEOUT + 60.0 + route_length(self.route) / MIN_SPEED
     stuck_s = 20.0 if self.screen else STUCK_S
     if self.still_t > stuck_s or t > timeout:
@@ -195,6 +206,7 @@ class RouteDrive:
 
   def end_run(self, b, reason):
     b.auto_engage = False
+    b.driver_gas = 0.0
     b.driver_brake = 1.0 if reason == "arrived" else 0.0  # the driver brakes at the destination, which also cancels cruise
     b.car.cancel()
     self.t_end = time.monotonic()
@@ -203,7 +215,7 @@ class RouteDrive:
     res = {"run": self.run + 1, "route": self.route.name, "end": reason, "wall_start": self.wall0, "mono_start": self.t0,
            "mono_end": self.t_end, "duration_s": round(t, 1), "distance_m": round(self.dist, 1),
            "engaged_at_s": getattr(self, "engage_t", None), "legs_reached": self.legs_done, "legs": len(self.route.legs),
-           "disengagements": self.disengagements, "lane_change_prompts_signalled": b.driver.signals, "web": self.web,
+           "disengagements": self.disengagements, "stop_confirmations": self.confirmations, "lane_change_prompts_signalled": b.driver.signals, "web": self.web,
            "traffic": self.traffic, "speed_kph": self.speed_kph, "path": self.rows}
     self.results.append(res)
     print(f"route_drive run {res['run']}: {reason} after {t:.0f} s, {self.dist:.0f} m, {len(self.disengagements)} disengagements, " +

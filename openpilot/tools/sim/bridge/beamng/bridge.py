@@ -38,6 +38,7 @@ class BeamNGBridge(SimulatorBridge):
     self.test_run = test_run
     self.engage_t = 0.0
     self.driver_brake = 0.0  # a scenario's driver on the brake pedal, 0..1 (which cancels cruise, as in the car)
+    self.driver_gas = 0.0  # and on the gas, 0..1 (openpilot stays engaged: the gas overrides)
 
   def spawn_world(self, q: Queue):
     return BeamNGWorld(self.cfg)
@@ -97,6 +98,7 @@ class BeamNGBridge(SimulatorBridge):
       self.world.read_sensors(state)
       steer_in, gas, brake = self.manual
       brake = max(brake, self.driver_brake)
+      gas = max(gas, self.driver_gas)
       if self.auto_engage and state.valid:
         gas = max(gas, self.engage_step(state, dt))
       state.user_gas, state.user_brake = gas, brake
