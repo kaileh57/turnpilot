@@ -3,8 +3,9 @@
 
   python -m openpilot.selfdrive.ui.tests.turnpilot_screenshots OUT_DIR
 
-Publishes deviceState (started), pandaStates (ignition), carState, selfdriveState, navInstruction and turnpilotPlan,
-plus a synthetic map (mapsd) and road camera (camerad) over VisionIPC, and saves one 536x240 PNG per scene.
+Publishes deviceState (started), pandaStates (ignition), carState, selfdriveState, driver monitoring (a face, so the
+DM icon draws), navInstruction and turnpilotPlan, plus a synthetic map (mapsd) and road camera (camerad) over
+VisionIPC, and saves one 536x240 PNG per scene.
 
 To watch the real UI instead, run both in one prefix:
   OPENPILOT_PREFIX=tp python -m openpilot.selfdrive.ui.tests.turnpilot_screenshots --publish 4
@@ -38,6 +39,7 @@ class Scene:
   params: dict = field(default_factory=dict)
   alert: tuple | None = None  # (text1, text2, size, status) from selfdriveState
   started: bool = True
+  engaged: bool = True
 
 
 def onroad_scenes() -> list[Scene]:
@@ -69,6 +71,10 @@ def onroad_scenes() -> list[Scene]:
     Scene('14_openpilot_alert_wins', {'state': 'holding', 'reason': 'pedestrian in path', 'routeValid': True},
           alert=('Take Control', 'Steering Temporarily Unavailable', 'mid', 'userPrompt')),
     Scene('15_enabled_turnpilotd_down', {}, params={}),  # TurnPilotEnabled but no turnpilotPlan: same as upstream
+    # the driver steering: no status (nothing is holding the car), except in shadow mode, which is for exactly this
+    Scene('16_disengaged_holding', {'state': 'holding', 'reason': 'pedestrian in path', 'routeValid': True}, engaged=False),
+    Scene('17_disengaged_shadow_turning', dict(turning, shadow=True), nav=dict(ROUTE, maneuverDistance=12.),
+          params={'TurnPilotShadowMode': True}, engaged=False),
   ]
 
 
@@ -109,7 +115,8 @@ class FakePublisher:
     from openpilot.selfdrive.navigation.renderer import SIZE
 
     self.params = Params()
-    self.pm = messaging.PubMaster(['deviceState', 'pandaStates', 'carState', 'selfdriveState', 'navInstruction', 'turnpilotPlan'])
+    self.pm = messaging.PubMaster(['deviceState', 'pandaStates', 'carState', 'selfdriveState', 'driverStateV2', 'driverMonitoringState',
+                                   'navInstruction', 'turnpilotPlan'])
     cam_w, cam_h = 1928, 1208
     self.camera = VisionIpcServer('camerad')
     self.camera.create_buffers(VisionStreamType.VISION_STREAM_NARROW_ROAD, 4, cam_w, cam_h)
@@ -145,13 +152,20 @@ class FakePublisher:
     for k, v in scene.car.items():
       setattr(cs.carState, k, v)
     ss = messaging.new_message('selfdriveState', valid=True)
-    if scene.started:
+    if scene.started and scene.engaged:
       ss.selfdriveState.enabled = True
       ss.selfdriveState.active = True
       ss.selfdriveState.state = log.SelfdriveState.OpenpilotState.enabled
     if scene.alert is not None:
       ss.selfdriveState.alertText1, ss.selfdriveState.alertText2, ss.selfdriveState.alertSize, ss.selfdriveState.alertStatus = scene.alert
-    for service, msg in (('deviceState', ds), ('pandaStates', ps), ('carState', cs), ('selfdriveState', ss)):
+    dsv = messaging.new_message('driverStateV2', valid=True)
+    dsv.driverStateV2.leftDriverData.faceProb = 1.
+    dms = messaging.new_message('driverMonitoringState', valid=True)
+    dms.driverMonitoringState.activePolicy = log.DriverMonitoringState.MonitoringPolicy.vision
+    dms.driverMonitoringState.visionPolicyState.faceDetected = True
+    dms.driverMonitoringState.visionPolicyState.awarenessPercent = 100.
+    for service, msg in (('deviceState', ds), ('pandaStates', ps), ('carState', cs), ('selfdriveState', ss),
+                         ('driverStateV2', dsv), ('driverMonitoringState', dms)):
       self.pm.send(service, msg)
     if scene.nav is not None:
       ni = messaging.new_message('navInstruction', valid=True)
@@ -232,8 +246,8 @@ def screenshots(out_dir: str):
   developer = DeveloperLayoutMici()
   gui_app.push_widget(developer)
   settle(offroad)
-  for name, item in (('16_settings_turnpilot', developer._turnpilot_toggle), ('17_settings_shadow', developer._turnpilot_shadow_toggle),
-                     ('18_settings_pair_phone', developer._pair_phone_btn)):
+  for name, item in (('18_settings_turnpilot', developer._turnpilot_toggle), ('19_settings_shadow', developer._turnpilot_shadow_toggle),
+                     ('20_settings_pair_phone', developer._pair_phone_btn)):
     developer._scroller.scroll_to(item.rect.x - (gui_app.width - item.rect.width) / 2)
     settle(offroad, 30)
     shot(name)
@@ -241,11 +255,11 @@ def screenshots(out_dir: str):
   gui_app.push_widget(pair)
   settle(offroad, 3 * FPS)  # the nav bar over the top of the code fades after 2 s
   # mici draws the code light-on-dark and relies on the black bezel for the quiet zone
-  scanned = decode(255 - np.pad(shot('19_pair_phone_qr'), 20))
+  scanned = decode(255 - np.pad(shot('21_pair_phone_qr'), 20))
   print(f"QR on screen decodes to {scanned!r}, pairing URL {pair._url!r}: {'OK' if scanned == pair._url else 'MISMATCH'}")
   pair._scroller.scroll_to(pair._url_button.rect.x - (gui_app.width - pair._url_button.rect.width) / 2)
   settle(offroad, 30)
-  shot('20_pair_phone_url')
+  shot('22_pair_phone_url')
   gui_app.close()
 
 

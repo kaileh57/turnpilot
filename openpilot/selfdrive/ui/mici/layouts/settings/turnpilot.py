@@ -10,6 +10,11 @@ from openpilot.system.ui.widgets.scroller import NavScroller
 URL_REFRESH_INTERVAL = 5  # seconds; the address changes when the device joins the phone's hotspot
 
 
+def shown_url(url: str) -> str:
+  """The URL for the page, or 'no network' when pairing_url fell back to loopback, which no phone can reach."""
+  return "no network" if url.startswith("http://127.") else url
+
+
 class PairPhoneScroller(NavScroller):
   """The QR code and URL that pair a phone with the TurnPilot web app."""
 
@@ -18,7 +23,7 @@ class PairPhoneScroller(NavScroller):
     self._url = pairing_url(ui_state.params)
     self._last_refresh = rl.get_time()
     self._qr = QR(self._url)
-    self._url_button = GreyBigButton("", self._url)
+    self._url_button = GreyBigButton("", shown_url(self._url))
     self._scroller.scroll_indicator_start_after = self._qr
     self._scroller.add_widgets([
       self._qr,
@@ -36,7 +41,7 @@ class PairPhoneScroller(NavScroller):
     url = pairing_url(ui_state.params)
     if url != self._url:
       self._url = url
-      self._url_button.set_value(url)
+      self._url_button.set_value(shown_url(url))
       self._qr._url = url
       if self._qr._texture and self._qr._texture.id != 0:
         rl.unload_texture(self._qr._texture)

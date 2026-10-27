@@ -11,7 +11,8 @@ from openpilot.selfdrive.ui.mici.onroad.hud_renderer import HudRenderer
 from openpilot.selfdrive.ui.mici.onroad.long_indicator import LongIndicator
 from openpilot.selfdrive.ui.mici.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.mici.onroad.navigation import NavigationPanel, PANEL_WIDTH
-from openpilot.selfdrive.ui.mici.onroad.turnpilot import SignalPrompt, TurnPilotStatus, active_plan, prompt_alert, status_text
+from openpilot.selfdrive.ui.lib.turnpilot import active_plan, status_text
+from openpilot.selfdrive.ui.mici.onroad.turnpilot import SignalPrompt, TurnPilotStatus, prompt_alert
 from openpilot.selfdrive.ui.mici.onroad.confidence_ball import ConfidenceBall
 from openpilot.selfdrive.ui.mici.onroad.cameraview import CameraView
 from openpilot.system.ui.lib.application import FontWeight, gui_app, MousePos, MouseEvent, TextAlignment, TextAlignmentVertical
@@ -224,10 +225,12 @@ class AugmentedRoadView(CameraView):
     # TurnPilot's signal prompt takes the alert slot and its status the top of the view, only while openpilot has no alert
     plan = active_plan(ui_state.sm, ui_state.turnpilot_enabled)
     self._signal_prompt.set_alert(prompt_alert(plan, ui_state.sm['carState']) if alert_to_render is None else None)
+    prompt, prompt_out = self._signal_prompt.will_render()  # also while it fades out
     if alert_to_render is None:
-      alert_to_render, not_animating_out = self._signal_prompt.will_render()
-    self._turnpilot_status.set_status(*(status_text(plan) if alert_to_render is None else ('', '')))
-    top_free = alert_to_render is None and not self._turnpilot_status.showing
+      alert_to_render, not_animating_out = prompt, prompt_out
+    self._turnpilot_status.set_status(*(status_text(plan, ui_state.engaged) if alert_to_render is None else ('', '')))
+    # the DM face and long indicator stay up under openpilot's alerts as upstream has them, and hide under TurnPilot's
+    turnpilot_top = prompt is not None or self._turnpilot_status.showing
 
     show_navigation = ui_state.navigation_enabled and ui_state.nav_destination_set and alert_to_render is None
 
@@ -258,15 +261,15 @@ class AugmentedRoadView(CameraView):
     rl.draw_texture_ex(self._fade_texture, rl.Vector2(self._content_rect.x, self._content_rect.y), 0.0, 1.0, rl.WHITE)
 
     # Hide DMoji when disengaged unless AlwaysOnDM is enabled
-    should_draw_dmoji = (not self._hud_renderer.drawing_top_icons() and not self._turnpilot_status.showing and
+    should_draw_dmoji = (not self._hud_renderer.drawing_top_icons() and not turnpilot_top and
                          (ui_state.status != UIStatus.DISENGAGED or ui_state.always_on_dm))
     self._driver_state_renderer.set_should_draw(should_draw_dmoji)
     self._driver_state_renderer.set_position(self._rect.x + 16, self._rect.y + 10)
     self._driver_state_renderer.render()
-    self._long_indicator.set_should_draw(not self._hud_renderer.drawing_top_icons() and top_free)
+    self._long_indicator.set_should_draw(not self._hud_renderer.drawing_top_icons() and not turnpilot_top)
     self._long_indicator.render(self._content_rect)
 
-    self._hud_renderer.set_can_draw_top_icons(top_free)
+    self._hud_renderer.set_can_draw_top_icons(alert_to_render is None and not self._turnpilot_status.showing)
     self._hud_renderer.set_wheel_critical_icon(alert_to_render is not None and not not_animating_out and
                                                alert_to_render.visual_alert == car.CarControl.HUDControl.VisualAlert.steerRequired)
     self._alert_renderer.render(self._content_rect)

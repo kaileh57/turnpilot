@@ -208,6 +208,8 @@ class DeveloperLayoutMici(NavScroller):
     restart_needed_callback()
 
   def _on_turnpilot(self, state: bool):
+    # BigParamControl writes the param after this callback, so set the flag here and "pair phone" enables at once
+    ui_state.turnpilot_enabled = state
     # TurnPilot follows navd's route
     if state:
       ui_state.params.put_bool("NavigationEnabled", True, block=True)
