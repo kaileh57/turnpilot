@@ -3,7 +3,7 @@ import math
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot.route_follower import NOMINAL_ANGLE_DEG, Maneuver, classify
 from openpilot.selfdrive.turnpilot.hooks import plan_accel
-from openpilot.selfdrive.turnpilot.turn_speed import (A_LAT_MAX, NO_SPEED_CAP, TURN_START_M, V_TURN_MIN, turn_speed_cap,
+from openpilot.selfdrive.turnpilot.turn_speed import (A_LAT_MAX, NO_SPEED_CAP, V_TURN_MIN, corner_tangent, turn_speed_cap,
                                                       turn_target_speed)
 
 
@@ -35,7 +35,7 @@ def test_which_maneuvers_are_capped():
 def test_braking_curve():
   m = maneuver("turn", "right")
   v_turn = turn_speed_cap(m, 0., 0.)
-  assert math.isclose(turn_speed_cap(m, 105., 0.), math.sqrt(v_turn ** 2 + 2 * 1.5 * 100.))
+  assert math.isclose(turn_speed_cap(m, 100. + corner_tangent(True), 0.), math.sqrt(v_turn ** 2 + 2 * 1.5 * 100.))
   assert turn_speed_cap(m, 300., 15.) > 25.  # far out it doesn't bite
 
 
@@ -44,10 +44,10 @@ def test_car_reaches_turn_speed_by_the_corner():
     m = maneuver("turn", modifier)
     v_turn = turn_speed_cap(m, 0., 0.)
     d, v, min_a = 300., 15., 0.
-    while d > TURN_START_M:
+    while d > corner_tangent(modifier == "right"):
       a = min(plan_accel(10., turn_speed_cap(m, d, v), v), 0.)  # the car would hold its speed otherwise
       min_a = min(min_a, a)
       v = max(v + a * DT_MDL, 0.)
       d -= v * DT_MDL
-    assert v < v_turn + 0.5, modifier
-    assert min_a > -2.1, modifier
+    assert v < v_turn + 0.25, modifier
+    assert min_a > -1.6, modifier

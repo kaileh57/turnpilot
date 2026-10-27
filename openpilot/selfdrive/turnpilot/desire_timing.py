@@ -39,6 +39,7 @@ class DesireTiming:
     self.active = False       # a desire is being held for the current maneuver
     self.done = False         # passed or timed out: nothing more for this maneuver
     self.retried = False
+    self.turned = False       # the steering moved since the pulse: the model took it
     self._gap = 0
     self._start_steer = 0.
     self._moving_t = 0.
@@ -82,8 +83,8 @@ class DesireTiming:
         self.done, self.active = True, False
         return Desire.none
 
-    if self.active and maneuver.kind == TURN and not self.retried and distance < RETRY_DIST_M and \
-       abs(steering_angle_deg - self._start_steer) < RETRY_STEER_DEG:
+    self.turned = self.turned or (self.active and abs(steering_angle_deg - self._start_steer) >= RETRY_STEER_DEG)
+    if self.active and maneuver.kind == TURN and not (self.retried or self.turned) and distance < RETRY_DIST_M:
       self.retried = True
       self._gap = PULSE_GAP_FRAMES
     if self._gap > 0:

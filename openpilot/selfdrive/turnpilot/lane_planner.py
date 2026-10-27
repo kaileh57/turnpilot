@@ -177,8 +177,8 @@ class LanePlanner:
         return self._none("lane change timed out")
     else:
       self._pre_t = 0.
-    signalled = left_blinker if direction == LaneChange.left else right_blinker
-    self.requested = direction if signalled or not driver_signals else LaneChange.none
+    signaled = left_blinker if direction == LaneChange.left else right_blinker
+    self.requested = direction if signaled or not driver_signals else LaneChange.none
     return self.requested, direction if driver_signals else LaneChange.none, ""
 
   def _none(self, reason=""):

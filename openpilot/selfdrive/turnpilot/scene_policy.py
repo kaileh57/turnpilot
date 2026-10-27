@@ -16,9 +16,9 @@ import math
 from dataclasses import dataclass
 
 from openpilot.selfdrive.turnpilot.route_follower import LEFT, TURN
+from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP
 
 NO_ACCEL_CAP = 10.
-NO_SPEED_CAP = 100.
 VEHICLES = ("car", "truck", "bus", "motorcycle", "cyclist")
 
 STOP_DECEL = 1.5            # m/s^2, the braking curve to a stop point

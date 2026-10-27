@@ -44,7 +44,7 @@ class FakeNavd:
 
 
 def road(lanes_left, lanes_right, line_prob=0.9, edge_std=0.3, lane_width=LANE_WIDTH, shoulder=0.5):
-  """(line_ys, line_probs, edge_ys, edge_stds) as modelV2 sees a straight road: the car centred in its lane with
+  """(line_ys, line_probs, edge_ys, edge_stds) as modelV2 sees a straight road: the car centered in its lane with
   lanes_left and lanes_right more lanes beside it; y positive right, as modelV2 publishes it."""
   half = lane_width / 2
   line_ys = [-half - lane_width, -half, half, half + lane_width]
