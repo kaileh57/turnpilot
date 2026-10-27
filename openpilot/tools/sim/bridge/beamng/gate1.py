@@ -52,6 +52,8 @@ class Gate1:
     self.turn, self.leads, self.approach, self.speed_kph = turn, list(leads), approach, speed_kph
     self.pulse_frames, self.out = pulse_frames, out
     self.desire = log.Desire.turnLeft if turn.direction == "left" else log.Desire.turnRight
+    if pulse_frames == 0:  # the baseline: what the model does at this junction with no desire
+      self.desire, self.pulse_frames = log.Desire.none, 1
     self.results, self.run, self.phase = [], -1, "next"
     self.pm = None
 
@@ -150,7 +152,7 @@ class Gate1:
   def finish(self, b):
     took = sum(r.get('took_turn', False) for r in self.results)
     summary = {"turns_taken": took, "runs": len(self.results), "junction": self.turn.junction, "direction": self.turn.direction,
-               "pulse_frames": self.pulse_frames, "speed_kph": self.speed_kph, "runs_detail": self.results}
+               "desire": int(self.desire), "pulse_frames": self.pulse_frames, "speed_kph": self.speed_kph, "runs_detail": self.results}
     with open(self.out, 'w') as f:
       json.dump(summary, f, indent=1)
     print(f"gate1: {took}/{len(self.results)} turns taken, results in {self.out}", flush=True)
@@ -173,7 +175,7 @@ def main():
   ap.add_argument('--leads', default='20', help='comma-separated lead distances, m (one run each)')
   ap.add_argument('--approach', type=float, default=140.0, help='spawn this far before the junction, m')
   ap.add_argument('--speed', type=float, default=25.0, help='cruise set speed, km/h')
-  ap.add_argument('--pulse-frames', type=int, default=4, help='turnpilotPlan messages (20 Hz) that carry the desire')
+  ap.add_argument('--pulse-frames', type=int, default=4, help='turnpilotPlan messages (20 Hz) that carry the desire; 0 for a no-desire baseline')
   ap.add_argument('--out', default='gate1_results.json')
   ap.add_argument('--list', action='store_true', help='list signalised junctions with 90-degree turns and exit')
   args, rest = ap.parse_known_args()

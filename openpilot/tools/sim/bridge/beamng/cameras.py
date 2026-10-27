@@ -151,6 +151,7 @@ class CameraRig:
     self.stats = {'pairs': 0, 'republished': 0, 'skipped': 0, 'skew': deque(maxlen=200), 'age': deque(maxlen=200), 'convert': deque(maxlen=200)}
     self.threads: list[threading.Thread] = []
     self.last_report: dict = {}
+    self.last_t_frame = 0.0
 
   def start(self, exit_event: threading.Event):
     self.threads.append(threading.Thread(target=self.stream.run, args=(exit_event,), name="cam_poll", daemon=True))
@@ -181,8 +182,11 @@ class CameraRig:
     t0 = time.monotonic()
     yuv = [c.convert(f.rgb) for c, f in zip(self.converters, (road, wide), strict=True)]
     t1 = time.monotonic()
-    t_frame = int(road.t * 1e9)
-    self.camerad.send(yuv[0], yuv[1], t_frame, t_frame)
+    # a republished pair gets a later time than the last one, as a camera that kept seeing the same scene would
+    t_frame = road.t if fresh else self.last_t_frame + 0.05
+    t_frame = max(t_frame, self.last_t_frame + 0.001)
+    self.last_t_frame = t_frame
+    self.camerad.send(yuv[0], yuv[1], int(t_frame * 1e9), int(t_frame * 1e9))
     t2 = time.monotonic()
     st = self.stats
     st['pairs' if fresh else 'republished'] += 1

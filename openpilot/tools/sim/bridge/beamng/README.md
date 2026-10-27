@@ -101,20 +101,21 @@ Measured on 2026-10-27, game on the PC, bridge on the Mac over the USB4 link:
 
 | What | Value |
 | --- | --- |
-| Fresh pairs published | 19.8 to 20.0 a second (game at 23 to 24 fps) |
-| Road and wide from the same game frame | 5 of 5 camera-turn trials |
-| Frame age, game frame to VisionIPC | 108 to 152 ms (median 128 ms), from the camera-turn test |
-| Frame age, first sight on the Mac to VisionIPC | median 70 ms, p90 88 ms |
+| Fresh pairs published | 15.6 to 20.0 a second in 5 s windows; 19.2 a second at a VisionIPC client over 20 s, none repeated, no frame id gaps (game at 23 to 24 fps) |
+| Road and wide from the same game frame | 11 of 11 camera-turn trials over two runs |
+| Frame age, game frame to VisionIPC | 103 to 154 ms (median about 120 ms), from the camera-turn test |
+| Frame age, first sight on the Mac to VisionIPC | median 70 to 80 ms, p90 88 to 100 ms |
 | RGB to NV12 | 3.4 ms a frame (upstream's int32 version: 6.6 ms), bit-identical |
 | Ad-hoc polling, for comparison | 8 to 10.5 pairs a second, 100 to 570 ms old |
 | With `--capture` | about 12 pairs a second |
 
 ## Known limits
 
-- The game's own render pipeline adds about 130 ms between a game frame and its VisionIPC publish; the comma four's
+- The game's own render pipeline adds about 120 ms between a game frame and its VisionIPC publish; the comma four's
   cameras add far less.
 - The ETK 800's steering lock (38 degrees) comes from yaw rate at low speed on one street; paramsd learns the rest.
-- The game's IMU has no noise or bias.
+- The game's IMU has no noise or bias, and BeamNG ships its 100 Hz readings in batches every 100 ms, so the 100 Hz
+  IMU messages hold each batch's values.
 - `--capture` renders a third camera and costs about 8 camera pairs a second.
 - modeld doesn't reconnect to a new VisionIPC server. If you run modeld by hand rather than through the manager, restart
   it whenever you restart the bridge.
