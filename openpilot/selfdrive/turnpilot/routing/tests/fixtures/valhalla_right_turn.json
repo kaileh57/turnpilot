@@ -1,0 +1,340 @@
+{
+ "routes": [
+  {
+   "voiceLocale": "en-US",
+   "weight_name": "auto",
+   "weight": 63.58,
+   "legs": [
+    {
+     "via_waypoints": [],
+     "steps": [
+      {
+       "voiceInstructions": [
+        {
+         "ssmlAnnouncement": "<speak>Drive east on Main Street. Then Turn right onto South Avenue.</speak>",
+         "announcement": "Drive east on Main Street. Then Turn right onto South Avenue.",
+         "distanceAlongGeometry": 590.4
+        },
+        {
+         "ssmlAnnouncement": "<speak>Turn right onto South Avenue.</speak>",
+         "announcement": "Turn right onto South Avenue.",
+         "distanceAlongGeometry": 155.6
+        }
+       ],
+       "intersections": [
+        {
+         "out": 0,
+         "entry": [
+          true
+         ],
+         "bearings": [
+          90
+         ],
+         "admin_index": 0,
+         "geometry_index": 0,
+         "location": [
+          -86.1699,
+          39.77
+         ]
+        }
+       ],
+       "maneuver": {
+        "type": "depart",
+        "bearing_after": 90,
+        "bearing_before": 0,
+        "instruction": "Drive east on Main Street.",
+        "location": [
+         -86.1699,
+         39.77
+        ]
+       },
+       "name": "Main Street",
+       "weight": 32.264,
+       "distance": 590.444,
+       "bannerInstructions": [
+        {
+         "primary": {
+          "type": "turn",
+          "modifier": "right",
+          "text": "South Avenue",
+          "components": [
+           {
+            "text": "South Avenue",
+            "type": "text"
+           }
+          ]
+         },
+         "distanceAlongGeometry": 590.444
+        },
+        {
+         "distanceAlongGeometry": 400.0,
+         "primary": {
+          "type": "turn",
+          "modifier": "right",
+          "text": "South Avenue",
+          "components": [
+           {
+            "text": "South Avenue",
+            "type": "text"
+           }
+          ]
+         },
+         "sub": {
+          "text": "",
+          "components": [
+           {
+            "directions": [
+             "left"
+            ],
+            "active": false,
+            "text": "",
+            "type": "lane"
+           },
+           {
+            "directions": [
+             "straight"
+            ],
+            "active": false,
+            "text": "",
+            "type": "lane"
+           },
+           {
+            "directions": [
+             "straight",
+             "right"
+            ],
+            "active": true,
+            "text": "",
+            "active_direction": "right",
+            "type": "lane"
+           }
+          ]
+         }
+        }
+       ],
+       "driving_side": "right",
+       "duration": 37.957,
+       "mode": "driving",
+       "geometry": {
+        "coordinates": [
+         [
+          -86.1699,
+          39.77
+         ],
+         [
+          -86.163,
+          39.77
+         ]
+        ],
+        "type": "LineString"
+       }
+      },
+      {
+       "voiceInstructions": [
+        {
+         "ssmlAnnouncement": "<speak>You have arrived at your destination.</speak>",
+         "announcement": "You have arrived at your destination.",
+         "distanceAlongGeometry": 144.9
+        }
+       ],
+       "intersections": [
+        {
+         "entry": [
+          true,
+          true,
+          true,
+          false
+         ],
+         "out": 2,
+         "in": 3,
+         "location": [
+          -86.163,
+          39.77
+         ],
+         "turn_weight": 7.0,
+         "turn_duration": 2.105,
+         "lanes": [
+          {
+           "indications": [
+            "left"
+           ],
+           "valid": false,
+           "active": false
+          },
+          {
+           "indications": [
+            "straight"
+           ],
+           "valid": false,
+           "active": false
+          },
+          {
+           "indications": [
+            "straight",
+            "right"
+           ],
+           "valid_indication": "right",
+           "valid": true,
+           "active": true
+          }
+         ],
+         "bearings": [
+          0,
+          90,
+          180,
+          270
+         ],
+         "admin_index": 0,
+         "geometry_index": 1
+        }
+       ],
+       "maneuver": {
+        "modifier": "right",
+        "type": "turn",
+        "bearing_after": 180,
+        "bearing_before": 90,
+        "instruction": "Turn right onto South Avenue.",
+        "location": [
+         -86.163,
+         39.77
+        ]
+       },
+       "name": "South Avenue",
+       "weight": 31.316,
+       "distance": 445.0,
+       "bannerInstructions": [
+        {
+         "primary": {
+          "type": "arrive",
+          "text": "You have arrived at your destination.",
+          "components": [
+           {
+            "text": "You have arrived at your destination.",
+            "type": "text"
+           }
+          ]
+         },
+         "distanceAlongGeometry": 445.0
+        }
+       ],
+       "driving_side": "right",
+       "duration": 30.712,
+       "mode": "driving",
+       "geometry": {
+        "coordinates": [
+         [
+          -86.163,
+          39.77
+         ],
+         [
+          -86.163,
+          39.766
+         ]
+        ],
+        "type": "LineString"
+       }
+      },
+      {
+       "intersections": [
+        {
+         "entry": [
+          true
+         ],
+         "in": 0,
+         "bearings": [
+          0
+         ],
+         "admin_index": 0,
+         "geometry_index": 2,
+         "location": [
+          -86.163,
+          39.766
+         ]
+        }
+       ],
+       "voiceInstructions": [],
+       "maneuver": {
+        "type": "arrive",
+        "bearing_after": 0,
+        "bearing_before": 180,
+        "instruction": "You have arrived at your destination.",
+        "location": [
+         -86.163,
+         39.766
+        ]
+       },
+       "name": "South Avenue",
+       "weight": 0.0,
+       "distance": 0.0,
+       "bannerInstructions": [],
+       "driving_side": "right",
+       "duration": 0.0,
+       "mode": "driving",
+       "geometry": {
+        "coordinates": [
+         [
+          -86.163,
+          39.766
+         ],
+         [
+          -86.163,
+          39.766
+         ]
+        ],
+        "type": "LineString"
+       }
+      }
+     ],
+     "admins": [
+      {
+       "iso_3166_1_alpha3": "USA",
+       "iso_3166_1": "US"
+      }
+     ],
+     "weight": 63.58,
+     "duration": 68.67,
+     "distance": 1035.443,
+     "summary": "Main Street, South Avenue"
+    }
+   ],
+   "duration": 68.67,
+   "distance": 1035.443,
+   "geometry": {
+    "coordinates": [
+     [
+      -86.1699,
+      39.77
+     ],
+     [
+      -86.163,
+      39.77
+     ],
+     [
+      -86.163,
+      39.766
+     ]
+    ],
+    "type": "LineString"
+   }
+  }
+ ],
+ "waypoints": [
+  {
+   "name": "Main Street",
+   "distance": 0.0,
+   "location": [
+    -86.1699,
+    39.77
+   ]
+  },
+  {
+   "name": "South Avenue",
+   "distance": 0.0,
+   "location": [
+    -86.163,
+    39.766
+   ]
+  }
+ ],
+ "code": "Ok"
+}

@@ -2,7 +2,6 @@
 import os
 
 import numpy as np
-import requests
 
 import openpilot.cereal.messaging as messaging
 from openpilot.common.api import API_HOST, Api
@@ -11,6 +10,8 @@ from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.navigation.helpers import latest_gps_source
 from openpilot.selfdrive.navigation.route import along_path, local_meters
+from openpilot.selfdrive.turnpilot.routing.guidance import fill_guidance
+from openpilot.selfdrive.turnpilot.routing.sources import MapboxSource, RouteSources
 
 REROUTE_DISTANCE = 25
 MANEUVER_TRANSITION_THRESHOLD = 10
@@ -53,6 +54,7 @@ class RouteEngine:
     self.mapbox_token = os.environ.get("MAPBOX_TOKEN")
     self.api = Api(self.params.get("DongleId")) if self.mapbox_token is None else None
     self.mapbox_host = "https://api.mapbox.com" if self.mapbox_token is not None else API_HOST.rstrip('/') + '/v1/nav'
+    self.sources = RouteSources(MapboxSource(self.mapbox_host, self.mapbox_token, self.api))
 
   def update(self):
     self.sm.update(0)
@@ -101,40 +103,17 @@ class RouteEngine:
     if lang is not None:
       lang = lang.replace('main_', '')
 
-    token = self.mapbox_token
-    if token is None:
-      token = self.api.get_token()
-
-    params = {
-      'access_token': token,
-      'geometries': 'geojson',
-      'overview': 'full',
-      'steps': 'true',
-      'banner_instructions': 'true',
-      'alternatives': 'false',
-      'language': lang,
-    }
-    if self.last_bearing is not None:
-      params['bearings'] = f"{(self.last_bearing + 360) % 360:.0f},90;"
-
-    coords_str = ';'.join(f'{lon},{lat}' for lon, lat in (self.last_position, destination))
-    url = self.mapbox_host + '/directions/v5/mapbox/driving-traffic/' + coords_str
     try:
-      resp = requests.get(url, params=params, timeout=10)
-      if resp.status_code != 200:
-        cloudlog.event("API request failed", status_code=resp.status_code, text=resp.text, error=True)
-      resp.raise_for_status()
-
-      r = resp.json()
-      if len(r['routes']):
-        self.route = r['routes'][0]['legs'][0]['steps']
+      steps = self.sources.get(self.params).route(self.last_position, destination, self.last_bearing, lang)
+      if len(steps):
+        self.route = steps
         self.route_geometry = [np.array(step['geometry']['coordinates'], dtype=np.float64).reshape((-1, 2)) for step in self.route]
         self.step_idx = 0
       else:
         cloudlog.warning("Got empty route response")
         self.clear_route()
 
-    except requests.exceptions.RequestException:
+    except Exception:
       cloudlog.exception("failed to get route")
       self.clear_route()
 
@@ -159,6 +138,7 @@ class RouteEngine:
     # Current instruction
     msg.navInstruction.maneuverDistance = distance_to_maneuver_along_geometry
     set_banner(msg.navInstruction, banner_step['bannerInstructions'], distance_to_maneuver_along_geometry)
+    fill_guidance(msg.navInstruction, self.route, self.step_idx, distance_to_maneuver_along_geometry)
 
     # Total remaining distance and time: the rest of this step, then every step after it
     remaining = 1.0 - along_geometry / max(step['distance'], 1)

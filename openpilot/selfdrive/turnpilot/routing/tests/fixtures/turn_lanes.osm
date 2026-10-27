@@ -1,0 +1,30 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<osm version='0.6' generator='turnpilot test fixture'>
+<node id='1' version='1' lat='39.7700000' lon='-86.1700000'/>
+<node id='2' version='1' lat='39.7700000' lon='-86.1630000'/>
+<node id='3' version='1' lat='39.7700000' lon='-86.1600000'/>
+<node id='4' version='1' lat='39.7740000' lon='-86.1630000'/>
+<node id='5' version='1' lat='39.7660000' lon='-86.1630000'/>
+<node id='6' version='1' lat='39.7740000' lon='-86.1600000'/>
+<way id='10' version='1'>
+<nd ref='1'/><nd ref='2'/>
+<tag k='highway' v='primary'/><tag k='name' v='Main Street'/><tag k='oneway' v='yes'/><tag k='lanes' v='3'/>
+<tag k='turn:lanes' v='left|through|through;right'/><tag k='maxspeed' v='35 mph'/>
+</way>
+<way id='11' version='1'>
+<nd ref='2'/><nd ref='3'/>
+<tag k='highway' v='primary'/><tag k='name' v='Main Street'/><tag k='oneway' v='yes'/><tag k='lanes' v='3'/><tag k='maxspeed' v='35 mph'/>
+</way>
+<way id='12' version='1'>
+<nd ref='2'/><nd ref='4'/>
+<tag k='highway' v='secondary'/><tag k='name' v='North Avenue'/><tag k='lanes' v='2'/><tag k='maxspeed' v='35 mph'/>
+</way>
+<way id='13' version='1'>
+<nd ref='2'/><nd ref='5'/>
+<tag k='highway' v='secondary'/><tag k='name' v='South Avenue'/><tag k='lanes' v='2'/><tag k='maxspeed' v='35 mph'/>
+</way>
+<way id='14' version='1'>
+<nd ref='4'/><nd ref='6'/>
+<tag k='highway' v='residential'/><tag k='name' v='Oak Street'/><tag k='maxspeed' v='25 mph'/>
+</way>
+</osm>
