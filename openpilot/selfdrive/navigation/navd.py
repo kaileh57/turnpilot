@@ -9,7 +9,7 @@ from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.navigation.helpers import latest_gps_source
 from openpilot.selfdrive.navigation.route import along_path, local_meters
-from openpilot.selfdrive.turnpilot.routing.guidance import fill_guidance
+from openpilot.selfdrive.turnpilot.routing.guidance import fill_controls, fill_guidance
 from openpilot.selfdrive.turnpilot.maps.client import MapError
 from openpilot.selfdrive.turnpilot.routing.sources import MapRouter
 
@@ -49,6 +49,8 @@ class RouteJob(threading.Thread):
     self.start_position, self.start_bearing = engine.last_position, engine.last_bearing
     self.cancel = threading.Event()
     self.steps: list[dict] | None = None
+    self.controls: list = []  # TurnPilot: the route's stop signs, yields and signals (turnpilot/routing/controls.py)
+    self.controls_status = 'none'
 
   def run(self):
     router, destination = self.engine.router, self.destination
@@ -62,6 +64,14 @@ class RouteJob(threading.Thread):
       if not self.cancel.is_set():
         router.status.error(MapError('routing_failed', f"Routing failed: {type(e).__name__}: {e}", 'Routing failed'),
                             destination=list(destination))
+    if self.steps:
+      # TurnPilot: the route's controls, here off navd's loop (two Valhalla calls). Any failure is the status 'failed',
+      # which turnpilotd says out loud, and the route still goes out
+      try:
+        self.controls, self.controls_status = router.controls(self.steps)
+      except Exception:
+        cloudlog.exception("navd: route controls failed")
+        self.controls, self.controls_status = [], 'failed'
 
 
 class RouteEngine:
@@ -78,6 +88,8 @@ class RouteEngine:
     self.route = None
     self.route_geometry = None  # an (n, 2) array of (longitude, latitude) per step
     self.route_count = 0  # TurnPilot: routes calculated, so a replaced route is told apart from the one it replaces
+    self.controls: list = []  # TurnPilot: the route's stop signs, yields and signals, and Valhalla's status for them
+    self.controls_status = 'none'
 
     self.recompute_hold = 0
     self.reroute_counter = 0
@@ -205,6 +217,7 @@ class RouteEngine:
       self.clear_route()
       return
     self.route = job.steps
+    self.controls, self.controls_status = job.controls, job.controls_status
     self.route_count += 1
     self.route_geometry = [np.array(step['geometry']['coordinates'], dtype=np.float64).reshape((-1, 2)) for step in self.route]
     self.step_idx = 0
@@ -215,6 +228,8 @@ class RouteEngine:
     # TurnPilot: on every message, so an invalid one for this route (off it for a fix, rerouting) is told apart from a
     # new route, which a turn under way isn't held through (turnpilot/route_follower.py)
     msg.navInstruction.routeCount = self.route_count
+    # and the controls' status on every message too; an invalid one carries no controls
+    msg.navInstruction.controlsStatus = self.controls_status if self.route is not None else 'none'
 
     # TurnPilot: a job while there is a route is a reroute for the same destination (a new one clears the route), as when
     # the car left the corridor and a new one downloads for minutes. The car is off this route meanwhile: its distances
@@ -251,6 +266,9 @@ class RouteEngine:
     msg.navInstruction.maneuverDistance = distance_to_maneuver_along_geometry
     set_banner(msg.navInstruction, banner_step['bannerInstructions'], distance_to_maneuver_along_geometry)
     fill_guidance(msg.navInstruction, self.route, self.step_idx, distance_to_maneuver_along_geometry)
+    # TurnPilot: the controls in maneuverDistance's frame, the steps' distances and then along this step's geometry
+    car_along = sum(s['distance'] for s in self.route[:self.step_idx]) + along_geometry
+    fill_controls(msg.navInstruction, self.controls, self.controls_status, car_along)
 
     # Total remaining distance and time: the rest of this step, then every step after it
     remaining = 1.0 - along_geometry / max(step['distance'], 1)

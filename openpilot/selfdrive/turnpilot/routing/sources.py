@@ -73,6 +73,7 @@ class MapRouter:
     self.local: tuple[str, ValhallaSource] | None = None
     self.corridor: Corridor | None = None
     self.failure: Failure | None = None
+    self.served: tuple | None = None  # (steps, source, tiles_dir) of the last route: controls() asks the same source
 
   @property
   def packs_dir(self) -> Path:
@@ -80,6 +81,16 @@ class MapRouter:
 
   def config(self) -> tuple:
     return tuple(self.params.get(k) for k in CONFIG_KEYS)
+
+  def controls(self, steps) -> tuple[list, str]:
+    """(controls, status) for steps, the last route this router gave (routing/controls.py), from the source that routed it:
+    local tiles are checked for their controls (the controls_built marker, the sim's sidecar), a corridor from real OSM
+    carries them. ([], 'failed') for steps it didn't route."""
+    served = self.served
+    if served is None or served[0] is not steps:
+      cloudlog.error("turnpilot: controls asked for a route this router didn't give")
+      return [], 'failed'
+    return served[1].controls(steps, tiles_dir=served[2])
 
   def clear(self):
     """No destination."""
@@ -115,6 +126,7 @@ class MapRouter:
     steps = self.routed(self.local[1], start, destination, bearing, language, 'the local tiles')
     if not steps:
       raise MapError('no_route', f"Valhalla found no route on the local tiles ({tiles}).", 'No route found')
+    self.served = (steps, self.local[1], getattr(self.local[1], 'tiles_dir', None))
     self.status.set('ready', 'Routing on local tiles (developer override, no geofence).', 'Local tiles', source='local',
                     destination=list(destination))
     return steps
@@ -139,6 +151,7 @@ class MapRouter:
           raise MapError('no_route', "No route on the map for this drive.", 'No route found')
         if current.pack.holds(steps):
           self.ready(current.region, destination)
+          self.served = (steps, current.source, None)
           return steps
         cloudlog.warning("turnpilot: the reroute leaves the corridor, downloading a new corridor")
       else:
@@ -166,6 +179,7 @@ class MapRouter:
     if cancelled is not None and cancelled():
       raise cancelled_error()
     self.ready(region, destination)
+    self.served = (steps, downloaded.source, None)
     return steps
 
   def ready(self, region: Region, destination):

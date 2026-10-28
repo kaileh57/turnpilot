@@ -18,6 +18,8 @@ import numpy as np
 from openpilot.selfdrive.navigation.route import along_path
 
 MAX_MANEUVERS = 10  # allManeuvers is for the planner's lookahead; a long route would otherwise send every step each second
+CONTROLS_BEHIND_M, CONTROLS_AHEAD_M = 15., 400.  # navInstruction.controls: the stop signs, yields and signals this near
+MAX_CONTROLS = 8
 
 
 def to_direction(indication) -> str:
@@ -126,3 +128,14 @@ def fill_guidance(instruction, steps, step_idx, distance_to_maneuver):
     instruction.maneuverBearingAfter = junction['after']
     instruction.maneuverBranches = min(junction['branches'], 255)
   instruction.throughLanes, instruction.throughLanesDistance = through_lanes(steps, step_idx, distance_to_maneuver)
+
+
+def fill_controls(instruction, controls, status: str, car_along: float):
+  """navInstruction.controls and controlsStatus: the route's controls (routing/controls.py) from CONTROLS_BEHIND_M behind
+  the car to CONTROLS_AHEAD_M ahead, nearest first along the route, at most MAX_CONTROLS, their distances in
+  maneuverDistance's frame (car_along: the steps before the car's, then along its step)."""
+  instruction.controlsStatus = status
+  near = sorted(((c.route_m - car_along, c) for c in controls if -CONTROLS_BEHIND_M < c.route_m - car_along < CONTROLS_AHEAD_M),
+                key=lambda dc: dc[0])[:MAX_CONTROLS]
+  instruction.controls = [{'id': c.id, 'kind': c.kind, 'distance': float(d), 'lineMapped': c.line_mapped, 'junction': c.junction,
+                           'crossSuspect': c.cross_suspect} for d, c in near]

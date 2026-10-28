@@ -89,6 +89,8 @@ class StubRouter:
   With gate set to an Event, route() blocks until it is set, as a corridor download does, and stops when cancelled."""
   def __init__(self, steps=None):
     self.steps, self.error, self.calls = steps, None, []
+    self.controls_result: tuple = ([], 'ok')  # what controls() gives, or an exception it raises
+    self.controls_calls: list = []  # (steps, thread name) per call
     self.status = MagicMock()
     self.gate: threading.Event | None = None
     self.positions = []  # what position() said once the "download" was done
@@ -108,6 +110,12 @@ class StubRouter:
     if self.error is not None:
       raise self.error
     return self.steps
+
+  def controls(self, steps):
+    self.controls_calls.append((steps, threading.current_thread().name))
+    if isinstance(self.controls_result, Exception):
+      raise self.controls_result
+    return self.controls_result
 
   def clear(self):
     pass
@@ -321,6 +329,72 @@ class TestRouteEngine(unittest.TestCase):
     self.engine.last_position = (0.001, 0)  # at the maneuver
     self.engine.send_instruction()
     self.assertAlmostEqual(self.last_message('navInstruction').navInstruction.maneuverDistance, 0, delta=0.01)
+
+  def test_controls_in_the_maneuver_distance_frame(self):
+    from openpilot.selfdrive.turnpilot.routing.controls import Control
+    step = 111.195
+    # a stop sign 50 m into the second step, and a signal 30 m into the first
+    self.engine.router.controls_result = ([Control(0, 'signal', 30., 0, 30.), Control(1, 'stop', step + 50., 1, 50., True)], 'ok')
+    self.load_route()
+    self.engine.last_position = (0.0004, 0)  # 44.5 m along the first step
+    self.engine.send_instruction()
+    ni = self.last_message('navInstruction').navInstruction
+    self.assertEqual(str(ni.controlsStatus), 'ok')
+    self.assertEqual([(c.id, str(c.kind)) for c in ni.controls], [(0, 'signal'), (1, 'stop')])
+    self.assertAlmostEqual(ni.controls[0].distance, 30. - 0.4 * step, delta=0.1)  # passed, still sent within 15 m
+    self.assertAlmostEqual(ni.controls[1].distance, step + 50. - 0.4 * step, delta=0.1)
+    self.assertTrue(ni.controls[1].lineMapped)
+    # on the second step: the same frame as maneuverDistance (the steps' distances, then along the step)
+    self.engine.last_position = (0.0012, 0)
+    self.engine.send_instruction()
+    ni = self.last_message('navInstruction').navInstruction
+    self.assertEqual(self.engine.step_idx, 1)
+    self.assertEqual([c.id for c in ni.controls], [1])  # the signal is 52 m behind now
+    self.assertAlmostEqual(ni.controls[0].distance, 50. - 0.0002 * step / 0.001, delta=0.1)
+
+  def test_controls_computed_by_the_route_job_once(self):
+    self.engine.background = True
+    self.engine.router.steps = self.response
+    self.engine.calculate_route((0.002, 0))
+    self.engine.job.join(5.)
+    self.engine.collect_route((0.002, 0))
+    for _ in range(3):
+      self.engine.send_instruction()
+    self.assertEqual([name for _, name in self.engine.router.controls_calls], ['navd-route'])
+
+  def test_controls_failure_keeps_the_route(self):
+    self.engine.router.controls_result = RuntimeError("synthetic")
+    self.load_route()
+    self.engine.send_instruction()
+    message = self.last_message('navInstruction')
+    self.assertTrue(message.valid)
+    self.assertEqual(str(message.navInstruction.controlsStatus), 'failed')
+    self.assertEqual(len(message.navInstruction.controls), 0)
+
+  def test_controls_window_and_cap(self):
+    from openpilot.selfdrive.turnpilot.routing.controls import Control
+    self.engine.router.controls_result = ([Control(i, 'stop', 20. * i, 0, 20. * i) for i in range(12)] +
+                                          [Control(12, 'signal', 500., 1, 500.)], 'partial')
+    self.load_route()
+    self.engine.last_position = (0.0002, 0)  # 22 m along
+    self.engine.send_instruction()
+    ni = self.last_message('navInstruction').navInstruction
+    self.assertEqual(str(ni.controlsStatus), 'partial')
+    ds = [c.distance for c in ni.controls]
+    self.assertEqual(len(ds), 8)
+    self.assertEqual([c.id for c in ni.controls], list(range(1, 9)))  # -15 m to 400 m, nearest first
+    self.assertTrue(all(-15. < d < 400. for d in ds) and ds == sorted(ds))
+
+  def test_invalid_instruction_carries_no_controls(self):
+    from openpilot.selfdrive.turnpilot.routing.controls import Control
+    self.engine.router.controls_result = ([Control(0, 'stop', 60., 0, 60.)], 'ok')
+    self.load_route()
+    self.engine.last_position = (0.0001, 0.001)  # 111 m off the route
+    self.engine.send_instruction()
+    message = self.last_message('navInstruction')
+    self.assertFalse(message.valid)
+    self.assertEqual(len(message.navInstruction.controls), 0)
+    self.assertEqual(str(message.navInstruction.controlsStatus), 'ok')
 
   def test_banner_selection(self):
     banners = [{'distanceAlongGeometry': 100, 'primary': {'text': 'Turn right', 'type': 'turn', 'modifier': 'right'}},

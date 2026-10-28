@@ -8,6 +8,7 @@ from pathlib import Path
 import requests
 
 from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.turnpilot.routing.controls import actor_call, http_call, route_controls
 
 # tools/turnpilot/install_valhalla_device.sh puts pyvalhalla here, since the system venv is read-only
 DEVICE_PYVALHALLA = '/data/turnpilot/pyvalhalla'
@@ -66,11 +67,21 @@ def import_valhalla():
     return None
 
 
+def tiles_dir_of(tiles) -> str | None:
+  """The directory a TurnPilotValhallaTiles value's tiles live in (for routing/controls.py's marker and sidecar), or
+  None for a service URL."""
+  if not tiles or tiles.startswith(('http://', 'https://')):
+    return None
+  path = Path(tiles).expanduser()
+  return str(path if path.is_dir() else path.parent)
+
+
 class ValhallaSource:
   def __init__(self, tiles):
     where = locate(tiles)
     if where is None:
       raise FileNotFoundError(f"no Valhalla config or tiles at {tiles!r}")
+    self.tiles_dir = tiles_dir_of(tiles)
     self.url = where.get('url', '')
     self.actor = None
     if self.url:
@@ -111,3 +122,10 @@ class ValhallaSource:
       resp.raise_for_status()
       r = resp.json()
     return r['routes'][0]['legs'][0]['steps'] if len(r.get('routes', [])) else []
+
+  def controls(self, steps, tiles_dir=None):
+    """(controls, status) along the route steps (routing/controls.py). tiles_dir: the tiles' directory when their
+    controls must be checked for (local tiles: the controls_built marker and the sim's sidecar), None when the tiles come
+    from real OSM."""
+    call = actor_call(self.actor) if self.actor is not None else http_call(self.url, requests.post)
+    return route_controls(call, steps, tiles_dir)

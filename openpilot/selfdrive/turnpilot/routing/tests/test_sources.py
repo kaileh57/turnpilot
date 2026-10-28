@@ -150,7 +150,13 @@ class FakeValhalla:
   def __call__(self, tiles):
     if self.test.broken_tiles:
       raise RuntimeError('tiles do not load')
-    source = SimpleNamespace(tiles=tiles, calls=[])
+    source = SimpleNamespace(tiles=tiles, calls=[], tiles_dir=tiles, controls_calls=[])
+
+    def controls(steps, tiles_dir=None):
+      source.controls_calls.append((steps, tiles_dir))
+      return [], 'ok'
+
+    source.controls = controls
 
     def route(start, destination, bearing, language):
       source.calls.append((start, destination, bearing, language))
@@ -211,6 +217,11 @@ class TestMapRouter(RouterCase):
     self.assertEqual(downloads[0]['message'], 'Downloading map for this drive…')
     self.assertEqual(downloads[-1]['progress'], 1.0)
     self.assertEqual(list((self.maps / PACKS_DIR).glob('.download-*')), [])  # the tar is gone once unpacked
+
+  def test_corridor_controls_need_no_marker(self):
+    steps = self.router.route(START, DESTINATION, 90, 'en')
+    self.router.controls(steps)
+    self.assertEqual(self.built[0].controls_calls, [(steps, None)])
 
   def test_reroutes_on_the_same_corridor(self):
     self.router.route(START, DESTINATION, 90, 'en')
@@ -445,6 +456,15 @@ class TestLocalOverride(RouterCase):
     self.assertEqual((status['state'], status['source']), ('ready', 'local'))
     self.router.route(CHICAGO, CHICAGO, 90, 'en')
     self.assertEqual(len(self.built), 1)  # the actor is kept
+
+  def test_controls_from_the_source_that_routed(self):
+    # local tiles: checked for their controls (marker, sidecar); a corridor from real OSM: not; another route: failed
+    self.params.values['TurnPilotValhallaTiles'] = '/sim/tiles'
+    coverage_path(self.maps).unlink()
+    steps = self.router.route(CHICAGO, CHICAGO, 90, 'en')
+    self.assertEqual(self.router.controls(steps), ([], 'ok'))
+    self.assertEqual(self.built[0].controls_calls, [(steps, '/sim/tiles')])
+    self.assertEqual(self.router.controls(list(steps)), ([], 'failed'))
 
   def test_local_tiles_fail_loudly(self):
     self.params.values['TurnPilotValhallaTiles'] = '/sim/tiles'
