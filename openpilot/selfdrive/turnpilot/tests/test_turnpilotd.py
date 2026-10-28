@@ -1635,6 +1635,33 @@ def test_go_at_an_unprotected_left_with_a_car_coming_still_waits_for_it():
   assert sim.s > 320.
 
 
+def test_a_permissive_left_at_a_signal_still_waits_for_oncoming_after_the_signals_go():
+  # BeamNG smoke 2026-10-28: the signal tiles map a signal at the unprotected_left junction, which protects it from the
+  # unprotected-turn stop (one stop, signalGo). A green is still permissive: after the driver's go at the signal line (the
+  # car stood 22-26 m before the junction there), the detector's oncoming hold stops the car before the oncoming lanes,
+  # taking a new track as coming whatever its vx reads (velocity_trusted), and the press held on doesn't release it
+  for before in (11., 22., 26.):
+    sim = Sim(TURNS_AHEAD, controls=[(300. - before, 'signal')])
+    sim.go_taps = False
+    plan = stop_at(sim, 300. - before)
+    assert plan.mapControl.kind == 'signal' and plan.controlPrompt == 'signalGo', before
+    held_s = sim.s
+    t0 = sim.t
+
+    def car(sim, t0=t0):  # coming at 10 m/s, a new track that reads as going away
+      return ({'cls': 'car', 'x': 380. - 10. * (sim.t - t0) - sim.s, 'y': 5., 'vx': 4., 'age': 10},)
+    sim.step(car(sim), gas=True)
+    for _ in range(int(2. / DT_MDL)):  # the press held on: still the signal's go, not an override of the detector
+      sim.step(car(sim), gas=True)
+    while car(sim)[0]['x'] > sim.distance() - 5.:
+      plan = sim.step(car(sim))
+      assert sim.distance() >= HOLD_LINE_M - 0.5, (before, "moved into the junction with the car still coming")
+    assert any(p.reason == "waiting for oncoming" for _, _, p in sim.trace), before
+    assert not any(p.mapControl.kind == 'unprotectedTurn' for _, _, p in sim.trace)
+    sim.run(20., objects=car, turn_at=300.)
+    assert sim.s > 320. and sim.s > held_s, before
+
+
 def test_the_turn_pulses_on_the_go_frame_itself():
   # BeamNG unprotected_left_visible: let go after its hold, the car drove straight across. The model only takes a rising
   # edge, so the plan that first lets the car go carries a fresh turnLeft edge, whether the driver tapped at once or long

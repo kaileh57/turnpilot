@@ -42,7 +42,8 @@ The rules (Kellen, 2026-10-27; /private/tmp/claude-501/stop_design.md):
 - An unprotected turn (Kellen, 2026-10-27: the same rule as stop signs and lights) is a routed far-side turn (a left on the
   right) across an oncoming approach (navInstruction.maneuverOpposing present, or unknown: no junction data is never
   clear) with no stop sign or signal of its own at the junction (one within PROTECT_BEFORE_M before it to PROTECT_PAST_M
-  past it, whatever its state: a signal already holds, a stop sign already stops). turnpilotd hands it in each frame
+  past it, whatever its state: a signal already holds, a stop sign already stops; the maneuver stays protected once seen
+  so, after its control drops out behind the car). turnpilotd hands it in each frame
   (update()'s turn) and it becomes a control of its own, kind unprotectedTurn, at the junction's hold line less
   MAP_MARGIN_M: the curve, the latch and the stop sign's gas rules, with no dwell: held, the driver is prompted at once
   (unprotectedTurnGo), and only a gas tap goes. A failing or missing controls status leaves the turn unprotected. One the
@@ -214,6 +215,7 @@ class MapControlPolicy:
     self._turn_floor: float | None = None  # m, dead-reckoned: its stop point read behind where the car can stop at the floor
     self._turn_raw = 0.  # m to its stop point as last read, before that floor
     self.turn_name = 'left'
+    self._protected_id: int | None = None  # the maneuver a stop sign or signal of its junction protected: it stays so
 
   def stop_ahead(self) -> float | None:
     """m to the nearest stop sign or signal the car is going to stop at (not released, not going on a green), or None:
@@ -267,7 +269,11 @@ class MapControlPolicy:
       if tc is not None:
         tc.d -= v * dt
       return tc
-    want = turn is not None and not protected(controls, turn[1])
+    if turn is not None and protected(controls, turn[1]):
+      # once protected, protected for good: a signal mapped well before a wide junction drops out of the controls 15 m
+      # behind the car (control_tracker.DROP_PAST_M), still short of the hold line: never a second stop for the same go
+      self._protected_id = int(turn[0])
+    want = turn is not None and int(turn[0]) != self._protected_id
     key = (UNPROTECTED_ROUTE, int(turn[0])) if turn is not None else None
     if tc is not None and (not want or tc.key != key):
       if tc.engaged and not (tc.state is not None and tc.state.done):
