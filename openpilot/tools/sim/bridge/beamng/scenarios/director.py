@@ -118,7 +118,9 @@ class Director(threading.Thread):
         if not self.bng.vehicles.spawn(v, pos, scenario.heading_quat(a.heading)):
           raise RuntimeError(f"couldn't spawn {a.name}")
         v.ai.set_mode('disabled')
-        v.control(throttle=0.0, brake=1.0)
+        # hold on the parking brake: BeamNG's arcade automatic reads the brake pedal at a standstill as throttle in
+        # reverse, so a car held on brake=1 backs away from the junction at full power before its release
+        v.control(throttle=0.0, brake=0.0, parkingbrake=1.0)
         self.cars[a.name] = {'actor': a, 'vehicle': v, 'end_t': None}
         self.poses[a.name] = (pos[0], pos[1], a.heading, pos[2])
 
@@ -149,7 +151,7 @@ class Director(threading.Thread):
 
   def _script(self, car, nodes):
     v = car['vehicle']
-    v.control(brake=0.0)
+    v.control(throttle=0.0, brake=0.0, parkingbrake=0.0)
     v.ai.set_script(nodes, cling=True)
     car['end_t'] = time.monotonic() + nodes[-1]['t'] + DONE_AFTER_S
 
