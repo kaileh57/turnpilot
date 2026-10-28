@@ -13,7 +13,6 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import requests
-import urllib3
 
 from openpilot.selfdrive.turnpilot.maps.paths import maps_dir
 
@@ -164,7 +163,7 @@ class MapClient:
           while True:
             try:
               chunk = next(chunks, None)
-            except (urllib3.exceptions.HTTPError, requests.exceptions.RequestException, OSError) as e:
+            except Exception as e:  # urllib3's ProtocolError, ReadTimeoutError, SSLError: the stream broke
               raise broke_off(type(e).__name__) from None
             if chunk is None:
               break
