@@ -1,8 +1,8 @@
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot.hooks import plan_accel
 from openpilot.selfdrive.turnpilot.route_follower import NOMINAL_ANGLE_DEG, Maneuver, classify
-from openpilot.selfdrive.turnpilot.scene_policy import (ACCEL_CAP_JERK, BLIND_TURN_REASON, HOLD_LINE_M, NO_ACCEL_CAP, NO_SPEED_CAP,
-                                                        PED_STOP_GAP_M, SCENE_SETTLE_S, STOP_DECEL, ScenePolicy, scene_policy)
+from openpilot.selfdrive.turnpilot.scene_policy import (ACCEL_CAP_JERK, GAS_RELEASE_M, HOLD_LINE_M, NO_ACCEL_CAP, NO_SPEED_CAP,
+                                                        PED_STOP_GAP_M, STOP_DECEL, ScenePolicy, scene_policy)
 from openpilot.selfdrive.turnpilot.tests.synthetic import scene
 
 LEFT_TURN = Maneuver(*classify("turn", "left"), "turn", "left", NOMINAL_ANGLE_DEG["left"])
@@ -86,13 +86,11 @@ def test_oncoming_car_holds_unprotected_left():
   assert not policy([car(40., 5., vx=-12.)], maneuver=LEFT_TURN, distance=HOLD_LINE_M - 3., v_ego=4.).holding
 
 
-def test_detector_unavailable():
-  d = policy([car(60., 5., vx=-12.)], available=False, maneuver=LEFT_TURN, distance=15., v_ego=4.)
-  assert d.holding and d.reason == BLIND_TURN_REASON
-  d = policy(available=False, maneuver=RIGHT_TURN, distance=15., v_ego=4.)
-  assert not d.holding and d.reason == "detector unavailable" and d.speed_cap == NO_SPEED_CAP
-  d = policy(available=False)
-  assert not d.holding and d.reason == "detector unavailable"
+def test_detector_unavailable_is_no_evidence():
+  # no scene is neither a hold nor a reason: the stopped detector is turnpilotd's to hand back
+  for maneuver in (LEFT_TURN, RIGHT_TURN, None):
+    d = policy([car(60., 5., vx=-12.)], available=False, maneuver=maneuver, distance=15., v_ego=4.)
+    assert (d.accel_cap, d.speed_cap, d.should_stop, d.holding, d.reason) == (NO_ACCEL_CAP, NO_SPEED_CAP, False, False, "")
 
 
 def drive(sp, frames, v, s, objects_at, available=True, maneuver=None, maneuver_at=None, maneuver_id=0, gas=lambda t: False,
@@ -114,60 +112,78 @@ def drive(sp, frames, v, s, objects_at, available=True, maneuver=None, maneuver_
   return v, s, decisions
 
 
-def test_blind_turn_holds_with_the_prompt_reason_until_gas():
-  # what releases the hold today: the scene coming back, or rolling past the hold line faster than COMMIT_SPEED
+def test_no_stop_and_wait_with_the_detector_down():
+  # the removed hold: approaching an unprotected left with no scene, the car drives through without waiting at the line
   sp = ScenePolicy()
-  v, s, ds = drive(sp, int(60. / DT_MDL), 10., 0., lambda s, t: (), available=False, maneuver=LEFT_TURN, maneuver_at=150.)
-  assert v < 0.1 and abs(150. - HOLD_LINE_M - s) < 1.5
-  assert ds[-1].should_stop and ds[-1].reason == BLIND_TURN_REASON
-  # one frame of gas releases it at once, and it stays released when the gas is lifted
-  v, s, ds = drive(sp, int(20. / DT_MDL), v, s, lambda s, t: (), available=False, maneuver=LEFT_TURN, maneuver_at=150.,
-                   gas=lambda t: t < DT_MDL)
-  assert not any(d.holding for d in ds) and s > 150.
-  # the next turn across traffic holds again
-  _, _, ds = drive(sp, int(30. / DT_MDL), 10., 0., lambda s, t: (), available=False, maneuver=LEFT_TURN, maneuver_at=150.,
-                   maneuver_id=1)
-  assert ds[-1].should_stop and ds[-1].reason == BLIND_TURN_REASON
+  v, s, ds = drive(sp, int(30. / DT_MDL), 10., 0., lambda s, t: (), available=False, maneuver=LEFT_TURN, maneuver_at=150.)
+  assert s > 250. and v >= 10. and not any(d.holding or d.should_stop or d.reason for d in ds)
 
 
-def test_gas_releases_the_hold_past_the_line():
+def test_a_hold_in_force_is_carried_through_a_gap():
+  # waiting for an oncoming car at the line when the detector misses a few runs: still waiting, not released
+  sp = ScenePolicy()
+  oncoming = scene([car(60., 5., vx=-12.)])
+  for _ in range(5):
+    d = sp.update(oncoming.objects, True, LEFT_TURN, HOLD_LINE_M + 0.5, 0., maneuver_id=7)
+  assert d.should_stop and d.reason == "waiting for oncoming"
+  for _ in range(int(1. / DT_MDL)):
+    d = sp.update([], False, LEFT_TURN, HOLD_LINE_M + 0.5, 0., maneuver_id=7)
+  assert d.should_stop and d.reason == "waiting for oncoming"
+  # back with nothing coming: released at once
+  assert not sp.update([], True, LEFT_TURN, HOLD_LINE_M + 0.5, 0., maneuver_id=7).holding
+  # a pedestrian stop is carried where the pedestrian was: the car still stops short of them
+  sp, x_ped = ScenePolicy(), 40.
+  v, s, ds = drive(sp, int(20. / DT_MDL), 10., 0., lambda s, t: (ped(x_ped - s, 0.1, in_path=True),),
+                   available=lambda t: t < 0.5)
+  assert v == 0. and ds[-1].should_stop and 0. < x_ped - s < PED_STOP_GAP_M + 2.
+  assert not ScenePolicy().update([], False, LEFT_TURN, 15., 4., maneuver_id=0).holding  # nothing was in force
+
+
+def test_gas_releases_the_hold_at_the_line():
+  oncoming = scene([car(60., 5., vx=-12.)])
   # crept past the hold line under COMMIT_SPEED on the gas, then lifted: the one-frame policy stops hard inside the junction
-  d = policy(available=False, maneuver=LEFT_TURN, distance=HOLD_LINE_M - 2., v_ego=1.5)
+  d = policy([car(60., 5., vx=-12.)], maneuver=LEFT_TURN, distance=HOLD_LINE_M - 2., v_ego=1.5)
   assert d.should_stop or d.accel_cap < -STOP_DECEL
   sp = ScenePolicy()
-  d = sp.update([], False, LEFT_TURN, HOLD_LINE_M - 2., 1.5, maneuver_id=3, gas_pressed=True)
+  d = sp.update(oncoming.objects, True, LEFT_TURN, HOLD_LINE_M - 2., 1.5, maneuver_id=3, gas_pressed=True)
   assert not d.holding
-  d = sp.update([], False, LEFT_TURN, HOLD_LINE_M - 2.1, 1.5, maneuver_id=3, gas_pressed=False)
+  d = sp.update(oncoming.objects, True, LEFT_TURN, HOLD_LINE_M - 2.1, 1.5, maneuver_id=3, gas_pressed=False)
   assert not d.holding and d.accel_cap == NO_ACCEL_CAP
+  # the next maneuver holds again
+  assert sp.update(oncoming.objects, True, LEFT_TURN, 15., 4., maneuver_id=4).reason == "waiting for oncoming"
 
 
-def test_gas_releases_only_the_junction_hold_in_force():
+def test_gas_further_out_releases_nothing():
+  # the hold engages within braking distance of the line: gas there is the driver keeping up speed, not a go
   sp = ScenePolicy()
-  # gas long before the junction (the hold isn't engaged yet) releases nothing
-  d = sp.update([], False, LEFT_TURN, 200., 10., maneuver_id=0, gas_pressed=True)
-  assert not d.holding
-  d = sp.update([], False, LEFT_TURN, 15., 4., maneuver_id=0)
-  assert d.holding and d.reason == BLIND_TURN_REASON
+  oncoming = scene([car(80., 5., vx=-12.)])
+  d = sp.update(oncoming.objects, True, LEFT_TURN, HOLD_LINE_M + GAS_RELEASE_M + 10., 8., maneuver_id=0, gas_pressed=True)
+  assert d.reason == "waiting for oncoming"
+  closer = scene([car(50., 5., vx=-12.)])
+  d = sp.update(closer.objects, True, LEFT_TURN, HOLD_LINE_M + 1., 1., maneuver_id=0)
+  assert d.holding and d.reason == "waiting for oncoming"
   # gas never releases a pedestrian in the path
   sc = scene([ped(12., 0.2, in_path=True)])
   for _ in range(3):
-    d = sp.update(sc.objects, True, LEFT_TURN, 15., 4., maneuver_id=0, gas_pressed=True)
+    d = sp.update(sc.objects, True, LEFT_TURN, HOLD_LINE_M + 1., 4., maneuver_id=0, gas_pressed=True)
   assert d.holding and d.reason == "pedestrian in path"
 
 
-def test_scene_must_settle_before_it_clears_a_far_side_turn():
-  # a detector that only manages a run now and then makes the scene blink on for half a second: no release between
-  sp = ScenePolicy()
-  blinking = lambda t: (t % 2.) < 0.5  # noqa: E731
-  _, _, ds = drive(sp, int(40. / DT_MDL), 10., 0., lambda s, t: (), available=blinking, maneuver=LEFT_TURN, maneuver_at=150.)
-  assert ds[-1].should_stop and all(d.holding for d in ds[-int(10. / DT_MDL):])
-  # back for good: released after SCENE_SETTLE_S, and an oncoming car seen at once holds at once
-  ds = [sp.update([], True, LEFT_TURN, HOLD_LINE_M + 0.5, 0., maneuver_id=0) for _ in range(int(2. / DT_MDL))]
-  settled = next(i for i, d in enumerate(ds) if not d.holding)
-  assert abs(settled * DT_MDL - SCENE_SETTLE_S) < 2 * DT_MDL
-  sp = ScenePolicy()
-  sc = scene([car(60., 5., vx=-12.)])
-  assert sp.update(sc.objects, True, LEFT_TURN, 15., 4., maneuver_id=0).reason == "waiting for oncoming"
+def test_unconfirmed_velocity_never_turns_a_stop_into_a_follow():
+  # a standing pedestrian on a 2-hit track whose range noise reads as 1.5 m/s away: stopped for, not followed
+  d = policy([ped(30., 0.2, vx=1.5, in_path=True, age=2, conf=0.7)], v_ego=10.)
+  assert d.reason == "pedestrian in path"
+  assert policy([ped(30., 0.2, vx=1.5, in_path=True, age=6, conf=0.7)], v_ego=10.).reason == "following pedestrian"
+  # a person beside a 2-hit bicycle track that reads as moving is not its rider
+  rider = ped(20., 0.2, in_path=True, camera='road', box=[0.48, 0.40, 0.52, 0.55])
+  bike = {'cls': 'cyclist', 'x': 20., 'y': 0.2, 'vx': 6., 'vy': 0., 'camera': 'road', 'box': [0.47, 0.47, 0.53, 0.58]}
+  assert policy([rider, bike | {'age': 2, 'conf': 0.6}], v_ego=10.).reason == "pedestrian in path"
+
+
+def test_steady_low_confidence_pedestrian_is_confirmed():
+  # YOLO sees them at 0.5 on every run: after CONFIRM_STEADY_HITS they get a hard stop like any confirmed track
+  assert policy([ped(14., 0.2, in_path=True, age=9, conf=0.5)], v_ego=10.).accel_cap == NO_ACCEL_CAP
+  assert policy([ped(14., 0.2, in_path=True, age=10, conf=0.5)], v_ego=10.).accel_cap < -3.
 
 
 def test_far_false_positive_is_not_in_the_path():
@@ -253,8 +269,10 @@ def test_beamng_crosswalk_false_positive_does_not_hold():
     distance, v = 0.1 - 1.5 * k / len(BEAMNG_FALSE_WALKER), 1.9 - 1.5 * k / len(BEAMNG_FALSE_WALKER)
     objects = [] if row is None else [ped(*row[3:5], vx=row[5], vy=row[6], age=row[1], conf=row[2], camera='wide')]
     sc = scene(objects)
-    assert sp.update(sc.objects, True, RIGHT_TURN, distance, v, maneuver_id=0).reason != "pedestrian in crosswalk"
-    assert policy(objects, maneuver=RIGHT_TURN, distance=distance, v_ego=v).reason != "pedestrian in crosswalk"
+    d = sp.update(sc.objects, True, RIGHT_TURN, distance, v, maneuver_id=0)
+    assert not d.holding and not d.should_stop and d.reason == ""
+    d = policy(objects, maneuver=RIGHT_TURN, distance=distance, v_ego=v)
+    assert not d.holding and not d.should_stop and d.reason == ""
 
 
 def test_steady_walker_holds_sporadic_one_does_not():

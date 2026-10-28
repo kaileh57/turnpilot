@@ -8,17 +8,18 @@ curve can't make it. shouldStop is only set at the stop point near standstill, b
 state ignores the accel target and ramps the brakes on its own.
 
 A track is evidence, not fact: a stop that needs harder braking than the curve only gets it from a confirmed track
-(enough hits at a high enough confidence), so a two-hit false positive slows the car on the curve instead of
-stopping it hard, and the accel cap ramps in at a bounded jerk rather than stepping. A person moving along the path is
-followed like a lead, not stopped for, and one on a moving bicycle or motorcycle is its rider, left to the driving
-model like any vehicle. A crosswalk hold needs a steadily detected track with enough hits.
+(enough hits at a high enough confidence, or many hits at any), so a two-hit false positive slows the car on the curve
+instead of stopping it hard, and the accel cap ramps in at a bounded jerk rather than stepping. A confirmed person moving
+along the path is followed like a lead, not stopped for, and one on a confirmed, moving bicycle or motorcycle is its
+rider, left to the driving model like any vehicle; an unconfirmed track's velocity is mostly range noise, so it never
+turns a stop into a follow. A crosswalk hold needs a steadily detected track with enough hits.
 
-With no scene, the car still waits at the hold line of an unprotected far-side turn (a blind turn across traffic is
-worse), and the plan's reason asks the driver to check traffic and press the gas; the UI shows it as a prompt with a
-chime. A gas press releases the junction hold for that maneuver, not just while it's held: otherwise lifting off brings
-the hold back, inside the junction if the car crept past the line, and only the scene coming back or rolling past the
-line faster than COMMIT_SPEED would release it. ScenePolicy keeps that and the rest of what one frame can't know;
-scene_policy() is one frame on its own.
+No scene is no evidence, never a reason to hold: a missing detector is turnpilotd's to hand back (a soft disable), not
+this policy's to stop for. Nor is it a reason to release: ScenePolicy keeps the stops in force when the scene went
+away, dead-reckoned with the car's speed, until it comes back. A gas press at the hold line releases the junction hold
+for that maneuver, not just while it's held: otherwise lifting off brings the hold back, inside the junction if the car
+crept past the line. ScenePolicy keeps that and the rest of what one frame can't know; scene_policy() is one frame on
+its own.
 
 Objects are TurnpilotScene.TrackedObject (or anything with the same fields): x m forward, y m LEFT in the
 calibrated frame, vx/vy over-ground velocity in that frame (ego motion removed), cls compared by name, inPath
@@ -46,7 +47,8 @@ HARD_STOP_MIN_M = 0.5
 ACCEL_CAP_JERK = 5.0        # m/s^3: an accel cap tightens from -STOP_DECEL no faster than this (-3.5 in 0.4 s)
 
 CONFIRM_HITS = 5            # braking harder than STOP_DECEL needs a track that has had this many hits...
-CONFIRM_CONF = 0.6          # ...at this confidence (once: it stays confirmed while it's tracked)
+CONFIRM_CONF = 0.6          # ...at this confidence (once: it stays confirmed while it's tracked),
+CONFIRM_STEADY_HITS = 10    # or this many at any: a person YOLO sees at 0.45-0.59 on every run is still a person
 
 PATH_HALF_WIDTH_M = 1.5     # corridor around the car's axis for objects the tracker hasn't flagged inPath
 NEAR_PATH_M = 15.           # ...used for anything this close ahead
@@ -62,9 +64,8 @@ HOLD_LINE_M = 8.0           # m before the maneuver point where the car waits at
 HOLD_ENGAGE_MARGIN_M = 15.  # the junction hold engages within braking distance of the hold line plus this
 COMMIT_SPEED = 2.0          # m/s: past the hold line and faster than this, the car is committed to its turn
 TURN_ZONE_PAST_M = 5.       # m past the maneuver point the junction rules still apply
-SCENE_SETTLE_S = 1.0        # s the scene must be back before an empty one clears a far-side turn: new tracks need hits
-                            # and a velocity, and a detector running only now and then must not clear it between runs
-BLIND_TURN_REASON = "blind turn: check traffic, press gas"
+GAS_RELEASE_M = 5.          # a gas press releases a junction hold only this close to the hold line (or past it): further
+                            # out it's the driver keeping up speed, and the hold still has an oncoming car to wait for
 
 CROSSWALK_X_BEFORE_M = 6.   # crosswalk zone on the turn side, along the car's axis relative to the maneuver point
 CROSSWALK_X_AFTER_M = 15.
@@ -100,6 +101,9 @@ class Stop:
   speed_cap: float
   should_stop: bool
   reason: str
+  d_stop: float = 0.      # where it was, for ScenePolicy to carry it while the scene is gone
+  v_lead: float = 0.
+  confirmed: bool = True
 
 
 def stop_command(v_ego: float, d_stop: float) -> tuple[float, float, bool]:
@@ -118,11 +122,11 @@ def stop(v_ego: float, d_stop: float, reason: str, confirmed: bool = True, v_lea
   speed_cap += v_lead
   if not confirmed and accel_cap < NO_ACCEL_CAP:
     accel_cap, speed_cap = NO_ACCEL_CAP, max(speed_cap, v_ego - STOP_DECEL * SPEED_CAP_TAU)
-  return Stop(accel_cap, speed_cap, should_stop and v_lead <= 0., reason)
+  return Stop(accel_cap, speed_cap, should_stop and v_lead <= 0., reason, d_stop, v_lead, confirmed)
 
 
 def confirmed_track(obj) -> bool:
-  return obj.age >= CONFIRM_HITS and obj.conf >= CONFIRM_CONF
+  return (obj.age >= CONFIRM_HITS and obj.conf >= CONFIRM_CONF) or obj.age >= CONFIRM_STEADY_HITS
 
 
 def crosswalk_walker(obj) -> bool:
@@ -144,30 +148,31 @@ def box_overlap(a, b) -> float:
   return w * h / smaller if w > 0 and h > 0 and smaller > 0 else 0.
 
 
-def is_rider(person, objects) -> bool:
+def is_rider(person, objects, is_confirmed=confirmed_track) -> bool:
   """YOLO calls a cyclist's rider a person, and the rider's box ranges badly (it ends above the ground): a person box
-  inside a moving two-wheeler's box in the same camera is the two-wheeler."""
+  inside a moving two-wheeler's box in the same camera is the two-wheeler. Moving means a confirmed track's velocity: a
+  new one's is range noise, and a person beside a parked bike must not read as its rider."""
   return len(person.box) == 4 and any(
     str(o.cls) in TWO_WHEELERS and str(o.camera) == str(person.camera) and len(o.box) == 4 and math.hypot(o.vx, o.vy) > RIDER_MIN_SPEED and
-    box_overlap(person.box, o.box) >= RIDER_OVERLAP for o in objects)
+    box_overlap(person.box, o.box) >= RIDER_OVERLAP and is_confirmed(o) for o in objects)
 
 
 def pedestrian_stops(objects, v_ego: float, is_confirmed=confirmed_track) -> list[Stop]:
-  """Pedestrians in the path: a stop short of a standing or crossing one, a following gap behind one moving along it."""
+  """Pedestrians in the path: a stop short of a standing or crossing one, a following gap behind a confirmed one moving
+  along it (an unconfirmed track's vx is range noise: at 30 m two positions 0.1 s apart can be several m/s off)."""
   stops = []
   for obj in objects:
-    if str(obj.cls) != "pedestrian" or obj.x <= 0. or not in_path(obj) or is_rider(obj, objects):
+    if str(obj.cls) != "pedestrian" or obj.x <= 0. or not in_path(obj) or is_rider(obj, objects, is_confirmed):
       continue
-    if obj.vx > MOVING_PED_VX:
+    if obj.vx > MOVING_PED_VX and is_confirmed(obj):
       stops.append(stop(v_ego, obj.x - PED_STOP_GAP_M - obj.vx * FOLLOW_GAP_S, "following pedestrian", is_confirmed(obj), obj.vx))
     else:
       stops.append(stop(v_ego, obj.x - PED_STOP_GAP_M, "pedestrian in path", is_confirmed(obj)))
   return stops
 
 
-def junction_stops(objects, settled: bool, maneuver, distance, v_ego, right_hand_traffic, is_walker=crosswalk_walker) -> list[Stop]:
-  """Holds at the hold line before a turn: the crosswalk of a curb-side turn, oncoming traffic across a far-side one, and
-  a far-side one the scene can't vouch for (settled: available for SCENE_SETTLE_S)."""
+def hold_line_stop(maneuver, distance, v_ego, reason: str) -> list[Stop]:
+  """A stop at the hold line before a turn, while the junction rules apply."""
   if maneuver is None or maneuver.kind != TURN or distance < -TURN_ZONE_PAST_M:
     return []
   d_hold = distance - HOLD_LINE_M
@@ -175,25 +180,32 @@ def junction_stops(objects, settled: bool, maneuver, distance, v_ego, right_hand
     return []  # committed: stopping in the junction is worse than finishing the turn
   if d_hold > v_ego ** 2 / (2. * STOP_DECEL) + HOLD_ENGAGE_MARGIN_M:
     return []
+  return [stop(v_ego, d_hold, reason)]
+
+
+def junction_stops(objects, maneuver, distance, v_ego, right_hand_traffic, is_walker=crosswalk_walker) -> list[Stop]:
+  """Holds at the hold line before a turn: the crosswalk of a curb-side turn, oncoming traffic across a far-side one."""
+  if not hold_line_stop(maneuver, distance, v_ego, ""):
+    return []
   side = maneuver.side  # the crosswalk and the oncoming lanes are both on the turn side; y is positive left
   curb_side = (side == LEFT) != right_hand_traffic
   if curb_side:
     walkers = [obj for obj in objects if str(obj.cls) == "pedestrian" and is_walker(obj) and
                distance - CROSSWALK_X_BEFORE_M < obj.x < distance + CROSSWALK_X_AFTER_M and
                CROSSWALK_Y_NEAR_M < obj.y * side < CROSSWALK_Y_FAR_M]
-    return [stop(v_ego, d_hold, "pedestrian in crosswalk")] if walkers else []
+    return hold_line_stop(maneuver, distance, v_ego, "pedestrian in crosswalk") if walkers else []
   for obj in objects:
     toward = -obj.vx
     if str(obj.cls) in VEHICLES and ONCOMING_Y_NEAR_M < obj.y * side < ONCOMING_Y_FAR_M and \
        obj.x > distance - ONCOMING_PAST_M and toward > ONCOMING_MIN_SPEED and \
        max(obj.x - distance, 0.) / toward < ONCOMING_TTA_S:
-      return [stop(v_ego, d_hold, "waiting for oncoming")]
-  return [] if settled else [stop(v_ego, d_hold, BLIND_TURN_REASON)]
+      return hold_line_stop(maneuver, distance, v_ego, "waiting for oncoming")
+  return []
 
 
-def decide(stops: list[Stop], v_ego: float, available: bool) -> SceneDecision:
+def decide(stops: list[Stop], v_ego: float) -> SceneDecision:
   if not stops:
-    return SceneDecision(reason="" if available else "detector unavailable")
+    return SceneDecision()
   accel_cap, speed_cap = min(s.accel_cap for s in stops), min(s.speed_cap for s in stops)
   should_stop = any(s.should_stop for s in stops)
   reason = min(stops, key=lambda s: (not s.should_stop, plan_accel(s.accel_cap, s.speed_cap, v_ego))).reason
@@ -203,11 +215,11 @@ def decide(stops: list[Stop], v_ego: float, available: bool) -> SceneDecision:
 
 def scene_policy(objects, available: bool, maneuver, distance: float, v_ego: float,
                  right_hand_traffic: bool = True) -> SceneDecision:
-  """One frame on its own: evidence from this frame's tracks alone, no ramp, no gas release, an available scene trusted
-  at once. objects: tracked objects (ignored when not available); maneuver: RouteFollower.upcoming or None."""
+  """One frame on its own: evidence from this frame's tracks alone, no ramp, no gas release, nothing carried through a
+  gap. objects: tracked objects (ignored when not available); maneuver: RouteFollower.upcoming or None."""
   objects = list(objects) if available else []
-  stops = pedestrian_stops(objects, v_ego) + junction_stops(objects, available, maneuver, distance, v_ego, right_hand_traffic)
-  return decide(stops, v_ego, available)
+  stops = pedestrian_stops(objects, v_ego) + junction_stops(objects, maneuver, distance, v_ego, right_hand_traffic)
+  return decide(stops, v_ego)
 
 
 @dataclass
@@ -220,31 +232,41 @@ class TrackEvidence:
 
 class ScenePolicy:
   """scene_policy() with what one frame can't know: which tracks earned a hard stop or a crosswalk hold (kept while they're
-  tracked), how long the scene has been back, the accel cap ramping in, and a gas press that released a junction hold."""
+  tracked), the accel cap ramping in, a gas press that released a junction hold, and the stops in force when the scene
+  went away, carried until it's back."""
 
   def __init__(self):
     self.t = 0.
     self.tracks: dict[int, TrackEvidence] = {}
-    self.available_s = 0.
     self.accel_cap = NO_ACCEL_CAP
     self.released_id: int | None = None  # the maneuver whose junction hold a gas press released
+    self.carried: list[Stop] = []        # the last available frame's pedestrian stops, moved with the car since
+    self.carried_junction: tuple[int | None, str] | None = None  # (maneuver id, reason) of its junction hold
 
   def update(self, objects, available: bool, maneuver, distance: float, v_ego: float, right_hand_traffic: bool = True,
              maneuver_id: int | None = None, gas_pressed: bool = False, dt: float = DT_MDL) -> SceneDecision:
     """As scene_policy(), plus maneuver_id (RouteFollower.maneuver_id) and carState.gasPressed, once per frame dt apart."""
     self.t += dt
-    objects = list(objects) if available else []
-    self.available_s = self.available_s + dt if available else 0.
-    self.update_evidence(objects)
+    if available:
+      objects = list(objects)
+      self.update_evidence(objects)
+      peds = pedestrian_stops(objects, v_ego, lambda obj: self.tracks[obj.trackId].confirmed)
+      junction = junction_stops(objects, maneuver, distance, v_ego, right_hand_traffic, lambda obj: self.tracks[obj.trackId].walker)
+      self.carried = peds
+      self.carried_junction = (maneuver_id, junction[0].reason) if junction else None
+    else:
+      # no evidence either way: keep what was in force, the pedestrians where they were relative to the road
+      self.carried = [stop(v_ego, s.d_stop - (v_ego - s.v_lead) * dt, s.reason, s.confirmed, s.v_lead) for s in self.carried]
+      peds = self.carried
+      junction = []
+      if self.carried_junction is not None and self.carried_junction[0] == maneuver_id:
+        junction = hold_line_stop(maneuver, distance, v_ego, self.carried_junction[1])
 
-    junction = junction_stops(objects, self.available_s >= SCENE_SETTLE_S, maneuver, distance, v_ego, right_hand_traffic,
-                              lambda obj: self.tracks[obj.trackId].walker)
-    if junction and gas_pressed and maneuver_id is not None:
+    if junction and gas_pressed and maneuver_id is not None and distance - HOLD_LINE_M < GAS_RELEASE_M:
       self.released_id = maneuver_id  # the driver looked and goes: stopping again further in would be worse
     if maneuver_id is not None and maneuver_id == self.released_id:
       junction = []
-    stops = pedestrian_stops(objects, v_ego, lambda obj: self.tracks[obj.trackId].confirmed) + junction
-    decision = decide(stops, v_ego, available)
+    decision = decide(peds + junction, v_ego)
     decision.accel_cap = self.ramp(decision.accel_cap, dt)
     return decision
 
