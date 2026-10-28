@@ -6,11 +6,12 @@ from openpilot.cereal import custom, log
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S
-from openpilot.selfdrive.turnpilot.lane_planner import (LANE_UNKNOWN_REASON, LC_ABORT_COOLDOWN_S, LC_ABORT_SETTLE_S, LC_CONFIRM_FRAMES, LC_REQUEST_TIMEOUT_S,
+from openpilot.selfdrive.turnpilot.lane_planner import (LANE_UNKNOWN_REASON, LANE_WIDTH,
+                                                        LC_ABORT_COOLDOWN_S, LC_ABORT_SETTLE_S, LC_CONFIRM_FRAMES, LC_REQUEST_TIMEOUT_S,
                                                         LC_SIGNAL_TIMEOUT_S, LC_WARN_S, YELLOW_HOLD_S, LanePlanner, ModelLanes, Phase,
                                                         YellowHold, change_blocker, desired_changes, ego_lane_index, lane_change_window,
                                                         lane_mismatch,
-                                                        lane_changes_needed, model_lanes, model_lanes_from_msg, stopped_in_lane,
+                                                        lane_changes_needed, model_lanes, model_lanes_from_msg, nav_lane_span, stopped_in_lane,
                                                         target_lane_blocked)
 from openpilot.selfdrive.turnpilot.route_follower import LEFT, NOMINAL_ANGLE_DEG, RIGHT, Maneuver, classify
 from openpilot.selfdrive.turnpilot.scene.lane_paint import UNKNOWN, LinePaint
@@ -191,12 +192,15 @@ class Drive:
     self.lp, self.dh = LanePlanner(paint_rule), DesireHelper()
     self.driver_signals = driver_signals
     self.lc_t = self.t = 0.
+    self.offset = 0.  # the car's lateral offset from its lane's centre, positive left
     self.requests, self.prompts, self.offers, self.aborts, self.decisions = [], [], [], [], []
 
   def step(self, m, distance, objects=(), blinker=None, blindspot=None, maneuver_id=0, inputs_valid=True):
     line_ys, probs, edges, stds = road(self.lanes_left, self.lanes_right)
     if self.curb_unpainted and self.lanes_right == 1:
       probs[3] = 0.05
+    # the car's offset in its lane: the lines and edges slide the other way (modelV2 y is right)
+    line_ys, edges = [y + self.offset for y in line_ys], [y + self.offset for y in edges]
     lanes = model_lanes(line_ys, probs, edges, stds)
     left_blinker, right_blinker = blinker == LaneChange.left, blinker == LaneChange.right
     lc_state = self.dh.lane_change_state if not self.lag else \
@@ -214,12 +218,15 @@ class Drive:
     self.decisions.append(d)
     self.prompts.append(d.prompt)
     # the model takes 3 s to change lanes once DesireHelper asks it to
+    # the car moves over a lane in that time, and the model relabels its lines halfway, once the car is across the line
     starting = self.dh.lane_change_state == LaneChangeState.laneChangeStarting
     self.lc_t = self.lc_t + DT_MDL if starting else 0.
     prob = 1. if starting and self.lc_t < 3. else 0.
-    if starting and self.lc_t >= 3. and self.lc_t - DT_MDL < 3.:
-      k = 1 if self.dh.lane_change_direction == log.LaneChangeDirection.left else -1
+    k = 1 if self.dh.lane_change_direction == log.LaneChangeDirection.left else -1
+    if starting and self.lc_t >= 1.5 and self.lc_t - DT_MDL < 1.5:
       self.lanes_left, self.lanes_right = self.lanes_left - k, self.lanes_right + k
+    frac = min(self.lc_t / 3., 1.)
+    self.offset = 0. if not starting else k * LANE_WIDTH * (frac if frac < 0.5 else frac - 1.)
     cs = car_state(self.v, left_blinker=left_blinker, right_blinker=right_blinker)
     self._lc_seen.append(self.dh.lane_change_state)
     self.dh.update(cs, True, prob, d.lane_change)
@@ -650,3 +657,120 @@ def test_completed_changes_are_counted_per_maneuver():
   assert drive.lp.done == 1 and drive.lp.changes == 1
   drive.step(maneuver("turn", "left", TWO_LANES_LEFT_TURN), 100., maneuver_id=1)  # a new maneuver: counted afresh
   assert drive.lp.done == 0
+
+
+class DroppedLateralDrive(Drive):
+  """Drive, with openpilot's lateral control dropping for drop_s (a brake tap, a steering disengage) just after the
+  change number `which` (from 1) starts: DesireHelper ends it, the car still in its lane."""
+  def __init__(self, *a, which=1, drop_s=0.5, **kw):
+    super().__init__(*a, **kw)
+    self.which, self.drop_s, self.starts, self.drop_left = which, drop_s, 0, 0.
+    self._was_starting = False
+
+  def step(self, m, distance, **kw):
+    starting = self.dh.lane_change_state == LaneChangeState.laneChangeStarting
+    if starting and not self._was_starting:
+      self.starts += 1
+      if self.starts == self.which:
+        self.drop_left = self.drop_s
+    self._was_starting = starting
+    lat = self.drop_left <= 0.
+    self.drop_left -= DT_MDL
+    update = self.dh.update
+    self.dh.update = lambda cs, active, prob, req: update(cs, active and lat, prob, req)
+    try:
+      return super().step(m, distance, **kw)
+    finally:
+      self.dh.update = update
+
+
+def test_a_change_that_ends_with_the_car_in_its_lane_isnt_counted():
+  # lateral control drops just after one of the two changes into a three-lane road's left-turn lane starts, the curb lane
+  # unpainted: DesireHelper ends the change with the car still in its lane. It isn't counted as made: the car is never
+  # taken for in the turn lane while it isn't, and its lane can't be confirmed, said out loud
+  m = maneuver("turn", "left", THREE_LANES_LEFT_TURN)
+  for which in (1, 2):
+    drive = DroppedLateralDrive(lanes_left=2, lanes_right=0, curb_unpainted=True, which=which)
+    drive.run(m, 500., 28.)  # to 80 m before the turn, past the last lane change
+    in_turn_lane = drive.lanes_left == 0
+    assert in_turn_lane or drive.lp.lane_unknown, (which, drive.lanes_left, drive.lp.done, drive.lp._start)
+  # without the drop both changes are counted, and the car is in the turn lane, confirmed
+  drive = Drive(lanes_left=2, lanes_right=0, curb_unpainted=True)
+  drive.run(m, 500., 28.)
+  assert drive.lanes_left == 0 and drive.lp.done == 2 and not drive.lp.lane_unknown
+
+
+def test_a_change_that_didnt_move_the_car_never_sends_it_across_the_centreline():
+  # in the left-turn lane of two (double yellow to the left, misread broken white). The driver signals right and
+  # DesireHelper starts the change for 1 s, then ends it with the car still in its lane: no change left is wanted after it,
+  # whether the model can place the car (the far-right line painted) or not
+  m = maneuver("turn", "left", TWO_LANES_LEFT_TURN)
+  known = ([-4.94, -1.44, 2.0, 5.3], [0.55, 0.98, 0.69, 0.75], XING_POST[2], XING_POST[3])
+  for rows in (XING_POST, known):
+    lp, dist, v = LanePlanner(), 260., 12.
+    lanes = model_lanes(*rows)
+    def step(state, right=False, lp=lp, lanes=lanes, v=v):
+      nonlocal dist
+      dist -= v * DT_MDL
+      return lp.update(m, dist, lanes, state, v, False, right, (), False, True, DT_MDL, paint(left=BW, right=BW), maneuver_id=7)
+    for _ in range(10):
+      step(LaneChangeState.off)
+    for _ in range(5):
+      step(LaneChangeState.preLaneChange, True)
+    for _ in range(20):
+      step(LaneChangeState.laneChangeStarting, True)
+    out = [step(LaneChangeState.off) for _ in range(200)]
+    assert not [d for d in out if d.offer == LaneChange.left or d.lane_change == LaneChange.left], rows is known
+
+
+def test_a_lane_the_model_places_is_never_moved_by_the_count_of_changes():
+  # the model places the car in the curb lane of two (index 1), but one change left is counted from there: the two
+  # disagree, so the car may be in either, never only where the count says
+  pre = model_lanes(*XING_PRE)
+  assert ego_lane_index(2, pre, True) == 1
+  lo, hi = nav_lane_span(2, pre, True, 1, (1, 0))
+  assert lo <= 1 <= hi
+  # one change left counted, with the model placing the car in the right-hand lane: the two can't both hold, it may be anywhere
+  assert nav_lane_span(2, pre, True, 1, None) == (0, 1)
+
+
+def test_a_lane_crossed_without_desirehelper_leaves_the_lane_unknown():
+  # three lanes our way and two oncoming, every line misread broken white, the curb lane unpainted and the line two over
+  # faint: in the lanes away from the curb the model can't count to it. After one change of ours, the driver moves over to
+  # the turn lane himself with openpilot's lateral off (DesireHelper never changes). The model's lines show the car cross:
+  # the count of changes no longer places the car, so no change is asked for toward the oncoming lanes
+  oncoming = 2
+  class FaintCurb(Drive):
+    def step(self, m, distance, **kw):
+      global road
+      plain = road
+      def faint(left, right, **k):
+        ys, probs, edges, stds = plain(left, right, **k)
+        if right >= 1:
+          probs[3] = 0.4 if right == 2 else 0.05
+        return ys, probs, edges, stds
+      road = faint
+      try:
+        return super().step(m, distance, **kw)
+      finally:
+        road = plain
+  drive = FaintCurb(lanes_left=oncoming + 2, lanes_right=0, paint=lambda left, right: paint(left=BW, right=BW if right else SW))
+  m = maneuver("turn", "left", THREE_LANES_LEFT_TURN)
+  dist = 500.
+  while drive.lp.done != 1:
+    dist = drive.run(m, dist, DT_MDL)
+    assert dist > 0.
+  dist = drive.run(m, dist, 0.5)
+  frames = int(3. / DT_MDL)
+  for i in range(frames):  # the driver's change: the lines slide right, and relabel as the car crosses
+    frac = (i + 1) / frames
+    if i == frames // 2:
+      drive.lanes_left, drive.lanes_right = drive.lanes_left - 1, drive.lanes_right + 1
+    drive.offset = LANE_WIDTH * (frac if i < frames // 2 else frac - 1.)
+    drive.step(m, dist)
+    dist -= drive.v * DT_MDL
+  assert drive.lanes_left == oncoming
+  n = len(drive.requests)
+  drive.run(m, dist, 15.)
+  assert not drive.requests[n:], 'a change asked for into the oncoming lane'
+  assert drive.lp.done is None

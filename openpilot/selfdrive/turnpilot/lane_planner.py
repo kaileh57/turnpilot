@@ -14,8 +14,12 @@ side, which is always its own direction's, and lanes beyond a yellow line count 
 can make it: a curb lane often has no edge line, and one lane in from it the model sees room for a lane but no line, so it
 can't tell the curb lane from the one beside it. The changes made for the maneuver are counted too (LanePlanner.done), and
 the lane dead reckoned from where the first of them started: no more changes than the lane list needs from there, and none
-from a lane it can't place, which is said out loud (lane_unknown: turnpilotPlan.laneMismatch laneUnknown) instead. On the
-far side from the curb only the list's own lanes are lanes (nav_room): on an undivided road the model's far road edge lies
+from a lane it can't place. A change is counted only once the model's lines show the car got over (LineWatch), or its lane
+counts moved over: DesireHelper ends a change the same way whether or not it did. One that ends without, or a line crossed
+with no change of DesireHelper's (openpilot off, a manual change), leaves the lane unknown, and a lane the model places is
+never overridden by the count (nav_lane_span). A lane it can't place is said out loud (lane_unknown:
+turnpilotPlan.laneMismatch laneUnknown) instead of changed from. On the far side from the curb only the list's own lanes
+are lanes (nav_room): on an undivided road the model's far road edge lies
 beyond the oncoming lanes (BeamNG, 2026-10-27: a second change left across a double yellow into the oncoming lane). Without it (the usual case: OSM tags
 lanes on few roads) an exit moves toward the curb by the model's lane count, but not across a curb-side line read solid
 white, and a turn, or an exit away from the curb, moves one lane toward its side at a time, looked at again after each
@@ -113,6 +117,9 @@ class ModelLanes:
   # from the lane beside it), nor where the edge is unsure (the paint alone says at least one)
   left_known: bool = field(default=True, compare=False)
   right_known: bool = field(default=True, compare=False)
+  # the ego lane lines' y at SAMPLE_IDX (modelV2: positive right), nan unknown: LineWatch sees the car cross a line by them
+  left_y: float = field(default=math.nan, compare=False)
+  right_y: float = field(default=math.nan, compare=False)
 
 
 def _side(ego_y, ego_prob, outer_y, outer_prob, edge_y, edge_std, sign, width):
@@ -137,7 +144,7 @@ def model_lanes(line_ys, line_probs, edge_ys, edge_stds) -> ModelLanes:
   left, keep_left, left_known = _side(line_ys[1], line_probs[1], line_ys[0], line_probs[0], edge_ys[0], edge_stds[0], -1., width)
   right, keep_right, right_known = _side(line_ys[2], line_probs[2], line_ys[3], line_probs[3], edge_ys[1], edge_stds[1], 1., width)
   measured = min(line_probs[1], line_probs[2]) > LINE_PROB_MIN
-  return ModelLanes(left, right, keep_left, keep_right, width, measured, left_known, right_known)
+  return ModelLanes(left, right, keep_left, keep_right, width, measured, left_known, right_known, float(line_ys[1]), float(line_ys[2]))
 
 
 def model_lanes_from_msg(model) -> ModelLanes:
@@ -176,8 +183,10 @@ def nav_lane_span(lane_count: int, lanes: ModelLanes, right_hand_traffic: bool, 
   """(first, last): the lanes of a nav lane list of lane_count, from the left, the car may be in. done: lane changes
   completed for this maneuver, positive left, None when one went a way that wasn't seen; start: (lane, done) where the
   first change of ours for it started, None before. From the model's count (ego_lane_index) and the lane dead reckoned
-  from start, each within where done changes can have taken the car from anywhere in the list; where they disagree the car
-  may be in either, and with neither, anywhere done allows. lanes: paint_lanes' already."""
+  from start; where they disagree the car may be in either, and with neither, anywhere done allows. Either one outside
+  where done changes can have taken the car from anywhere in the list is a contradiction (a change counted that the car
+  never made, or the list not describing the road here): the car may be anywhere. A lane the model places is never moved
+  into the counted range. lanes: paint_lanes' already."""
   lo, hi = (max(-done, 0), min(lane_count - 1 - done, lane_count - 1)) if done is not None else (0, lane_count - 1)
   if lo > hi:  # more changes one way than the list has lanes: it doesn't describe the road here
     lo, hi = 0, lane_count - 1
@@ -187,7 +196,8 @@ def nav_lane_span(lane_count: int, lanes: ModelLanes, right_hand_traffic: bool, 
     found.append(idx)
   if start is not None and done is not None:
     found.append(start[0] - (done - start[1]))
-  found = [min(max(i, lo), hi) for i in found]
+  if any(not lo <= i <= hi for i in found):
+    return 0, lane_count - 1
   return (min(found), max(found)) if found else (lo, hi)
 
 
@@ -385,6 +395,53 @@ class YellowHold:
       self.since = [latest] * 4
 
 
+class LineWatch:
+  """The car crossing a lane line, by the model's ego lane lines: they slide the other way as the car moves over, and the
+  model relabels them once it is across (the line it crossed becomes the far one). Moving toward a side, the line that way
+  slides in past CROSS_FRAC lane widths from where it lies, then is seen WRAP_FRAC lane widths out the far side of it: or
+  the line on the other side slides out, then back in past the middle. Either, within WATCH_S, is one lane moved.
+  DesireHelper's state alone can't say a change was made: it ends one the same way whether the car got over or not (lateral
+  dropped, the model's lane change probability stayed low, LANE_CHANGE_TIME_MAX)."""
+  CROSS_FRAC, WRAP_FRAC = 0.3, 0.15
+  WATCH_S = 4.
+
+  def __init__(self):
+    self.reset()
+
+  def reset(self):
+    self.moved = 0  # lanes moved by the lines, positive left
+    self._crossed = {LEFT: [-1., -1.], RIGHT: [-1., -1.]}  # s since the line on that side, the other, slid past crossing
+
+  def update(self, lanes: ModelLanes, dt: float) -> None:
+    if math.isnan(lanes.left_y) or math.isnan(lanes.right_y):
+      return
+    w = lanes.width
+    for k in (LEFT, RIGHT):
+      # u: each line's y the way the lines slide when the car moves toward k; the line on that side lies at -w/2, the other +w/2
+      lead, trail = (lanes.left_y, lanes.right_y) if k == LEFT else (-lanes.right_y, -lanes.left_y)
+      timers = self._crossed[k]
+      for i, (u, nominal) in enumerate(((lead, -w / 2), (trail, w / 2))):
+        if timers[i] >= 0.:
+          timers[i] += dt
+          if timers[i] > self.WATCH_S:
+            timers[i] = -1.
+        if u >= nominal + self.CROSS_FRAC * w:
+          timers[i] = 0.
+        elif timers[i] >= 0. and u <= nominal - self.WRAP_FRAC * w:
+          self.moved += k
+          self._crossed = {LEFT: [-1., -1.], RIGHT: [-1., -1.]}
+          return
+
+
+def counts_shifted(before: ModelLanes | None, after: ModelLanes, direction: int) -> bool:
+  """The model's lane counts moved one lane toward direction (LEFT or RIGHT) on a side it counts both times."""
+  if before is None:
+    return False
+  near, far = ('left', 'right') if direction == LEFT else ('right', 'left')
+  return (getattr(before, near + '_known') and getattr(after, near + '_known') and getattr(after, near) == getattr(before, near) - 1) or \
+    (getattr(before, far + '_known') and getattr(after, far + '_known') and getattr(after, far) == getattr(before, far) + 1)
+
+
 class Phase(IntEnum):
   IDLE = 0
   WARN = 1      # the countdown: the driver has been told which way and when
@@ -417,6 +474,9 @@ class LanePlanner:
     self._start = None                # (lane, done) where our first change for it started: nav_lane_span
     self._from_lane: int | None = None  # the lane in the lane list the change wanted now is counted from
     self.yellow = YellowHold()
+    self.lines = LineWatch()          # the car crossing a line, by the model's lines: a change is counted only on that
+    self._before: ModelLanes | None = None  # the model's lanes the frame before the change under way started
+    self._last_lanes: ModelLanes | None = None
     self._lc_dir: int | None = None   # direction of the DesireHelper lane change under way, 0 when unknown
     self._maneuver_id = None          # the maneuver the offer is for
     self._cooldown = 0.
@@ -447,6 +507,11 @@ class LanePlanner:
       self._done_id, self.done, self._start = maneuver_id, 0, None
     changing = lc_state in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing)
     paint = self.yellow.update(paint, v_ego, dt, changing)
+    if changing and self._lc_dir is None:
+      self.lines.reset()
+      self._before = self._last_lanes
+    self.lines.update(lanes, dt)
+    self._last_lanes = lanes
     if changing:  # never cancelled once started: the car is already moving over
       if self._lc_dir is None:  # ours, or the driver's by the blinker
         req = self.offer if self.phase == Phase.REQUEST else \
@@ -458,14 +523,20 @@ class LanePlanner:
       self.lane_unknown = False
       self._reset()
       return self._decision()
-    if self._lc_dir is not None:  # a change just ended, ours or the driver's: the lines have renumbered
-      self.yellow.shift(self._lc_dir)
-      if self._lc_dir and self.done is not None:
+    if self._lc_dir is not None:  # a change just ended, ours or the driver's
+      made = self._lc_dir != 0 and (self.lines.moved == self._lc_dir or counts_shifted(self._before, lanes, self._lc_dir))
+      self.yellow.shift(self._lc_dir if made else 0)
+      if made and self.done is not None:
         self.done += self._lc_dir
-      else:  # a way not seen: nothing to dead reckon from for the rest of this maneuver
+      else:  # a way not seen, or the car not seen to get there: nothing to dead reckon from for the rest of this maneuver
         self.done, self._start = None, None
       self._lc_dir = None
+      self.lines.reset()
       self._cooldown = max(self._cooldown, LC_COOLDOWN_S)
+    elif self.lines.moved:  # the car crossed a line with no change of DesireHelper's (openpilot off, a manual change)
+      self.yellow.shift(0)
+      self.done, self._start = None, None
+      self.lines.reset()
     if self.ours:  # DesireHelper is done with it, whether or not a held blinker keeps it in preLaneChange
       self.ours = False
       self.changes += 1
