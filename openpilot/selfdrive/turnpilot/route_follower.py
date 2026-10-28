@@ -31,7 +31,9 @@ committed, and a car slowing for a turn must not speed up into it). The junction
   sharp turn's, up to 10 m before its end, or a GPS jump forward) doesn't mean the car has made the turn. It is over
   only on real evidence: the car has turned it (DesireTiming clears it at its angle) or is dead-reckoned PASSED_DIST_M
   past it. Until then its id and its cap stay and no CLEAR goes; navd's next update after that takes up the next step;
-- a jump in the distance to the same junction is GPS noise: the dead-reckoned distance stands;
+- a jump in the distance to the same junction, up or down, is GPS noise: the dead-reckoned distance stands. While the
+  turn is committed navd's distance is never taken up for it: without bearings, navd moving on early to the next turn
+  the same way reads as the same junction too;
 - a new route (a new routeCount) whose first maneuver is the same junction (same_junction) within SAME_TURN_M of the
   dead-reckoned one is the same maneuver (a reroute onto the road the car is on, its origin snapped up to a reroute's
   25 m off), still where it was dead-reckoned. A new route that doesn't turn there (a reroute whose origin snapped past
@@ -295,8 +297,9 @@ class RouteFollower:
         # (module docstring), navd's updates new until then
         self.distance -= travelled
         return
-      if new_route or advanced or jumped:
-        self._held_id = self.maneuver_id  # a reroute onto the road the car is on, or GPS noise: the same turn
+      # the same junction, by the route: a reroute onto the road the car is on, GPS noise either way, navd moving on to
+      # the next turn the same way on a route without bearings. Its distance is dead-reckoned from here (module docstring)
+      self._held_id = self.maneuver_id
     if here and self._held_id == self.maneuver_id and (committed or (not new_route and same_bearings(maneuver, prev))):
       # the junction is where it was: while the turn is committed, and after it to its pass while navd is still on its
       # step (by its bearings: without them the next step may be another turn the same way)

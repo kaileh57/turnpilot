@@ -1083,6 +1083,49 @@ def test_navd_moving_on_early_keeps_the_committed_turn():
     assert sim.tp.follower.maneuver.side == -1, (at, nxt)
 
 
+
+def test_gps_jump_on_the_committed_turns_step_keeps_its_junction_where_it_was():
+  # the same route, the same step: navd's distance to the committed left reads off m from near m out, in one update or in
+  # every update after (a GPS jump, closer when off is negative). The junction is where it was dead-reckoned, whichever
+  # way it jumped: the turn isn't read as passed before the car gets there, so the cap doesn't lift into it
+  for off, near, stay in ((-20., 14., True), (-20., 14., False), (-25., 25., True), (-10., 14., True), (12., 12., True),
+                          (30., 12., True)):
+    sim = approach_with_desire_out(to=near + 5.)
+    while sim.distance() > near:
+      sim.step()
+    n = len(sim.trace)
+    def jumped(sim, instr, off=off, stay=stay, k=[0]):  # noqa: B006 (k counts the updates of this sim)
+      k[0] += 1
+      if (k[0] > 1 and not stay) or instr.maneuverModifier != 'left':
+        return instr, True
+      return nav_instruction(instr.maneuverDistance + off, "turn", "left", remaining=instr.distanceRemaining, junction=T_LEFT,
+                             ahead=[(1500. - sim.s + off, "turn", "right", junction_of("right"))]), True
+    sim.nav_filter = jumped
+    drive_through_the_left(sim, n)
+
+
+def test_navd_moving_on_early_to_a_turn_the_same_way_without_junction_data_keeps_the_committed_turn():
+  # a route without junction data: a right, and another right gap m on. navd moves on to the second at m before the
+  # first: with no bearings the two read as the same junction, but the committed right's junction stays where it was
+  # dead-reckoned: the same maneuver to the junction, its cap kept, the car not sped up into it, no CLEAR before it
+  for at, gap in ((8., 40.), (14., 50.)):
+    sim = Sim([(300., "turn", "right"), (300. + gap, "turn", "right"), (1500., "turn", "left", T_LEFT)])
+    while sim.distance() > at + 3. or sim.s < 10.:
+      sim.step()
+    assert sim.tp.turn_committed
+    n, turn = len(sim.trace), sim.tp.follower.maneuver_id
+    def early(sim, instr, at=at, gap=gap):
+      if 300. - at <= sim.s < 300. + gap - 10. and instr.maneuverModifier == 'right':
+        return nav_instruction(300. + gap - sim.s, "turn", "right", remaining=1500. - sim.s), True
+      return instr, True
+    sim.nav_filter = early
+    while sim.s < 305.:
+      sim.step(yaw_rate=-0.5 if sim.s > 298. else 0.)
+      if sim.s < 300.:
+        assert sim.tp.follower.maneuver_id == turn, (at, gap, sim.s)
+    assert_turn_held(sim, n)
+    assert all(p.desire != CLEAR_DESIRE for s, _, p in sim.trace[n:] if s < 302.), (at, gap)
+
 # --- map stop control (map_controls.py) ---
 
 def stop_at(sim, s_line, limit=60.):

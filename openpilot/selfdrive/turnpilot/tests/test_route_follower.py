@@ -128,7 +128,8 @@ def test_committed_turn_is_held_through_a_gap_in_the_route():
   for _ in range(19):
     rf.update(None, False, True, 6., DT_MDL, committed=True)
   rf.update(nav_instruction(8., route_count=1), True, True, 6., DT_MDL, committed=True)
-  assert rf.maneuver_id == first and not rf.replaced and not rf.passed and rf.distance == 8.
+  # ...still dead-reckoned while the turn is committed: navd's distance to the same junction is never taken up then
+  assert rf.maneuver_id == first and not rf.replaced and not rf.passed and abs(rf.distance - 7.7) < 1e-4
   # not committed, the maneuver is dropped as before
   rf = RouteFollower()
   rf.update(nav_instruction(60., route_count=1), True, True, 6., DT_MDL)
