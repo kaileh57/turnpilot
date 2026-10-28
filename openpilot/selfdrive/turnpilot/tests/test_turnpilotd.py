@@ -1767,3 +1767,21 @@ def test_a_slow_approach_never_times_the_turn_out_before_the_go():
       plan = sim.step()
       assert plan.desire in (Desire.turnLeft, Desire.none), cruise
     assert sim.tp.turn_committed, cruise
+
+
+def test_tiles_without_controls_are_said_out_loud():
+  # navd on tiles with no control data (the plain west_coast_usa sim tiles, no controls_built marker) reports
+  # 'unsupported': every plan on the route says map stops are unavailable, which selfdrived chimes and the UI shows,
+  # never a route that just looks clear of stops
+  from openpilot.selfdrive.ui.lib.turnpilot import status_text
+  sim = Sim([(600., "turn", "right"), (1500., "turn", "left")], controls_status='unsupported')
+  plans = [sim.step() for _ in range(int(20. / DT_MDL))]
+  routed = [p for p in plans if p.routeValid]
+  assert len(routed) > len(plans) // 2
+  assert all(p.controlAlert == 'mapControlsUnavailable' and str(p.mapControl.controlsStatus) == 'unsupported' for p in routed)
+  assert any(p.reason == 'Map stops/signals: unsupported' for p in routed)
+  assert status_text(routed[-1], True) == ('Map stops unavailable', 'unsupported')
+  # a navd from before controls ('none') has nothing to say
+  sim = Sim([(600., "turn", "right"), (1500., "turn", "left")])
+  plans = [sim.step() for _ in range(int(20. / DT_MDL))]
+  assert not any(p.controlAlert == 'mapControlsUnavailable' for p in plans)
