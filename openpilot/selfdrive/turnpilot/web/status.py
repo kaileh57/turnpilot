@@ -4,6 +4,7 @@ import time
 
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.navigation.helpers import latest_gps_source
+from openpilot.selfdrive.turnpilot.control_text import hold_text, is_map_reason
 
 SERVICES = ["deviceState", "navInstruction", "turnpilotPlan", "gpsLocation", "gpsLocationExternal"]
 SNAPSHOT_PERIOD = 0.5  # s between snapshots; the page polls every 2 s, so 2 Hz is plenty
@@ -35,7 +36,10 @@ def read_services(sm) -> dict:
     "at": time.monotonic(),
     "onroad": bool(up("deviceState") and sm["deviceState"].started),
     "route": route,
-    "plan": {"state": str(plan.state), "reason": plan.reason, "shadow": plan.shadow} if up("turnpilotPlan") else None,
+    "plan": {"state": str(plan.state), "reason": plan.reason, "shadow": plan.shadow,
+             "map": {"kind": str(plan.mapControl.kind), "action": str(plan.mapControl.action), "light": str(plan.mapControl.lightState),
+                     "source": str(plan.mapControl.lightSource), "status": str(plan.mapControl.controlsStatus)}}
+            if up("turnpilotPlan") else None,
     "gps": (sm[source].latitude, sm[source].longitude) if source else None,
   }
 
@@ -82,6 +86,12 @@ def format_status(snap: dict | None, destination, enabled: bool, metric: bool, n
   if snap is None or not fresh:
     snap = {"onroad": False, "route": None, "plan": None, "gps": None}
   route, plan = snap["route"], snap["plan"]
+  label = STATE_LABELS.get(plan["state"], plan["state"]) if plan else STATE_LABELS["offline"]
+  reason = plan["reason"] if plan else offline_reason(fresh, snap["onroad"], enabled)
+  m = (plan or {}).get("map")
+  held = hold_text(m["kind"], m["action"], m["light"], m["source"]) if m and plan["state"] == "holding" else None
+  if held is not None:  # stopped at a stop sign or signal ("Stopped at stop sign", "tap gas to go"), or another hold with it
+    label, reason = held[0], held[1] if is_map_reason(reason) or not reason else reason
   return {
     "reading": fresh,
     "onroad": snap["onroad"],
@@ -99,8 +109,8 @@ def format_status(snap: dict | None, destination, enabled: bool, metric: bool, n
     "turnpilot": {
       "enabled": enabled,
       "state": plan["state"] if plan else "offline",
-      "label": STATE_LABELS.get(plan["state"], plan["state"]) if plan else STATE_LABELS["offline"],
-      "reason": plan["reason"] if plan else offline_reason(fresh, snap["onroad"], enabled),
+      "label": label,
+      "reason": reason,
       "shadow": plan["shadow"] if plan else False,
     },
     "gps": snap["gps"] and {"latitude": snap["gps"][0], "longitude": snap["gps"][1]},

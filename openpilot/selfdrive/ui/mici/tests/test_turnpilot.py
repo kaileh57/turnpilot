@@ -147,3 +147,31 @@ class TestMapStatus:
     assert mapped_area_text(cache, None, '/sim/tiles') == 'local tiles (developer), no geofence'
     coverage_path(tmp_path).write_text('garbage')
     assert mapped_area_text(cache, (INDY[1], INDY[0])) == 'saved mapped area is unreadable'
+
+
+class TestMapControlStatus:
+  def test_hold_at_a_stop_sign_or_signal(self):
+    held = plan(state='holding', shouldStop=True, reason='Stopped at stop sign', mapControl={'kind': 'stop', 'action': 'held'})
+    assert status_text(held, True) == ('Stopped at stop sign', '')
+    waiting = plan(state='holding', shouldStop=True, reason='Stopped at stop sign — tap gas to go',
+                   mapControl={'kind': 'stop', 'action': 'awaitingDriver'})
+    assert status_text(waiting, True) == ('Stopped at stop sign', 'tap gas to go')
+    signal = plan(state='holding', shouldStop=True, reason='Stopped at signal — tap gas to go',
+                  mapControl={'kind': 'signal', 'action': 'awaitingDriver'})
+    assert status_text(signal, True) == ('Stopped at signal', 'tap gas to go')
+    red = plan(state='holding', shouldStop=True, reason='Red light (sim oracle)',
+               mapControl={'kind': 'signal', 'action': 'held', 'lightState': 'red', 'lightSource': 'simOracle'})
+    assert status_text(red, True) == ('Red light', 'sim oracle')
+    # another hold in force with it (a pedestrian) is what the detail says
+    ped = plan(state='holding', shouldStop=True, reason='pedestrian in path', mapControl={'kind': 'stop', 'action': 'awaitingDriver'})
+    assert status_text(ped, True) == ('Stopped at stop sign', 'pedestrian in path')
+    assert status_text(plan(state='holding', reason='Stop sign ahead', mapControl={'kind': 'stop', 'action': 'braking'}), True) == \
+      ('Holding', 'Stop sign ahead')
+    assert status_text(plan(state='holding', mapControl={'kind': 'stop', 'action': 'infeasible'}), True) == \
+      ('Cannot stop gently', 'take control')
+
+  def test_map_controls_unavailable_is_never_clear(self):
+    p = plan(state='following', reason='Map stops/signals: unsupported', mapControl={'controlsStatus': 'unsupported'})
+    assert status_text(p, True) == ('Map stops unavailable', 'unsupported')
+    assert status_text(plan(state='following', mapControl={'controlsStatus': 'ok'}), True) == ('', '')
+    assert status_text(plan(state='following', mapControl={'controlsStatus': 'none'}), True) == ('', '')

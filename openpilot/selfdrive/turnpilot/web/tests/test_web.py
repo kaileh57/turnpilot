@@ -957,3 +957,19 @@ class TestStatusReader(WebTestCase):
     assert 2 <= len(calls) <= 5, calls
     assert all(b - a >= 0.45 for a, b in zip(calls, calls[1:], strict=False)), calls
     assert reader.get()["plan"] is not None  # and the newest message still gets through
+
+
+class TestMapHoldStatus(OpenpilotTestCase):
+  def test_hold_and_unavailable_on_the_phone(self):
+    snap = {"at": 100., "onroad": True, "route": None, "gps": None,
+            "plan": {"state": "holding", "reason": "Stopped at stop sign — tap gas to go", "shadow": False,
+                     "map": {"kind": "stop", "action": "awaitingDriver", "light": "unknown", "source": "none", "status": "ok"}}}
+    tp = status.format_status(snap, None, True, False, now=101.)["turnpilot"]
+    assert (tp["label"], tp["reason"]) == ("Stopped at stop sign", "tap gas to go")
+    snap["plan"] = {"state": "following", "reason": "Map stops/signals: unsupported", "shadow": False,
+                    "map": {"kind": "none", "action": "none", "light": "unknown", "source": "none", "status": "unsupported"}}
+    tp = status.format_status(snap, None, True, False, now=101.)["turnpilot"]
+    assert (tp["label"], tp["reason"]) == ("Following route", "Map stops/signals: unsupported")
+    # an old snapshot without map fields still reads
+    snap["plan"] = {"state": "holding", "reason": "pedestrian in path", "shadow": False}
+    assert status.format_status(snap, None, True, False, now=101.)["turnpilot"]["label"] == "Holding"

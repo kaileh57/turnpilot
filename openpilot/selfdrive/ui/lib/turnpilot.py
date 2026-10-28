@@ -1,5 +1,6 @@
 """What TurnPilot shows, from turnpilotPlan and carState. No raylib here: soundd uses it for the prompt's chime."""
 from openpilot.cereal import custom, log
+from openpilot.selfdrive.turnpilot.control_text import controls_problem, hold_text, is_map_reason
 
 State = custom.TurnpilotPlan.State
 Desire = log.Desire
@@ -50,9 +51,17 @@ def status_text(plan, engaged: bool) -> tuple[str, str]:
     side = next((str(s) for s in (plan.laneChange, plan.signalPrompt) if str(s) != 'none'), '')
     title = f'Lane change {side}' if side else 'Lane change'
   elif plan.state == State.holding:
-    title, detail = 'Holding', plan.reason
+    mc = plan.mapControl
+    held = hold_text(str(mc.kind), str(mc.action), str(mc.lightState), str(mc.lightSource))
+    if held is not None:  # stopped at a stop sign or signal: and another hold in force with it (a pedestrian) is the detail
+      title, detail = held[0], held[1] if is_map_reason(plan.reason) or not plan.reason else plan.reason
+    else:
+      title, detail = 'Holding', plan.reason
   elif plan.state == State.arrived:
     title = 'Arrived'
+  elif controls_problem(str(plan.mapControl.controlsStatus)):
+    # no stop signs or signals from the map for this route: never shown as clear
+    title, detail = 'Map stops unavailable', controls_problem(str(plan.mapControl.controlsStatus))
   else:
     return '', ''
   if plan.shadow:
