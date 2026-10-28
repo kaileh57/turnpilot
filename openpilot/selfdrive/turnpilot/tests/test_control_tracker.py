@@ -136,6 +136,18 @@ def test_off_route_the_lookup_ahead_replaces_the_stale_routes_controls():
   assert abs(tr.controls[(OFF_ROUTE, 7)].d - (60. - 11 * 10. * DT_MDL + CORRECTION_M)) < 1e-6
 
 
+def test_off_route_the_lookup_that_takes_over_an_engaged_control_brings_its_own_distance():
+  """The stale route's engaged signal handed to the lookup's within ADOPT_M keeps its state, at the lookup's distance (the
+  road the car is on), marked jumped so the policy re-checks its stop."""
+  tr = ControlTracker()
+  step(tr, nav([(0, 'signal', 87.)]), v=10.)
+  c = tr.controls[(1, 0)]
+  c.engaged, c.state = True, 'state'
+  out = step(tr, nav([], valid=False, off=[(7, 'signal', 72.)]), valid=False, v=10.)
+  assert [o.key for o in out] == [(OFF_ROUTE, 7)]
+  assert out[0].engaged and out[0].state == 'state' and abs(out[0].d - 72.) < 1e-6 and out[0].jumped
+
+
 def test_off_route_an_engaged_control_takes_a_miss_then_goes():
   tr = ControlTracker()
   step(tr, nav([], valid=False, off=[(2, 'stop', 80.)]), valid=False)

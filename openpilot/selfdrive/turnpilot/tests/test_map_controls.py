@@ -624,6 +624,21 @@ def test_off_route_holds_for_the_signal_on_its_own_road_not_the_stale_routes():
   assert car.s > line + 2.
 
 
+def test_off_route_an_engaged_signal_the_lookup_takes_over_is_held_at_the_lookups_line():
+  """Engaged on the route's signal, then off the route: the lookup's signal of the same kind, nearer or further by up to
+  ADOPT_M, takes it over, and the car is held at the lookup's line (measured on the road the car is on), not at the
+  stale route's dead-reckoned one, braking no harder than the floor."""
+  for stale_off in (15., -15., 19.):
+    car = Car([(150., 'signal')])
+    while not any(c.engaged for c in car.policy.tracker.controls.values()):
+      car.step()
+    line = 150. - stale_off
+    car.nav_valid, car.off_status, car.off_route = False, 'ok', [(line, 'signal')]
+    out, dec = car.run_until(held, max_s=40.)
+    assert line - 3. < car.s < line + 0.5, (stale_off, car.s - line)
+    assert all(r[3] >= MAP_DECEL_MAX - 1e-6 for r in car.rows), stale_off
+
+
 def test_off_route_with_the_stops_ahead_unknown_caps_the_speed_and_says_so():
   car = Car([(400., 'signal')])
   car.run(2.)

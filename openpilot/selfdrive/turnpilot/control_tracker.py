@@ -18,9 +18,10 @@ Off the route with a destination (navd rerouting, no route yet, off it for a fix
 ahead of the car itself once a second (navInstruction.offRouteControls, routing/controls.py: controls_ahead). Those are
 the controls then, under (OFF_ROUTE, id), each lookup a fix as above: the stale route's go once one is in, as they're
 nowhere the car is going (BeamNG route_demo, 2026-10-28: the old route's signal dead-reckoned 106 m out while the car drove
-through the one on its road). An engaged one of theirs is taken over by a lookup's same-kind control within ADOPT_M, a held
-one stays. One a lookup no longer lists goes, an engaged one after OFF_ROUTE_MISS lookups in a row (one is a GPS hiccup; two,
-the car turned off that road). A route again takes over the engaged off-route ones the same way.
+through the one on its road). An engaged one of theirs is taken over by a lookup's same-kind control within ADOPT_M, at the
+lookup's distance (the stale route's dead-reckoned one is on a road the car may have left), a held one stays. One a
+lookup no longer lists goes, an engaged one after OFF_ROUTE_MISS lookups in a row (one is a GPS hiccup; two, the car
+turned off that road). A route again takes over the engaged off-route ones the same way.
 Off the route with a destination and nothing known ahead (off_route_unknown), past OFF_ROUTE_GRACE_S: the lookup pending,
 failed, unsupported or partial, or none fresh for OFF_LOOKUP_STALE_S (navd gone quiet). The policy caps the speed and says so.
 """
@@ -65,14 +66,20 @@ def from_msg(route_count: int, c) -> TrackedControl:
                         bool(c.crossSuspect))
 
 
-def adopt(o: TrackedControl, candidates) -> bool:
+def adopt(o: TrackedControl, candidates, measured: bool = False) -> bool:
   """An engaged or held control o handed to the same-kind one of candidates (another route's, or a lookup's) within ADOPT_M
-  that has no state of its own: it is the same control. False when there is none."""
+  that has no state of its own: it is the same control. False when there is none. measured: the candidate's own distance
+  is kept (a lookup's, on the road the car is on, over the stale route's dead-reckoned one), jumped when it moves the
+  stop by more than a fix would, so the policy re-checks it."""
   same = [n for n in candidates if n.kind == o.kind and n.state is None and not n.engaged and abs(n.d - o.d) < ADOPT_M]
   if not same:
     return False
   n = min(same, key=lambda n: abs(n.d - o.d))
-  n.d, n.engaged, n.held, n.state = o.d, o.engaged, o.held, o.state
+  if measured:
+    n.jumped = abs(n.d - o.d) > CORRECTION_M
+  else:
+    n.d = o.d
+  n.engaged, n.held, n.state = o.engaged, o.held, o.state
   return True
 
 
@@ -144,7 +151,7 @@ class ControlTracker:
         continue
       # the stale route's: nowhere the car is going. One the car is stopping for goes on as the lookup's same one
       del self.controls[k]
-      if c.engaged and not adopt(c, new.values()):
+      if c.engaged and not adopt(c, new.values(), measured=True):
         cloudlog.event("turnpilot.control_stale_dropped", kind=c.kind, key=list(c.key), d=round(c.d, 1))
     for k, c in list(self.controls.items()):
       if k[0] != OFF_ROUTE or k in measured:
