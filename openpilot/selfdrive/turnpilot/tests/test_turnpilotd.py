@@ -1469,3 +1469,56 @@ def test_a_gas_brush_on_the_approach_to_a_map_stop_never_releases_the_detectors_
     held_s = sim.s
     sim.run(4., objects=stream)
     assert sim.s - held_s < 0.05, brush_at
+
+
+def test_a_handback_on_the_approach_keeps_the_unprotected_lefts_stop():
+  # the detector stops 12, 6 or 3 m before the unprotected left's stop point: openpilot steers on through the 3 s soft
+  # disable with the turn's desire out. The stop at the line stays, as a stop sign's would: the car never rolls past the
+  # hold line into the blind junction on the plan
+  for before_stop in (12., 6., 3.):
+    sim = Sim(TURNS_AHEAD)
+    sim.go_taps = False
+    while 291. - sim.s > before_stop or sim.s < 10.:
+      sim.step()
+    plans = []
+    for _ in range(int((6. + DETECTOR_DEADLINE_S) / DT_MDL)):
+      plans.append(sim.step(available=False))
+    assert any(p.handback != Handback.none for p in plans)
+    assert 300. - sim.s > HOLD_LINE_M, before_stop
+    assert str(plans[-1].mapControl.kind) == 'unprotectedTurn' and plans[-1].shouldStop, before_stop
+
+
+def test_the_detector_back_after_a_short_outage_still_stops_at_the_unprotected_left():
+  # the detector drops out on the approach to an unprotected left and comes back before openpilot lets go: the turn is
+  # taken up, never driven across the blind junction without its stop at the line and the driver's go
+  for outage, start in ((2., 25.), (2.5, 20.), (2., 16.), (1.5, 14.)):
+    sim = Sim(TURNS_AHEAD)
+    sim.go_taps = False
+    while 300. - sim.s > start or sim.s < 10.:
+      sim.step()
+    for _ in range(int(outage / DT_MDL)):
+      sim.step(available=False)
+    while not (sim.v < 0.05 or sim.s > 300.):
+      sim.step()
+    assert sim.s < 300. - HOLD_LINE_M, (outage, start, 300. - sim.s)
+    plan = sim.run(2.) or sim.trace[-1][2]
+    assert plan.shouldStop and plan.controlPrompt == 'unprotectedTurnGo', (outage, start)
+
+
+def test_an_unprotected_left_taken_up_too_close_to_stop_for_is_skipped_out_loud():
+  # the detector drops out with the left's desire out but its stop not yet engaged (the car fast), and comes back where
+  # the stop at the line can't be made at -2.0: the turn isn't driven across the blind junction without its stop, it is
+  # skipped out loud with its desire cleared, as a dropped turn too close to pulse again is
+  sim = Sim(TURNS_AHEAD, cruise=8.)
+  sim.go_taps = False
+  while not (sim.tp.desires.started and sim.tp.desires.maneuver_id == sim.tp.follower.maneuver_id):
+    sim.step()
+  sim.tp.map_controls.turn = None  # its stop not engaged yet when the detector goes (a car faster than its engage distance)
+  for _ in range(int(2.5 / DT_MDL)):
+    sim.step(available=False)
+    sim.tp.map_controls.turn = None
+  sim.v = 8.
+  plans = [sim.step() for _ in range(int(1. / DT_MDL))]
+  assert any(p.tooFastToTurn for p in plans)
+  assert any(p.desire == CLEAR_DESIRE for p in plans) or not sim.tp.desires.side
+  assert not any(p.desire == Desire.turnLeft for p in plans[3:])

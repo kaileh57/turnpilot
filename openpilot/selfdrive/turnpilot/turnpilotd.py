@@ -66,8 +66,8 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.desire_timing import ENTRY_M, TURN_STARTED_DEG, DesireTiming
 from openpilot.selfdrive.turnpilot.handback import Handback
 from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S, CLEAR_DESIRE
-from openpilot.selfdrive.turnpilot.map_controls import (KEEP_TURN, YELLOW_DECEL, YELLOW_DECEL_MAX, MapControlPolicy, light_input,
-                                                         turn_stop_feasible, unprotected_turn)
+from openpilot.selfdrive.turnpilot.map_controls import (KEEP_TURN, PROTECT_PAST_M, YELLOW_DECEL, YELLOW_DECEL_MAX, MapControlPolicy,
+                                                         light_input, turn_stop_feasible, unprotected_turn)
 from openpilot.selfdrive.turnpilot.lane_planner import (OPENPILOT_SIGNALS_BRANDS, LanePlanner, lane_change_window, lane_mismatch,
                                                          model_lanes_from_msg)
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, LEFT, TURN, RouteFollower
@@ -334,12 +334,17 @@ class TurnPilot:
     # Its stop is engaged only where it can be made at -2.0; one that can't (first seen too close at speed) is skipped
     skipped = self.skip.skipped and self.skip.maneuver_id == rf.maneuver_id
     driving = acting and rf.maneuver_id != self.dropped_id and not skipped
+    # an engaged one stays through a handback and after it, as a stop sign's stop does: the stops in force stay, and the
+    # detector back is no reason to cross the blind junction without its stop and the driver's go
+    engaged = self.map_controls.turn_engaged(rf.maneuver_id) and not skipped
     turn, stop_infeasible = None, False
-    if driving and unprotected_turn(upcoming, right_hand_traffic):
-      if self.map_controls.turn_engaged(rf.maneuver_id) or turn_stop_feasible(v_ego, rf.distance):
+    if (driving or engaged) and unprotected_turn(upcoming, right_hand_traffic):
+      if engaged or turn_stop_feasible(v_ego, rf.distance):
         turn = (rf.maneuver_id, rf.distance, 'left' if upcoming.side == LEFT else 'right')
       else:
         stop_infeasible = True
+    elif engaged and upcoming is None:
+      turn = KEEP_TURN  # the route gone with the handback: it carries on, dead-reckoned
     mapd = self.map_update(sm, v_ego, cs.gasPressed, turn)
 
     # too fast to make the turn: skipped, so nothing below acts on it (no desire, no cap, no turn holds or lane changes)
@@ -465,11 +470,22 @@ class TurnPilot:
     openpilot was off gets a fresh pulse when the car can still make it and is ENTRY_M or more out (the entry pulse's
     lead: the first pulse may still be in the model's queue). Otherwise it is skipped out loud (tooFastToTurn, navd
     reroutes), and as its first pulse may still be in the model's queue, that is cleared (CLEAR_DESIRE) and the turn's
-    cap kept until it is passed: the model never turns from it at speed, and the car never speeds up into the junction."""
+    cap kept until it is passed: the model never turns from it at speed, and the car never speeds up into the junction.
+    So is an unprotected turn whose stop at the line never engaged and can't be made now: never crossed blind."""
     d = self.desires
     dropped = self.dropped_id == rf.maneuver_id and d.maneuver_id == rf.maneuver_id
     self.dropped_id = self.turn_cap_id = self.turn_held_id = None
     if not dropped or upcoming is None:
+      return
+    stop_d = self.map_controls.stop_ahead()
+    blind = unprotected_turn(upcoming, right_hand_traffic) and not self.map_controls.turn_engaged(rf.maneuver_id) and \
+      not turn_stop_feasible(v_ego, rf.distance) and not (stop_d is not None and stop_d <= rf.distance + PROTECT_PAST_M)
+    if blind and d.started and d.side != 0 and not d.done and d.turned_deg < TURN_STARTED_DEG:
+      # an unprotected turn whose stop never engaged, too close now to stop for at its line: never crossed blind on the
+      # desire still out, skipped out loud like one too close to pulse again (its desire cleared, its cap kept)
+      self.skip.skip(upcoming, rf.distance, rf.maneuver_id, v_ego, 'unprotectedStop')
+      d.cancel()
+      self.skip_cap_id = rf.maneuver_id
       return
     if d.started and d.side != 0 and not d.done and d.held_off and d.turned_deg < TURN_STARTED_DEG:
       curb_side = (upcoming.side == LEFT) != right_hand_traffic
