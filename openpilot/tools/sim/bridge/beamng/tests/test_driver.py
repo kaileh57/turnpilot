@@ -44,17 +44,17 @@ def test_stalk_waits_for_the_countdown():
 
 # --- the driver's go at a stop (driver.GasTaps) ---
 
-def plan_msg(prompt='none', state='following', should_stop=False):
+def plan_msg(prompt='none', state='following', should_stop=False, handback='none', fault='none'):
   msg = messaging.new_message('turnpilotPlan')
   p = msg.turnpilotPlan
-  p.controlPrompt, p.state, p.shouldStop = prompt, state, should_stop
+  p.controlPrompt, p.state, p.shouldStop, p.handback, p.fault = prompt, state, should_stop, handback, fault
   return msg.as_reader().turnpilotPlan
 
 
-def run_taps(taps, plan, seconds, v=0., engaged=True, green=None, t0=0.):
+def run_taps(taps, plan, seconds, v=0., engaged=True, green=None, t0=0., plan_age_s=0.):
   out = []
   for k in range(int(seconds / 0.05)):
-    out.append(taps.update(t0 + k * 0.05, plan, engaged, v, green))
+    out.append(taps.update(t0 + k * 0.05, plan, engaged, v, green, plan_age_s=plan_age_s))
   return out
 
 
@@ -133,3 +133,31 @@ def test_taps_are_short_and_spaced():
   out = run_taps(taps, plan_msg('stopSignGo', 'holding', True), 10.)
   pressed = sum(1 for g in out if g > 0.) * 0.05
   assert len(taps.log) >= 2 and abs(pressed - len(taps.log) * TAP_S) < 0.11
+
+
+def test_never_a_tap_while_turnpilot_hands_back_is_out_or_its_plan_is_stale():
+  # a prompt left over from before a handback, a fault or a stale plan is no go: the driver doesn't press on it (a tap
+  # under the detector-stopped alert read as the driver's disengagement in BeamNG)
+  from openpilot.tools.sim.bridge.beamng.driver import GasTaps
+  for plan, age in ((plan_msg('signalGo', 'unavailable', True, handback='detectorStopped'), 0.),
+                    (plan_msg('signalGo', 'holding', True, handback='detectorStopped'), 0.),
+                    (plan_msg('stopSignGo', 'unavailable', True), 0.),
+                    (plan_msg('stopSignGo', 'disabled', True, fault='error'), 0.),
+                    (plan_msg('unprotectedTurnGo', 'holding', True), 0.6)):
+    taps = GasTaps(stall_tap=True)
+    assert max(run_taps(taps, plan, 6., green=True, plan_age_s=age)) == 0. and not taps.log
+
+
+def test_a_tap_under_way_stops_when_turnpilot_hands_back():
+  from openpilot.tools.sim.bridge.beamng.driver import STOPPED_TAP_S, TAP_GAP_S, TAP_GAS, TAP_S, GasTaps
+  taps = GasTaps()
+  out = run_taps(taps, plan_msg('stopSignGo', 'holding', True), STOPPED_TAP_S + 0.1)
+  assert out[-1] == TAP_GAS
+  out = run_taps(taps, plan_msg('stopSignGo', 'unavailable', True, handback='detectorStopped'), 2., t0=STOPPED_TAP_S + 0.1)
+  assert max(out) == 0.
+  # back again: the 2 s standing starts over from the handback's end, no tap the instant it clears
+  t_back = STOPPED_TAP_S + 2.1
+  out = run_taps(taps, plan_msg('stopSignGo', 'holding', True), 6., t0=t_back)
+  first = out.index(TAP_GAS)
+  assert t_back + STOPPED_TAP_S > STOPPED_TAP_S + TAP_S + TAP_GAP_S  # past the usual spacing after the cut tap
+  assert abs(first * 0.05 - STOPPED_TAP_S) < 0.06

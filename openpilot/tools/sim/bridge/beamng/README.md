@@ -259,7 +259,8 @@ clears on every manager start); otherwise it rejects it out loud and holds. The 
 the gas where a driver gives the go (`driver.GasTaps`, each tap logged with its reason and how long the car had stood):
 once the car has stood 2 s where TurnPilot asks for a go, at a stop sign TurnPilot holds past its dwell, at an
 unprotected left's hold line, at an unchecked signal only when the ground-truth light is green (`--signal-tap off`
-never), and standing engaged with nothing held. `light_oracle.py` and `probe_signals.py` haven't been run against the
+never), and standing engaged with nothing held. Never while TurnPilot hands back, is unavailable or faulted, or its
+plan is stale: a prompt left up then is no go. `light_oracle.py` and `probe_signals.py` haven't been run against the
 game yet: check the published states against the HUD first.
 
 ## Chase view

@@ -268,12 +268,13 @@ class Runner:
     """The driver taps the stalk when TurnPilot asks for a signal (PLAN: Tesla can't signal for openpilot), and lets go
     when it stops asking, which it does as soon as the lane change starts. And taps the gas where a driver gives the go
     (driver.GasTaps): at a stop sign TurnPilot holds past its dwell, at a signal it hasn't checked when the light really
-    is green, and standing with nothing held (the model not pulling away)."""
+    is green, and standing with nothing held (the model not pulling away). Never on a stale plan or a handback."""
     plan = self.sm['turnpilotPlan'] if self.sm.seen['turnpilotPlan'] else None
     p = str(plan.signalPrompt) if plan is not None else 'none'
     b.blinker = (p == 'left', p == 'right')
-    b.driver_gas = self.taps.update(time.monotonic(), plan, self.sm['selfdriveState'].enabled, b.simulator_state.wheel_speed,
-                                    ground_truth_green(b.cfg, self.sm, time.monotonic()))
+    now = time.monotonic()
+    b.driver_gas = self.taps.update(now, plan, self.sm['selfdriveState'].enabled, b.simulator_state.wheel_speed,
+                                    ground_truth_green(b.cfg, self.sm, now), plan_age_s=now - self.sm.recv_time['turnpilotPlan'])
 
   def end_run(self, b, outcome: str, detail: str = ''):
     b.auto_engage = False

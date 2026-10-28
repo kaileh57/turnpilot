@@ -6,8 +6,10 @@ before working the stalk, as a driver who lets it run would, so the countdown ru
 countdown is the go-ahead early (lane_planner.py), which would skip it."""
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal import custom, log
+from openpilot.selfdrive.turnpilot.hooks import PLAN_MAX_AGE_S
 
 LaneChange = custom.TurnpilotPlan.LaneChange
+Handback, State, Fault = custom.TurnpilotPlan.Handback, custom.TurnpilotPlan.State, custom.TurnpilotPlan.Fault
 STARTING = log.LaneChangeState.laneChangeStarting
 
 
@@ -57,7 +59,10 @@ class GasTaps:
     prompt (plan not holding, no shouldStop): the model stopped on its own. Off, a car left standing (no pull-away after a
     hold let go, as BeamNG ped_crosswalk_right did) is the run's failure to see, not the driver's to push on, and a push
     in a queue would drive the car at the lead (scenarios/score.py fails a press TurnPilot asked no go for).
-  Never while TurnPilot holds the car for anything else: a pedestrian, the stop sign's dwell."""
+  Never while TurnPilot holds the car for anything else: a pedestrian, the stop sign's dwell. And never while TurnPilot
+  isn't acting, whatever its prompt says: a handback (plan.handback), unavailable (the detector not started, or handed
+  back), a fault, or no fresh plan (older than hooks.PLAN_MAX_AGE_S, as selfdrived takes it): a tap under way stops, and
+  the car's standing counts again from when it is back."""
 
   def __init__(self, signal_tap: bool = True, stall_tap: bool = False):
     self.signal_tap = signal_tap
@@ -68,9 +73,13 @@ class GasTaps:
     self._tap_until = -1.
     self._next_ok = -1.
 
-  def update(self, t: float, plan, engaged: bool, v: float, green: bool | None = None) -> float:
+  def update(self, t: float, plan, engaged: bool, v: float, green: bool | None = None, plan_age_s: float = 0.) -> float:
     """The gas to hold now (0..1). plan: turnpilotPlan (None if none); green: the ground-truth light ahead is green
-    (None: unknown)."""
+    (None: unknown); plan_age_s: s since the plan was received."""
+    if plan is None or plan_age_s > PLAN_MAX_AGE_S or plan.handback != Handback.none or plan.state == State.unavailable or \
+       plan.fault != Fault.none:
+      self._tap_until, self._since, self._stopped = -1., None, None
+      return 0.
     if t < self._tap_until:
       return TAP_GAS
     standing = engaged and v < STANDING

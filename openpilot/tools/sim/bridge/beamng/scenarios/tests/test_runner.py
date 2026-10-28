@@ -135,12 +135,14 @@ class FakeSM:
     self.seen = dict.fromkeys(run.SERVICES, False)
     self.updated = dict.fromkeys(run.SERVICES, False)
     self.valid = dict.fromkeys(run.SERVICES, True)
+    self.recv_time = dict.fromkeys(run.SERVICES, 0.)
 
   def update(self, timeout=0):
     for s in run.SERVICES:
       self.updated[s] = s in self.world.updated
       if self.updated[s]:
         self.seen[s] = True
+        self.recv_time[s] = self.world.clock.t
         self.valid[s] = self.world.msgs[s].valid
     self.world.updated = set()
 
@@ -229,12 +231,19 @@ def test_driver_taps_the_gas_where_turnpilot_asks_for_a_go(monkeypatch):
   tp = messaging.new_message('turnpilotPlan')
   tp.turnpilotPlan.controlPrompt, tp.turnpilotPlan.state, tp.turnpilotPlan.shouldStop = 'stopSignGo', 'holding', True
   msgs['selfdriveState'], msgs['turnpilotPlan'] = ss, tp
-  runner.sm = type('SM', (), {'seen': {'turnpilotPlan': True, 'turnpilotLights': False},
+  runner.sm = type('SM', (), {'seen': {'turnpilotPlan': True, 'turnpilotLights': False}, 'recv_time': {'turnpilotPlan': clock.t},
                               '__getitem__': lambda self, s: getattr(msgs[s].as_reader(), s)})()
   b = bridge()
   b.simulator_state.wheel_speed = 0.
   gas = []
   for _ in range(60):
+    runner.driver(b)
+    gas.append(b.driver_gas)
+    clock.t += 0.05
+  assert max(gas) == 0.  # turnpilotd went quiet: its last prompt is no go
+  gas = []
+  for _ in range(60):
+    runner.sm.recv_time['turnpilotPlan'] = clock.t  # fresh at 20 Hz
     runner.driver(b)
     gas.append(b.driver_gas)
     clock.t += 0.05

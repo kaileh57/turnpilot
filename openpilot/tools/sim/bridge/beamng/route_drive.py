@@ -206,7 +206,9 @@ class RouteDrive:
     # the light really is green, and standing with nothing held (the model stopped on its own): a gas tap, an override,
     # not a disengagement. Each logged with its reason and where
     n = len(self.taps.log)
-    b.driver_gas = self.taps.update(t, plan, enabled, s.wheel_speed, ground_truth_green(b.cfg, sm, time.monotonic()))
+    now = time.monotonic()
+    b.driver_gas = self.taps.update(t, plan, enabled, s.wheel_speed, ground_truth_green(b.cfg, sm, now),
+                                    plan_age_s=now - sm.recv_time['turnpilotPlan'])
     for tap in self.taps.log[n:]:
       tap.update(x=round(float(xy[0]), 1), y=round(float(xy[1]), 1), leg=self.leg + 1)
     timeout = SETTLE + ROUTE_TIMEOUT + 60.0 + route_length(self.route) / MIN_SPEED
