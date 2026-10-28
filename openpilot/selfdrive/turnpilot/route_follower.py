@@ -27,13 +27,19 @@ committed, and a car slowing for a turn must not speed up into it). The junction
 - an invalid navInstruction for the same route (navd off the step for a fix, rerouting, the destination removed) or navd
   going quiet past NAV_STALE_S is a gap: the maneuver stays, dead-reckoned, under the same id, until navd's next valid
   update carries on with it or the turn is over (cleared at its angle, or dead-reckoned PASSED_DIST_M past it);
-- a jump in the distance from further than REPLACED_FROM_M is GPS noise: the dead-reckoned distance stands. Closer in,
-  navd may move on early to the next step (a sharp turn's, up to 10 m before its end), but that one turns from the
-  heading this turn ends on: a jump to a maneuver with this one's bearings (same_junction) is noise there too;
+- navd on another step (not same_junction) is a gap too, however close in: navd moving on early to the next step (a
+  sharp turn's, up to 10 m before its end, or a GPS jump forward) doesn't mean the car has made the turn. It is over
+  only on real evidence: the car has turned it (DesireTiming clears it at its angle) or is dead-reckoned PASSED_DIST_M
+  past it. Until then its id and its cap stay and no CLEAR goes; navd's next update after that takes up the next step;
+- a jump in the distance to the same junction is GPS noise: the dead-reckoned distance stands;
 - a new route (a new routeCount) whose first maneuver is the same junction (same_junction) within SAME_TURN_M of the
   dead-reckoned one is the same maneuver (a reroute onto the road the car is on, its origin snapped up to a reroute's
-  25 m off). A new route that doesn't turn there (a reroute whose origin snapped past the junction, a destination
-  changed from the phone) is a gap too: the turn is held to its end, and the new route taken up after.
+  25 m off), still where it was dead-reckoned. A new route that doesn't turn there (a reroute whose origin snapped past
+  the junction, a destination changed from the phone) is a gap: the turn is held to its end, and the new route taken up
+  after.
+After a reroute or a jump navd's distance to the junction can stay off by that much: the turn's cap would lift, or the
+turn read as passed, before the car gets there. So from then on that junction is dead-reckoned, while the turn is
+committed and after it while navd is still on its step (by its bearings), and never taken up again as a new maneuver.
 """
 from dataclasses import dataclass
 
@@ -185,6 +191,7 @@ class RouteFollower:
     self._passed_id = -1
     self._stale_t = 0.
     self._moved_on_from: tuple[str, str] | None = None  # (type, modifier) of the NONE step left for the turn after it
+    self._held_id = -1  # a committed maneuver navd's distance was off for (a reroute, GPS noise): dead-reckoned to its end
 
   @property
   def upcoming(self) -> Maneuver | None:
@@ -277,16 +284,19 @@ class RouteFollower:
     advanced = self.distance < ADVANCE_NEAR_M and distance > self.distance + NEW_MANEUVER_JUMP_M
     jumped = distance > self.distance + ROUTE_JUMP_M
     same = self.valid and prev is not None and (maneuver.type, maneuver.modifier) == (prev.type, prev.modifier)
+    here = self.valid and prev is not None and same_junction(maneuver, prev)
     if committed and self.valid and prev is not None:
-      if new_route:
-        if not (same_junction(maneuver, prev) and abs(distance - self.distance) <= SAME_TURN_M):
-          # a new route that doesn't turn there: a gap, the turn held to its end (module docstring), the new route's
-          # updates new until then
-          self.distance -= travelled
-          return
-        advanced = jumped = False  # a reroute onto the road the car is on: the same turn
-      elif same and (advanced or jumped) and (self.distance > REPLACED_FROM_M or same_bearings(maneuver, prev)):
-        advanced, jumped, distance = False, False, self.distance - travelled  # GPS noise: the junction is where it was
+      if not here or (new_route and abs(distance - self.distance) > SAME_TURN_M):
+        # navd on another step (moved on early, a new route that doesn't turn there): a gap, the turn held to its end
+        # (module docstring), navd's updates new until then
+        self.distance -= travelled
+        return
+      if new_route or advanced or jumped:
+        self._held_id = self.maneuver_id  # a reroute onto the road the car is on, or GPS noise: the same turn
+    if here and self._held_id == self.maneuver_id and (committed or (not new_route and same_bearings(maneuver, prev))):
+      # the junction is where it was: while the turn is committed, and after it to its pass while navd is still on its
+      # step (by its bearings: without them the next step may be another turn the same way)
+      advanced, jumped, distance = False, False, self.distance - travelled
     self.route_count = route_count
     new = not same or advanced or jumped or (new_route and not committed)
     if new:

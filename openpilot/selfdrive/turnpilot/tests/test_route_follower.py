@@ -160,12 +160,13 @@ def test_committed_turn_survives_a_distance_jump_and_a_reroute_onto_the_same_tur
   first = rf.maneuver_id
   rf.update(nav_instruction(90., route_count=1), True, True, 5., DT_MDL, committed=True)
   assert rf.maneuver_id == first and not rf.replaced and abs(rf.distance - 29.75) < 1e-4
-  # a reroute (a new routeCount) that starts with the same turn where the car is: the same maneuver
+  # a reroute (a new routeCount) that starts with the same turn where the car is: the same maneuver, still where it
+  # was dead-reckoned
   rf.update(nav_instruction(27., route_count=2), True, True, 5., DT_MDL, committed=True)
-  assert rf.maneuver_id == first and not rf.replaced and rf.distance == 27.
+  assert rf.maneuver_id == first and not rf.replaced and abs(rf.distance - 29.5) < 1e-4
   # a new route that doesn't turn there (a destination changed from the phone): the committed turn is held to its end
   rf.update(nav_instruction(284., route_count=3), True, True, 5., DT_MDL, committed=True)
-  assert rf.maneuver_id == first and not rf.replaced and rf.upcoming is not None and abs(rf.distance - 26.75) < 1e-4
+  assert rf.maneuver_id == first and not rf.replaced and rf.upcoming is not None and abs(rf.distance - 29.25) < 1e-4
   # ...and once it is over, the new route is taken up: its turn a new maneuver
   rf.update(nav_instruction(283., route_count=3), True, True, 5., DT_MDL, committed=False)
   assert rf.maneuver_id != first and rf.distance == 283. and rf.upcoming is not None
@@ -185,11 +186,23 @@ def test_committed_turn_survives_a_jump_close_in():
   first = committed_approach(rf, 12.)
   rf.update(nav_instruction(72., junction=LEFT_90, route_count=1), True, True, 6., DT_MDL, committed=True)
   assert rf.maneuver_id == first and not rf.passed and not rf.replaced and abs(rf.distance - 11.7) < 1e-4
-  # navd moving on early to the next step, a left from the heading this one ends on: the left was passed
-  rf = RouteFollower()
-  first = committed_approach(rf, 4.)
-  rf.update(nav_instruction(200., junction=(270., 180., 2), route_count=1), True, True, 6., DT_MDL, committed=True)
-  assert rf.maneuver_id != first and rf.passed and not rf.replaced
+  # navd moving on early to the next step, a left from the heading this one ends on: the left is held, dead-reckoned,
+  # until it is over (the car turned it, or dead-reckoned past it), and the next step taken up after
+  for close, then in ((4., 'turned'), (15., 'turned'), (4., 'past')):
+    rf = RouteFollower()
+    first = committed_approach(rf, close)
+    next_left = nav_instruction(200., junction=(270., 180., 2), route_count=1)
+    rf.update(next_left, True, True, 6., DT_MDL, committed=True)
+    assert rf.maneuver_id == first and not rf.passed and not rf.replaced and abs(rf.distance - (close - 0.3)) < 1e-4
+    assert rf.upcoming is not None
+    passed = 0
+    for i in range(int(6. / DT_MDL)):
+      committed = then == 'past' and not passed
+      rf.update(next_left if i % 20 == 19 else None, i % 20 == 19, True, 6., DT_MDL, committed=committed)
+      passed += rf.passed
+      if committed:
+        assert rf.maneuver_id == first and not rf.replaced, (close, then)
+    assert passed == 1 and rf.maneuver_id != first and rf.distance == 200. and not rf.replaced, (close, then)
 
 
 def test_reroute_onto_the_same_committed_turn_from_further_off():
@@ -197,7 +210,24 @@ def test_reroute_onto_the_same_committed_turn_from_further_off():
   rf = RouteFollower()
   first = committed_approach(rf, 14.)
   rf.update(nav_instruction(39., junction=LEFT_90, route_count=2), True, True, 6., DT_MDL, committed=True)
-  assert rf.maneuver_id == first and not rf.replaced and rf.distance == 39.
+  assert rf.maneuver_id == first and not rf.replaced and abs(rf.distance - 13.7) < 1e-4
+  # and the new route's updates after it, still that far off, don't move the junction either (the turn's cap would lift
+  # or the turn be read as passed before the car gets there); taken from navd once the turn is over
+  for off in (25., -20.):
+    rf = RouteFollower()
+    first = committed_approach(rf, 14.)
+    rf.update(nav_instruction(14. + off, junction=LEFT_90, route_count=2), True, True, 6., DT_MDL, committed=True)
+    truth, passed_at = 13.7, None
+    for i in range(int(6. / DT_MDL)):
+      truth -= 0.3
+      instr = nav_instruction(truth + off, junction=LEFT_90, route_count=2) if i % 20 == 19 else None
+      rf.update(instr, instr is not None, True, 6., DT_MDL, committed=passed_at is None)
+      if passed_at is None and rf.passed:
+        passed_at = truth
+      if passed_at is None:
+        assert rf.maneuver_id == first and not rf.replaced and abs(rf.distance - truth) < 1e-3, off
+    assert passed_at is not None and passed_at < -14., off
+    assert rf.maneuver_id == first, off  # never the same junction again under a new id
   # the next left on, the same way from the same road (a block on): a new route that doesn't turn here
   rf = RouteFollower()
   first = committed_approach(rf, 14.)

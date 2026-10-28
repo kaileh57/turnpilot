@@ -965,3 +965,62 @@ def test_fault_keeps_the_commitment_to_the_turn_under_way():
     # nor is the turn under way dropped: not skipped, its cap kept, its desire not pulsed afresh
     assert not any(p.tooFastToTurn for p in after) and all(p.speedCap < 5. for p in after), how
     assert sim.tp.desires.pulses == pulses and sim.tp.follower.maneuver_id == turn, how
+
+
+def drive_through_the_left(sim, n):
+  """Drive the committed left at s=300 from trace index n, turning from 2 m before it, and check it was held: the same
+  maneuver until the junction, its cap kept and the car not sped up into it, no CLEAR until the car is round it, no
+  skip. The left is round (80 of its 90 degrees) about 10 m past the junction."""
+  turn = sim.tp.follower.maneuver_id
+  while sim.s < 325.:
+    sim.step(yaw_rate=0.5 if 298. < sim.s < 312. else 0.)
+    if sim.s < 300.:
+      assert sim.tp.follower.maneuver_id == turn
+  assert_turn_held(sim, n)
+  v_n = sim.trace[n - 1][1]
+  assert max(v for s, v, _ in sim.trace[n:] if s < 305.) <= v_n + 0.05
+  assert all(p.desire != CLEAR_DESIRE for s, _, p in sim.trace[n:] if s < 305.)
+  assert not any(p.tooFastToTurn for _, _, p in sim.trace)
+
+
+def test_reroute_onto_the_same_turn_keeps_its_junction_where_it_was():
+  # a reroute near m before the committed left (one invalid update, then routeCount 1), whose same left reads off m
+  # further on (its origin snapped back) or closer (snapped forward) in every update after: the junction is where it
+  # was dead-reckoned, so the cap doesn't lift and the turn isn't read as passed before the car gets there
+  for off, near in ((25., 14.), (-20., 14.), (-25., 14.), (-20., 25.), (25., 6.)):
+    sim = approach_with_desire_out(to=near + 5.)
+    while sim.distance() > near:
+      sim.step()
+    n = len(sim.trace)
+    def snapped(sim, instr, off=off, k=[0], J=300., NEXT=1500.):  # noqa: B006 (k counts the updates of this sim)
+      k[0] += 1
+      if k[0] == 1:
+        return invalid_nav(sim)
+      if instr.maneuverDistance > -10.:
+        return nav_instruction(J - sim.s + off, "turn", "left", remaining=NEXT - sim.s, junction=junction_of("left"),
+                               route_count=1, ahead=[(NEXT - sim.s + off, "turn", "right", junction_of("right"))]), True
+      return nav_instruction(NEXT - sim.s + off, "turn", "right", remaining=NEXT - sim.s, junction=junction_of("right"),
+                             route_count=1), True
+    sim.nav_filter = snapped
+    drive_through_the_left(sim, n)
+
+
+def test_navd_moving_on_early_keeps_the_committed_turn():
+  # navd moves on to the next step (other bearings) at m before the committed left: a sharp turn's next step, or GPS
+  # noise forward. The left isn't passed until the car has turned it or is dead-reckoned past it: its id and cap stay,
+  # and no CLEAR goes before the car is round it
+  for at, nxt in ((10., 1200.), (6., 1200.), (15., 1200.), (20., 1200.), (8., 60.)):
+    sim = approach_with_desire_out(to=at + 5.)
+    sim.navd.maneuvers[1] = (300. + nxt, "turn", "right", junction_of("right", 2))
+    n = len(sim.trace)
+    def early(sim, instr, at=at):
+      if sim.s >= 300. - at:
+        pos, mtype, modifier, junction = sim.navd.maneuvers[1]
+        return nav_instruction(pos - sim.s, mtype, modifier, remaining=pos - sim.s, junction=junction), True
+      return instr, True
+    sim.nav_filter = early
+    drive_through_the_left(sim, n)
+    # once the left is over, the next step is taken up
+    while sim.s < 340.:
+      sim.step()
+    assert sim.tp.follower.maneuver.side == -1, (at, nxt)
