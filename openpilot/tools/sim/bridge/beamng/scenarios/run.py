@@ -348,7 +348,7 @@ def main():
                   help="off: the driver never gives the go at a signal TurnPilot hasn't checked (the stop-at-the-line runs)")
   args, rest = ap.parse_known_args()
 
-  from openpilot.tools.sim.bridge.beamng.run_bridge import config_from_args, parse_args
+  from openpilot.tools.sim.bridge.beamng.run_bridge import config_from_args, light_oracle, parse_args
   bargs = parse_args(rest)
   if args.cleanup:
     sweep_game(bargs.host, bargs.port)
@@ -361,7 +361,6 @@ def main():
   os.makedirs(run_dir, exist_ok=True)
 
   from openpilot.tools.sim.bridge.beamng.bridge import BeamNGBridge
-  from openpilot.tools.sim.bridge.common import control_cmd_gen
   cfg = config_from_args(bargs)
   cfg.spawn_pos, cfg.spawn_rot = plan.spawn, heading_quat(plan.heading)
 
@@ -377,6 +376,17 @@ def main():
   q: Queue = Queue()
   bridge = BeamNGBridge(cfg, scenario=Runner(plan, args.runs, run_dir, args.web.rstrip('/'), token, bargs.host, bargs.port,
                                              signal_tap=args.signal_tap == 'on'))
+  with light_oracle(bargs):
+    drive(bridge, q, ui, bargs)
+  result = os.path.join(run_dir, 'result.json')
+  if args.record and not args.no_chase and os.path.exists(result):
+    render_chases(result, run_dir, bargs.host, bargs.port)
+  print(f"results: {result}")
+
+
+def drive(bridge, q, ui, bargs):
+  """The bridge runs the scenario until it's done or Ctrl-C; then the UI recording is closed and the game swept."""
+  from openpilot.tools.sim.bridge.common import control_cmd_gen
   p = bridge.run(q)
   try:
     p.join()
@@ -397,10 +407,6 @@ def main():
       sweep_game(bargs.host, bargs.port)  # the bridge process may have died before its own cleanup
     except Exception as e:
       print(f"warning: the final cleanup sweep failed ({e!r}); run with --cleanup once the game answers", flush=True)
-  result = os.path.join(run_dir, 'result.json')
-  if args.record and not args.no_chase and os.path.exists(result):
-    render_chases(result, run_dir, bargs.host, bargs.port)
-  print(f"results: {result}")
 
 
 def render_chases(result: str, run_dir: str, host: str, port: int):

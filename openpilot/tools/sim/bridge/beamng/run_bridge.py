@@ -7,6 +7,7 @@ import signal
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from multiprocessing import Queue
 
 from openpilot.tools.sim.bridge.common import control_cmd_gen
@@ -55,6 +56,19 @@ def start_light_oracle(args):
                            '--port', str(args.port), '--light-latency', str(args.light_latency)])
 
 
+@contextmanager
+def light_oracle(args):
+  """The light oracle for the drive with --light-oracle (run_bridge.py, scenarios/run.py and route_drive.py all take the
+  flag), stopped when it ends; None without the flag."""
+  oracle = start_light_oracle(args) if args.light_oracle else None
+  try:
+    yield oracle
+  finally:
+    if oracle is not None:
+      oracle.terminate()
+      oracle.wait(timeout=10)
+
+
 def config_from_args(args) -> BeamNGConfig:
   return BeamNGConfig(host=args.host, port=args.port, level=args.level, model=args.model, spawn_pos=args.spawn, spawn_rot=args.rot,
                       reload=args.reload, camera_update=args.camera_update, camera_poll=args.camera_poll, lean=not args.no_lean,
@@ -64,7 +78,11 @@ def config_from_args(args) -> BeamNGConfig:
 
 def main():
   args = parse_args()
-  oracle = start_light_oracle(args) if args.light_oracle else None
+  with light_oracle(args):
+    drive(args)
+
+
+def drive(args):
   q: Queue = Queue()
   bridge = BeamNGBridge(config_from_args(args), engage=args.engage, set_speed_kph=args.set_speed, rolling_start_kph=args.rolling_start)
   p = bridge.run(q)
@@ -93,8 +111,6 @@ def main():
           q.put(control_cmd_gen(line.strip()))
     threading.Thread(target=read_commands, daemon=True).start()
   p.join()
-  if oracle is not None:
-    oracle.terminate()
 
 
 if __name__ == "__main__":

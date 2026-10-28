@@ -31,7 +31,7 @@ from openpilot.tools.sim.bridge.beamng.driver import GasTaps, ground_truth_green
 from openpilot.tools.sim.bridge.beamng.gate1 import CANCEL_WAIT
 from openpilot.tools.sim.bridge.beamng.pose import beamng_quat
 from openpilot.tools.sim.bridge.beamng.routes import ROUTES
-from openpilot.tools.sim.bridge.beamng.run_bridge import config_from_args, parse_args
+from openpilot.tools.sim.bridge.beamng.run_bridge import config_from_args, light_oracle, parse_args
 from openpilot.tools.sim.bridge.common import control_cmd_gen
 
 WEB = "http://127.0.0.1:8088"  # turnpilot_web (selfdrive/turnpilot/web/pairing.py PORT)
@@ -286,18 +286,19 @@ def main():
   bargs.spawn, bargs.rot = plan[0].start, scenario.heading_quat(plan[0].heading)
   q: Queue = Queue()
   bridge = BeamNGBridge(config_from_args(bargs), scenario=drive)
-  p = bridge.run(q)
-  # a background shell ignores SIGINT: SIGTERM (or SIGINT) ends the session cleanly, sensors and traffic removed
-  for sig in (signal.SIGINT, signal.SIGTERM):
-    signal.signal(sig, lambda *_: q.put(control_cmd_gen("quit")))
-  try:
-    p.join()
-  except KeyboardInterrupt:
-    q.put(control_cmd_gen("quit"))
-    p.join()
-  finally:
-    if args.traffic:
-      remove_traffic_after(bargs.host, bargs.port)
+  with light_oracle(bargs):
+    p = bridge.run(q)
+    # a background shell ignores SIGINT: SIGTERM (or SIGINT) ends the session cleanly, sensors and traffic removed
+    for sig in (signal.SIGINT, signal.SIGTERM):
+      signal.signal(sig, lambda *_: q.put(control_cmd_gen("quit")))
+    try:
+      p.join()
+    except KeyboardInterrupt:
+      q.put(control_cmd_gen("quit"))
+      p.join()
+    finally:
+      if args.traffic:
+        remove_traffic_after(bargs.host, bargs.port)
 
 
 def remove_traffic_after(host, port):

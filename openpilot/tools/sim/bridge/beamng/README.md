@@ -251,8 +251,12 @@ turnpilotd the game's light states instead, SIM ONLY:
 
 ```bash
 TURNPILOT_LIGHT_ORACLE=1 OPENPILOT_PREFIX=tpsim openpilot/tools/sim/bridge/beamng/launch_openpilot.sh
-python -m openpilot.tools.sim.bridge.beamng.run_bridge --signals --light-oracle   # or the scenario runner, same flags
+python -m openpilot.tools.sim.bridge.beamng.run_bridge --signals --light-oracle
 ```
+
+`scenarios/run.py` and `route_drive.py` take the same two flags and start the oracle (`run_bridge.light_oracle`) for
+the drive, stopping it at the end. `--signals` without `--light-oracle` leaves the lights running with nothing reading
+them: every signal is held for the driver's go, and the sim driver taps only on a ground-truth green, so it never does.
 
 turnpilotd takes the oracle only with `SIMULATION=1` and `TurnPilotSimLightOracle` (which the launch sets, and which
 clears on every manager start); otherwise it rejects it out loud and holds. The scenario runner and `route_drive.py` tap
