@@ -53,8 +53,8 @@ def road(lanes_left, lanes_right, line_prob=0.9, edge_std=0.3, lane_width=LANE_W
   return line_ys, line_probs, edge_ys, [edge_std, edge_std]
 
 
-def model_v2(lanes_left=0, lanes_right=0, lane_change_state='off', **kwargs):
-  """A modelV2 reader with flat lane lines and road edges from road()."""
+def model_v2(lanes_left=0, lanes_right=0, lane_change_state='off', big=False, **kwargs):
+  """A modelV2 reader with flat lane lines and road edges from road(); big: from the big (chestnut) driving model."""
   line_ys, line_probs, edge_ys, edge_stds = road(lanes_left, lanes_right, **kwargs)
   msg = messaging.new_message('modelV2')
   m = msg.modelV2
@@ -70,6 +70,7 @@ def model_v2(lanes_left=0, lanes_right=0, lane_change_state='off', **kwargs):
     edge.y = [float(y)] * len(x)
   m.roadEdgeStds = [float(s) for s in edge_stds]
   m.meta.laneChangeState = lane_change_state
+  m.big = big
   return msg.as_reader().modelV2
 
 

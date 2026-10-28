@@ -40,6 +40,11 @@ class TestTurnPilotOnroad(OpenpilotTestCase):
       assert status_text(plan(state=state, reason=''), True) == ('', '')
     assert status_text(None, True) == ('', '')
 
+  def test_unavailable_shows_engaged_or_not(self):
+    for engaged in (True, False):
+      assert status_text(plan(state='unavailable', reason='detector stopped: take control'), engaged) == \
+        ('TurnPilot unavailable', 'detector stopped: take control')
+
   def test_turning(self):
     assert status_text(plan(state='turning', desire=log.Desire.turnLeft), True) == ('Turning left', '')
     assert status_text(plan(state='turning', desire=log.Desire.keepRight), True) == ('Keeping right', '')

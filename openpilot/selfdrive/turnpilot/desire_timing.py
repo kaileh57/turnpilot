@@ -82,6 +82,12 @@ class DesireTiming:
       self._pending = [self.turned_deg, self.side, 0.]
       self.side = 0
 
+  def abandon(self):
+    """TurnPilot handed back: no more desires for this maneuver. A turn desire already out is cleared from the model's
+    queue once the car has turned CLEAR_MIN_DEG, as for a passed turn; the caller sends None as the maneuver from now on."""
+    self._turn_over()
+    self.done, self.active = True, False
+
   def _clear(self):
     self.clear_frames, self._pending, self.side = CLEAR_FRAMES, None, 0
 

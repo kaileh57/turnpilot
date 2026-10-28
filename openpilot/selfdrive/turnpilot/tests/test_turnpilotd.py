@@ -1,13 +1,15 @@
 """turnpilotd closed loop: synthetic navd, model and scene around a point-mass car that follows the plan's limits."""
 from openpilot.cereal import custom, log
 from openpilot.common.realtime import DT_MDL
-from openpilot.selfdrive.turnpilot.hooks import plan_accel
+from openpilot.selfdrive.turnpilot.hooks import CLEAR_DESIRE, plan_accel
 from openpilot.selfdrive.turnpilot.lane_planner import lane_change_window
 from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP, ONCOMING_TTA_S, PED_STOP_GAP_M
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_state, model_v2, nav_instruction, scene
 from openpilot.selfdrive.turnpilot.desire_timing import TURN_DESIRE_LEAD_M
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, V_TURN_MIN
-from openpilot.selfdrive.turnpilot.turnpilotd import TurnPilot
+from openpilot.selfdrive.turnpilot.turnpilotd import DETECTOR_DEADLINE_S, WAITING_REASON, TurnPilot
+from openpilot.selfdrive.turnpilot.handback import Handback
+from openpilot.selfdrive.turnpilot.scene.tracker import STALE_S
 
 State = custom.TurnpilotPlan.State
 LaneChange = custom.TurnpilotPlan.LaneChange
@@ -34,6 +36,7 @@ class Sim:
     self.navd, self.tp, self.sm = FakeNavd(maneuvers, nav_lanes), TurnPilot(), FakeSM()
     self.s, self.v, self.cruise, self.t = 0., cruise, cruise, 0.
     self.model_lanes, self.shadow, self.driver_signals = model_lanes, shadow, driver_signals
+    self.big = False
     self.trace = []
 
   def step(self, objects=(), available=True, steer=0., blinker=False):
@@ -42,7 +45,7 @@ class Sim:
     if instr is not None:
       self.sm.put('navInstruction', instr)
     self.sm.put('carState', car_state(self.v, steer, left_blinker=blinker))
-    self.sm.put('modelV2', model_v2(*self.model_lanes))
+    self.sm.put('modelV2', model_v2(*self.model_lanes, big=self.big))
     plan = self.tp.update(self.sm, scene(objects, available), True, self.shadow, self.driver_signals).as_reader().turnpilotPlan
     a = min(plan_accel(plan.accelCap, plan.speedCap, self.v), (self.cruise - self.v) / 2., 1.5)
     if plan.shouldStop:
@@ -78,8 +81,8 @@ def test_disabled_and_no_route():
   assert plan.state == State.disabled and plan.desire == Desire.none
   assert (plan.accelCap, plan.speedCap, plan.shouldStop) == (NO_ACCEL_CAP, NO_SPEED_CAP, False)
   sm.put('navInstruction', nav_instruction(100., valid=False), valid=False)
-  plan = TurnPilot().update(sm, scene(available=False), True, False).as_reader().turnpilotPlan
-  assert plan.state == State.noRoute and not plan.routeValid
+  plan = TurnPilot().update(sm, scene(), True, False).as_reader().turnpilotPlan
+  assert plan.state == State.noRoute and not plan.routeValid and plan.handback == Handback.none
 
 
 def test_left_turn_drive():
@@ -174,3 +177,75 @@ def test_shadow_computes_the_same_plan():
     d0.pop('shadow', None)
     d1.pop('shadow', None)
     assert d0 == d1
+
+
+def test_waits_for_the_detector_before_acting():
+  # TurnPilot turned on with no detections yet (modeld loads the detector only while disengaged): no desire, no lane
+  # change, no turn cap, and no handback either, since nothing has stopped
+  sim = Sim([(200., "turn", "left"), (1500., "turn", "right")])
+  for _ in range(int(20. / DT_MDL)):
+    plan = sim.step(available=False)
+    assert plan.state == State.unavailable and plan.reason == WAITING_REASON and plan.handback == Handback.none
+    assert plan.desire == Desire.none and plan.laneChange == LaneChange.none and plan.speedCap == NO_SPEED_CAP
+  assert sim.s > 220.  # drove past the turn, nothing held it
+  plan = sim.step()  # first detections: acting
+  assert plan.state != State.unavailable and plan.handback == Handback.none
+
+
+def test_detector_stops_hand_back_without_a_hold():
+  sim = Sim([(400., "turn", "left"), (1500., "turn", "right")])
+  sim.run(5.)
+  assert sim.trace[-1][2].handback == Handback.none
+  # a slow spell: modeld's forced run comes 1 s after the last detection, the scene unavailable from STALE_S: no handback
+  for _ in range(int((1.0 - STALE_S) / DT_MDL)):
+    assert sim.step(available=False).handback == Handback.none
+  sim.step()
+  # stopped: handed back once the deadline passes, with no desire, no lane change and no stop-and-wait at the turn
+  plans = [sim.step(available=False) for _ in range(int(60. / DT_MDL))]
+  first = next(i for i, p in enumerate(plans) if p.handback != Handback.none)
+  assert abs((first + 1) * DT_MDL - (DETECTOR_DEADLINE_S - STALE_S)) <= 1.5 * DT_MDL
+  assert all(p.handback == Handback.detectorStopped and p.state == State.unavailable for p in plans[first:])
+  assert all(p.desire == Desire.none and p.laneChange == LaneChange.none and not p.shouldStop for p in plans)
+  assert plans[-1].reason == "detector stopped: take control"
+  assert sim.s > 420. and min(v for _, v, _ in sim.trace[-len(plans):]) > 5.
+  # the detector comes back: acting again
+  assert sim.step().handback == Handback.none and sim.trace[-1][2].state != State.unavailable
+
+
+def test_handback_mid_turn_keeps_the_turn_cap_and_clears_the_desire():
+  # the turn desire went out and the car is slowing for the turn when the detector stops: the cap stays (a handback must
+  # not speed the car up), no new pulse goes out, and the turn desire is still cleared from the model once it has turned
+  sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
+  while sim.distance() > 15.:
+    sim.step()
+  assert any(p.desire == Desire.turnLeft for _, _, p in sim.trace)
+  capped = sim.trace[-1][2].speedCap
+  assert capped < NO_SPEED_CAP
+  plans = [sim.step(available=False) for _ in range(int(1.5 / DT_MDL))]
+  assert plans[-1].handback == Handback.detectorStopped and plans[-1].speedCap <= capped + 1.
+  assert all(p.desire in (Desire.none, CLEAR_DESIRE) for p in plans[int(1. / DT_MDL):])
+
+
+def test_model_fallback_hands_back_and_cancels_the_route():
+  sim = Sim([(400., "turn", "left"), (1500., "turn", "right")])
+  sim.big = True
+  sim.run(5.)
+  assert sim.trace[-1][2].handback == Handback.none and not sim.tp.cancel_route
+  sim.big = False  # modeld fell back to the small model
+  plan = sim.step()
+  assert plan.handback == Handback.modelFellBack and plan.state == State.unavailable
+  assert sim.tp.cancel_route  # main() removes NavDestination once, which ends navd's route
+  sim.tp.cancel_route = False
+  plans = [sim.step() for _ in range(int(60. / DT_MDL))]
+  assert all(p.handback == Handback.modelFellBack and p.desire == Desire.none and p.laneChange == LaneChange.none for p in plans)
+  assert not sim.tp.cancel_route  # once
+  # for the rest of the drive: turning TurnPilot off and on doesn't bring it back on the small model
+  sim.tp.update(sim.sm, scene(), False, False)
+  assert sim.step().handback == Handback.modelFellBack
+
+
+def test_small_model_from_the_start_is_not_a_fallback():
+  # no chestnut: modeld runs the small model from the start, and there is no detector pkl for it, so TurnPilot waits
+  sim = Sim([(400., "turn", "left")])
+  sim.run(5.)
+  assert sim.trace[-1][2].handback == Handback.none and not sim.tp.cancel_route
