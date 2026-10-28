@@ -59,8 +59,8 @@ def test_the_real_angle_decides():
   assert can_make_turn(14., 60., 90., True) and not can_make_turn(14., 60., 135., True)
 
 
-def left_at(s, angle=90., branches=2):
-  return (s, "turn", "left", junction_of("left", branches, angle))
+def left_at(s, angle=90., branches=2, modifier="left"):
+  return (s, "turn", modifier, junction_of(modifier, branches, angle))
 
 
 def plan_reader(plan):
@@ -106,15 +106,17 @@ def test_skip_ends_with_the_maneuver():
   assert not any(plan.tooFastToTurn for s, _, plan in sim.trace if s > 90.)
 
 
-@pytest.mark.parametrize("angle", [90., 135.])
+@pytest.mark.parametrize("modifier", ["left", "right"])  # across the road (v_safe 4.9) and to the curb side (4.0, stricter)
+@pytest.mark.parametrize("angle", [70., 90., 135.])
 @pytest.mark.parametrize("cruise", [13., 25.])
-def test_following_the_cap_never_skips(angle, cruise):
+def test_following_the_cap_never_skips(modifier, angle, cruise):
   # from town or highway speed, a car that follows the turn speed cap is always under the feasibility curve
-  sim = Sim([left_at(800., angle), left_at(2500., angle)], cruise=cruise)
+  sim = Sim([left_at(800., angle, modifier=modifier), left_at(2500., angle, modifier=modifier)], cruise=cruise)
   sim.run(80., turn_at=800.)
   assert sim.s > 820.
   assert not any(plan.tooFastToTurn for _, _, plan in sim.trace)
-  assert any(plan.desire == Desire.turnLeft for _, _, plan in sim.trace)
+  desire = Desire.turnLeft if modifier == "left" else Desire.turnRight
+  assert any(plan.desire == desire for _, _, plan in sim.trace)
 
 
 def test_a_road_that_bends_is_the_models():

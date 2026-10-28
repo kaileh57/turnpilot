@@ -65,3 +65,12 @@ def test_car_reaches_turn_speed_by_the_desire():
     assert V_TURN_MIN - 0.5 < at_desire < V_TURN_MIN + 0.25, modifier  # gate 1's speed when the desire goes out
     assert v < V_CORNER + 0.5, modifier                                  # and its own turn speed by the corner
     assert min_a > -1.6, modifier
+
+
+def test_corner_curve_at_real_angles():
+  # a right whose bearings turn 70 degrees still slows to V_CORNER by CORNER_M, as the nominal 90 did; a slight keep doesn't
+  for angle in (70., 85., 90., 120.):
+    real = Maneuver(*classify("turn", "right"), "turn", "right", angle, geometry=True)
+    assert turn_speed_cap(real, CORNER_M, 4.) == V_CORNER, angle
+  keep = Maneuver(*classify("turn", "slight right"), "turn", "slight right", 30., geometry=True)
+  assert turn_speed_cap(keep, CORNER_M, 4.) > V_CORNER

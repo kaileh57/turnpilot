@@ -29,6 +29,10 @@ KEEP_CAP_SPEED_MAX = 15.0  # m/s: a keep is capped only below this
 LAG_S = 2.0             # s the curve leads the car
 V_CORNER = 4.3          # m/s a junction turn slows to by CORNER_M before the junction (gate 1's model, by itself)
 CORNER_M = 15.
+# a junction turn this sharp or more gets the V_CORNER curve. With nominal angles that was every left and right (90);
+# real ones from the bearings come in under 90 at about half of right-angle junctions (89, 70 in Indiana), and a
+# Valhalla "left" or "right" starts at about 45 degrees
+CORNER_ANGLE_MIN_DEG = 45.
 CORNER_TANGENT_M = 8.0  # m from the corner's start to the junction center, turning to the curb side
 FAR_SIDE_TANGENT_M = 12.0  # turning across the junction (left where traffic keeps right) is a wider arc
 
@@ -53,6 +57,6 @@ def turn_speed_cap(maneuver, distance: float, v_ego: float, right_hand_traffic: 
   v_turn = turn_target_speed(maneuver.angle_deg, curb_side)
   lag = max(v_ego, 0.) * LAG_S
   cap = math.sqrt(v_turn ** 2 + 2. * A_DECEL * max(distance - TURN_DESIRE_LEAD_M - lag, 0.))
-  if maneuver.kind == TURN and maneuver.angle_deg >= 90.:
+  if maneuver.kind == TURN and maneuver.angle_deg >= CORNER_ANGLE_MIN_DEG:
     cap = min(cap, math.sqrt(V_CORNER ** 2 + 2. * A_DECEL * max(distance - CORNER_M - lag / 2., 0.)))
   return min(cap, NO_SPEED_CAP)
