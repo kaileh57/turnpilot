@@ -39,6 +39,7 @@ The turn scenarios use junctions from piston's list of signalized junctions with
 | --- | --- | --- |
 | `ped_crosswalk_right` | Right turn at (-768.6, 555.2). The mannequin leaves the inside corner, crosses the road being turned into, then walks 10 m away along the far sidewalk. It sets off when the car is 4 s from the hold line (plus its 1.1 s to the road edge). | Holds to a stop for "pedestrian in crosswalk", moves on, takes the turn, arrives, no disengagement, never within 2.5 m |
 | `unprotected_left` | Left turn at (-650.1, 481.7). Two AI cars stand 60 and 85 m out on the arm straight across. They go together on an AI script, timed so the first reaches the junction 1.5 s after the car reaches its hold line. | Holds for "waiting for oncoming", goes after, takes the turn, arrives, no disengagement |
+| `unprotected_left_visible` | The same left turn at (-650.1, 481.7), approached from the south-east up a gentle grade. `unprotected_left` comes down a ~21% hill onto a shelf, and the arm across drops away past it, so its oncoming cars stay out of view until they are about 13 m from the car. Here the arm across rises about 3 m over its first 85 m. | As `unprotected_left` |
 | `ped_in_path` | The mannequin stands in the lane 40 m before the junction at (-768.9, 661.4), on gate1's eastbound straight. | Stops with the camera 3 to 8 m from it (scene_policy stops 5 m short, camera to pedestrian), no disengagement |
 | `occupied_lane` | A data entry (below). When the car engages, an AI car is placed in the target lane just ahead of it and paces it at the set speed until 6 s into the lane change window, then drops back to 40%. | The planner reports "car in target lane", and the lane change starts with the pacer more than 15 m away |
 | `lane_change` | A data entry: a multi-lane approach to a turn that needs a lane change. | Changes lanes, takes the turn, arrives, no disengagement |
@@ -100,7 +101,7 @@ To test it without the bridge, play any video into the UI with `openpilot/tools/
 
 Everything here was built and tested offline, with unit tests and a dry run of the runner against a fake bridge, director, SubMaster and clock (`tests/`). These parts touch the live game and are unverified:
 
-- The AI scripts (`ai.set_script`) for the oncoming cars and the pacer: whether the AI holds the timing, and whether a spawned car released from `brake=1` drives off.
+- The pacer's AI script. The oncoming cars' scripts were checked in the game on 2026-10-27: a car stands on the parking brake until it is released, then drives its script across the junction. A car held with `brake=1` instead backs away at full power, because BeamNG's arcade automatic reads the brake pedal at a standstill as reverse.
 - Where the crosswalk is. It's placed from road widths (2.5 m past the edge of the road the car comes from), not from the level's crossing decals, and `result.json` notes this.
 - The mission-group sweep for mannequins (`getCount`/`getObject` on `scenetree.MissionGroup`) and the vehicle sweep by name.
 - Whether turnpilot_web and navd are up, with a route source for the sim map, in the sim launch.
