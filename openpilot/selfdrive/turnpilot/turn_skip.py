@@ -32,6 +32,9 @@ A turn just past a bend or a straight-on step (route_follower.py: RouteFollower.
 the car is NAVD_ADVANCE_M past that step, at whatever distance it then has: one under MIN_FIRST_PULSE_M away already is
 certain to be skipped tooLate then, which for a turn 10 m or less past the step is at or past its junction. So the skip
 is announced (SkipState.ahead_skipped) from the moment the turn ahead is that close, before the junction.
+An unprotected turn (map_controls.py) is taken from a stop at its hold line, so it is also too fast when that stop can't
+be made at the map stops' -2.0 m/s^2 when it is first seen (stop_infeasible: turnpilotd, a stop not yet engaged): skipped
+the same way, after the same confirming frames, never braked for at the floor.
 Only junction turns (route_follower.TURN) are checked. A keep (slight turns, forks, ramps) is taken at speed by the
 model, and its desire goes at any speed.
 """
@@ -89,12 +92,13 @@ class TurnSkip:
 
   def update(self, maneuver, distance: float, maneuver_id: int, v_ego: float, desire_out: bool,
              right_hand_traffic: bool = True, lat_active: bool = True, ahead=None, ahead_distance: float = float('inf'),
-             stop_d: float | None = None) -> SkipState:
+             stop_d: float | None = None, stop_infeasible: bool = False) -> SkipState:
     """maneuver: RouteFollower.upcoming; desire_out: this maneuver's desire has gone out (DesireTiming.started);
     lat_active: carControl.latActive; ahead, ahead_distance: RouteFollower.ahead past a NONE step, and the distance to it;
     stop_d: m to the map stop sign or signal the car will stop at next (MapControlPolicy.stop_ahead), or None. One within
     STOP_BEFORE_TURN_M before the junction means the turn is taken from a stop: never too fast (the stop itself brakes at
-    no more than -2.0, and says so when it can't make it)."""
+    no more than -2.0, and says so when it can't make it). stop_infeasible: the turn is unprotected and its hold-line stop,
+    not yet engaged, can't be made at -2.0 (module docstring)."""
     if maneuver_id != self.maneuver_id:
       self.maneuver_id, self.skipped, self._infeasible = maneuver_id, False, 0
     if self.skipped:
@@ -116,7 +120,7 @@ class TurnSkip:
     if stop_d is not None and 0. <= distance - stop_d <= STOP_BEFORE_TURN_M:
       self._infeasible = 0
       return SkipState(False, True)
-    if can_make_turn(v_ego, distance, maneuver.angle_deg, curb_side):
+    if can_make_turn(v_ego, distance, maneuver.angle_deg, curb_side) and not stop_infeasible:
       self._infeasible = 0
       return SkipState(False, True)
     if desire_out:  # committed: never skipped now, only no new pulse
@@ -124,7 +128,8 @@ class TurnSkip:
     self._infeasible += 1
     if self._infeasible >= SKIP_CONFIRM_FRAMES:
       self.skipped = True
-      cloudlog.event("turnpilot_turn_skipped", error=True, type=maneuver.type, modifier=maneuver.modifier,
+      cloudlog.event("turnpilot_turn_skipped", error=True, reason='unprotectedStop' if stop_infeasible else 'tooFast',
+                     type=maneuver.type, modifier=maneuver.modifier,
                      angle_deg=round(maneuver.angle_deg, 1), geometry=maneuver.geometry, distance=round(distance, 1),
                      v_ego=round(v_ego, 2), v_safe=round(safe_turn_speed(maneuver.angle_deg, curb_side), 2))
     return SkipState(self.skipped, False)

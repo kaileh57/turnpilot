@@ -149,6 +149,12 @@ def test_map_control_prompts_chime_and_yield_is_silent():
   assert 'press accelerator to proceed' in a.alert_text_2 and a.audible_alert == AudibleAlert.prompt
   a, = alerts(EventName.turnpilotControlPrompt, FakeSM(plan(controlPrompt='yieldAhead')))
   assert a.audible_alert == AudibleAlert.none
+  a, = alerts(EventName.turnpilotControlPrompt, FakeSM(plan(controlPrompt='unprotectedTurnGo',
+                                                           reason='Stopped at unprotected left — tap gas to go')))
+  assert a.alert_text_1 == 'Stopped at unprotected left — tap gas to go' and 'check oncoming traffic' in a.alert_text_2
+  assert a.audible_alert == AudibleAlert.prompt
+  a, = alerts(EventName.turnpilotControlPrompt, FakeSM(plan(controlPrompt='unprotectedTurnGo')))
+  assert a.alert_text_1 == 'Unprotected Turn'
 
 
 def test_map_control_alerts():

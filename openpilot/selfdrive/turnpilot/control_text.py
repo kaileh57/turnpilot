@@ -10,6 +10,8 @@ def hold_text(kind: str, action: str, light_state: str = 'unknown', light_source
   if action in ('held', 'awaitingDriver'):
     if kind == 'stop':
       title = 'Stopped at stop sign'
+    elif kind == 'unprotectedTurn':
+      title = 'Stopped at unprotected turn'
     elif light_state == 'red':
       title = 'Red light'
     else:
@@ -28,4 +30,5 @@ def controls_problem(controls_status: str) -> str:
 
 def is_map_reason(reason: str) -> bool:
   """A plan.reason that is the map control's own (map_controls.py), not another hold in force with it."""
-  return reason.startswith(('Stopped at', 'Red light', 'Yellow light', 'Signal ahead', 'Stop sign', 'Map stop', 'Yield'))
+  return reason.startswith(('Stopped at', 'Red light', 'Yellow light', 'Signal ahead', 'Stop sign', 'Map stop', 'Yield',
+                            'Unprotected'))

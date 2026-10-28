@@ -103,6 +103,8 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
       stop @1;
       yield @2;
       signal @3;
+      unprotectedTurn @4;  # a far-side turn across oncoming traffic, no stop sign or signal at its junction: stops at
+                           # the hold line for the driver's go (map_controls.py)
     }
     enum Action {
       none @0;
@@ -148,6 +150,7 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
     stopSignGo @1;   # held at a stop sign past its dwell: check cross traffic, press the accelerator to go
     signalGo @2;     # a signal ahead with the light not checked: press the accelerator to proceed
     yieldAhead @3;   # visual only
+    unprotectedTurnGo @4;  # held at an unprotected turn's hold line: check oncoming traffic, press the accelerator to go
   }
   enum ControlAlert {
     none @0;

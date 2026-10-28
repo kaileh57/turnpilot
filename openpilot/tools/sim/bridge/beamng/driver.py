@@ -45,6 +45,8 @@ STANDING = 0.3              # m/s
 class GasTaps:
   """The sim driver's gas taps, where a driver would give one, each logged with its reason:
   - stopSignGo: TurnPilot holds the car at a stop sign past its dwell and asks for the driver's go: after PROMPT_TAP_S;
+  - unprotectedTurnGo: held at an unprotected turn's hold line for the driver's go: after PROMPT_TAP_S, as a driver
+    who has looked across (this driver doesn't look: the detector's oncoming hold after the go is what it exercises);
   - signalGo: a signal whose light TurnPilot hasn't checked: only when the ground-truth light (the bridge's own reading
     of the game) is green, after PROMPT_TAP_S, never on red, yellow or a light it can't read; signal_tap False never taps
     it (the stop-at-the-line runs);
@@ -67,8 +69,8 @@ class GasTaps:
     reason = None
     if engaged and v < STANDING and plan is not None:
       prompt = str(plan.controlPrompt)
-      if prompt == 'stopSignGo':
-        reason = 'stopSignGo'
+      if prompt in ('stopSignGo', 'unprotectedTurnGo'):
+        reason = prompt
       elif prompt == 'signalGo':
         reason = 'signalGo' if self.signal_tap and green is True else None
       elif str(plan.state) != 'holding' and not plan.shouldStop:

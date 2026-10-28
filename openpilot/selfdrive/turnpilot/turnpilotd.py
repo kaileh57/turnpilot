@@ -65,7 +65,8 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.desire_timing import ENTRY_M, TURN_STARTED_DEG, DesireTiming
 from openpilot.selfdrive.turnpilot.handback import Handback
 from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S, CLEAR_DESIRE
-from openpilot.selfdrive.turnpilot.map_controls import YELLOW_DECEL, YELLOW_DECEL_MAX, MapControlPolicy, light_input
+from openpilot.selfdrive.turnpilot.map_controls import (YELLOW_DECEL, YELLOW_DECEL_MAX, MapControlPolicy, light_input, turn_stop_feasible,
+                                                         unprotected_turn)
 from openpilot.selfdrive.turnpilot.lane_planner import (OPENPILOT_SIGNALS_BRANDS, LanePlanner, lane_change_window, lane_mismatch,
                                                          model_lanes_from_msg)
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, LEFT, TURN, RouteFollower
@@ -278,9 +279,6 @@ class TurnPilot:
     rf.update(sm['navInstruction'], sm.updated['navInstruction'], sm.valid['navInstruction'], v_ego, DT_MDL,
               committed=self.turn_committed)
     upcoming = None if rf.arrived else rf.upcoming
-    # the map's stop signs and signals: every frame, whatever the maneuver (a skipped turn keeps its stop)
-    mapd = self.map_update(sm, v_ego, cs.gasPressed)
-
     available = scene.available
     objects = list(scene.objects) if available else []
 
@@ -311,10 +309,24 @@ class TurnPilot:
       self._take_up_dropped(upcoming, rf, v_ego, right_hand_traffic)
     self.acting = acting
 
+    # the map's stop signs and signals: every frame, whatever the maneuver (a skipped turn keeps its stop). And the route's
+    # unprotected turn while TurnPilot drives it: not skipped (too fast: skipped out loud and rerouted, never braked for at
+    # the floor; last frame's skip, a frame late at most), not dropped at a handback. A held latch stays whatever
+    # Its stop is engaged only where it can be made at -2.0; one that can't (first seen too close at speed) is skipped
+    skipped = self.skip.skipped and self.skip.maneuver_id == rf.maneuver_id
+    driving = acting and rf.maneuver_id != self.dropped_id and not skipped
+    turn, stop_infeasible = None, False
+    if driving and unprotected_turn(upcoming, right_hand_traffic):
+      if self.map_controls.turn_engaged(rf.maneuver_id) or turn_stop_feasible(v_ego, rf.distance):
+        turn = (rf.maneuver_id, rf.distance, 'left' if upcoming.side == LEFT else 'right')
+      else:
+        stop_infeasible = True
+    mapd = self.map_update(sm, v_ego, cs.gasPressed, turn)
+
     # too fast to make the turn: skipped, so nothing below acts on it (no desire, no cap, no turn holds or lane changes)
     desire_out = self.desires.maneuver_id == rf.maneuver_id and self.desires.started
     skip = self.skip.update(upcoming, rf.distance, rf.maneuver_id, v_ego, desire_out, right_hand_traffic, lat_active,
-                            rf.ahead, rf.ahead_distance, stop_d=self.map_controls.stop_ahead())
+                            rf.ahead, rf.ahead_distance, stop_d=self.map_controls.stop_ahead(), stop_infeasible=stop_infeasible)
     maneuver = None if skip.skipped else upcoming
     # navd reroutes on it and selfdrived alerts: only while TurnPilot is driving the route (handback outranks it). A turn
     # just past a bend that will be skipped once it is the maneuver is announced now, before its junction (turn_skip.py)
@@ -401,8 +413,9 @@ class TurnPilot:
       plan.state = State.following
     return msg
 
-  def map_update(self, sm, v_ego: float, gas_pressed: bool):
-    """This frame's MapControlPolicy decision, from navInstruction's controls and turnpilotLights (once a frame)."""
+  def map_update(self, sm, v_ego: float, gas_pressed: bool, turn=None):
+    """This frame's MapControlPolicy decision, from navInstruction's controls and turnpilotLights (once a frame), and the
+    route's unprotected turn (MapControlPolicy.update's turn)."""
     if self.map_now is not None:
       return self.map_now
     data = getattr(sm, 'data', {})
@@ -413,7 +426,7 @@ class TurnPilot:
     lights = light_input(lights_msg, self.lights_age, self.oracle_ok, True)
     self.map_controls.yellow_decel = self.yellow_decel
     self.map_now = self.map_controls.update(sm['navInstruction'], sm.updated['navInstruction'], sm.valid['navInstruction'], v_ego,
-                                            gas_pressed, lights, DT_MDL)
+                                            gas_pressed, lights, DT_MDL, turn=turn)
     return self.map_now
 
   def _take_up_dropped(self, upcoming, rf, v_ego: float, right_hand_traffic: bool = True) -> None:

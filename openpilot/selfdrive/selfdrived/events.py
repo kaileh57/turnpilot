@@ -294,7 +294,8 @@ def turnpilot_lane_change_aborted_alert(CP: car.CarParams, CS: car.CarState, sm:
                Priority.LOW, VisualAlert.none, AudibleAlert.tpLaneChangeAbort, 2.)
 
 
-CONTROL_PROMPT_TITLE = {'stopSignGo': "Stop Sign", 'signalGo': "Signal Ahead", 'yieldAhead': "Yield Ahead"}
+CONTROL_PROMPT_TITLE = {'stopSignGo': "Stop Sign", 'signalGo': "Signal Ahead", 'yieldAhead': "Yield Ahead",
+                        'unprotectedTurnGo': "Unprotected Turn"}
 CONTROL_ALERT_TITLE = {'cannotStopComfortably': "Take Control", 'stopOverrun': "Stop Line Passed",
                        'proceedingOnYellow': "Proceeding on Yellow", 'goingOnRed': "Going on Red",
                        'mapControlsUnavailable': "Map Stops Unavailable", 'lightSourceRejected': "Light Source Rejected"}

@@ -6,9 +6,10 @@ import pytest
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot.hooks import SPEED_CAP_ACCEL_MIN, plan_accel
 from openpilot.selfdrive.turnpilot.map_controls import (DWELL_S, GREEN_STEADY_S, LIGHT_STALE_S, MAP_DECEL_MAX, NO_LIGHTS,
-                                                         T_LAT, YIELD_SPEED, Lights, MapControlPolicy, engage_distance,
-                                                         light_input)
-from openpilot.selfdrive.turnpilot.scene_policy import NO_ACCEL_CAP, ScenePolicy, decide
+                                                         T_LAT, UNPROTECTED, YIELD_SPEED, Lights, MapControlPolicy, engage_distance,
+                                                         light_input, unprotected_turn)
+from openpilot.selfdrive.turnpilot.route_follower import make_maneuver
+from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP, ScenePolicy, decide
 from openpilot.selfdrive.turnpilot.tests.synthetic import nav_instruction
 
 
@@ -26,6 +27,7 @@ class Car:
     self.gps = lambda t: 0.
     self.nav_valid = True
     self.lead_stop: float | None = None  # a lead stopped here: the car stops 0.5 m short of it
+    self.turn: tuple | None = None  # (s of the junction, maneuver id, 'left'): a far-side turn there, unprotected-shaped
     self.rows = []
 
   def nav(self):
@@ -39,7 +41,8 @@ class Car:
     lights = lights(self) if callable(lights) else lights
     due = self.frame % 20 == 0
     self.frame += 1
-    out = self.policy.update(self.nav() if due else None, due, self.nav_valid, self.v, gas, lights, DT_MDL)
+    turn = None if self.turn is None else (self.turn[1], self.turn[0] - self.s, self.turn[2])
+    out = self.policy.update(self.nav() if due else None, due, self.nav_valid, self.v, gas, lights, DT_MDL, turn=turn)
     dec = decide(out.stops, self.v)
     dec.accel_cap = self.scene.ramp(dec.accel_cap, DT_MDL)
     cmd = min(plan_accel(dec.accel_cap, dec.speed_cap, self.v), (self.cruise - self.v) / 2., 1.5)
@@ -388,3 +391,107 @@ def test_crossing_reason():
   car = Car([(200., 'signal', False, False, False)])
   out, dec = car.run_until(held)
   assert 'crossing' in dec.reason
+
+
+# --- unprotected turns: a far-side turn across oncoming traffic, with no stop sign or signal at its junction ---
+
+def test_unprotected_turn_from_map_data():
+  def m(mtype, modifier, opposing='present', geometry=True, branches=2, after=270.):
+    return make_maneuver(mtype, modifier, (), geometry, 0., after, branches, opposing)
+  assert unprotected_turn(m('turn', 'left'), True)                       # a left across the road ahead's traffic
+  assert unprotected_turn(m('turn', 'sharp left', after=225.), True)
+  assert unprotected_turn(m('turn', 'left', geometry=False), True)       # no junction data: unknown, never clear
+  assert unprotected_turn(m('turn', 'left', opposing='unknown'), True)   # a navd from before the field
+  assert not unprotected_turn(m('turn', 'left', opposing='none'), True)  # a T's stem: no oncoming approach
+  assert not unprotected_turn(m('turn', 'right', after=90.), True)       # curb side
+  assert unprotected_turn(m('turn', 'right', after=90.), False)          # driving on the left, a right is the far side
+  assert not unprotected_turn(m('turn', 'left'), False)
+  assert not unprotected_turn(m('turn', 'slight left', after=330.), True)  # a keep
+  assert not unprotected_turn(m('turn', 'left', branches=0), True)        # a bend: the model's, not a turn
+  assert not unprotected_turn(None, True)
+
+
+def left_car(controls=(), v=13.4, at=250.):
+  car = Car(controls, v=v)
+  car.turn = (at, 7, 'left')
+  return car
+
+
+def test_unprotected_left_stops_before_the_hold_line_and_needs_a_tap():
+  car = left_car()
+  out, dec = car.run_until(held)
+  assert car.v < 0.3 and 0. <= 250. - HOLD_LINE_M - car.s < 3.  # before the line, never past it
+  assert all(cmd >= MAP_DECEL_MAX - 1e-6 for *_, cmd, _, _ in car.rows)
+  assert out.shown.kind == UNPROTECTED and out.prompt == 'unprotectedTurnGo'  # no dwell: the driver's go at once
+  assert dec.reason == "Stopped at unprotected left — tap gas to go" and out.shown.action == 'awaitingDriver'
+  s_held = car.s
+  out, dec, _ = car.run(20.)
+  assert held(out, dec) and car.s - s_held < 0.05
+  out, dec, _ = car.step(gas=True, accel=0.)
+  assert not dec.should_stop and out.released_stopped and out.prompt == 'none' and out.shown.kind == 'none'
+  car.run(5.)
+  assert car.s > 250.
+  assert not any(o.prompt == 'unprotectedTurnGo' for *_, o in car.rows[-90:])  # never a second stop
+
+
+def test_unprotected_left_approach_reason_and_engage():
+  car = left_car()
+  out, dec, _ = car.run_until(lambda out, dec: out.stops) + (None,)
+  assert 250. - HOLD_LINE_M - car.s <= engage_distance(13.4) + 2.
+  assert out.stops[0].reason == "Unprotected left ahead" and out.shown.kind == UNPROTECTED
+
+
+@pytest.mark.parametrize("kind", ['stop', 'signal'])
+def test_stop_sign_or_signal_at_the_junction_protects_the_left(kind):
+  # its own latch holds the car (a signal whatever the light): one stop, one tap, no second stop at the hold line
+  car = left_car([(250. - 11., kind)])
+  out, dec = car.run_until(held)
+  assert out.shown.kind == kind and -2. < 239. - car.s < 5.
+  car.run(DWELL_S + 0.5)
+  car.step(gas=True, accel=0.)
+  car.run(8.)
+  assert car.s > 252.
+  assert not any(o.shown is not None and o.shown.kind == UNPROTECTED for *_, o in car.rows)
+  assert not any(d.should_stop for *_, d, o in car.rows[-140:])
+
+
+def test_yield_or_a_stop_far_upstream_leaves_the_left_unprotected():
+  car = left_car([(250. - 11., 'yield')])
+  car.run_until(held)
+  assert car.rows[-1][-1].shown.kind == UNPROTECTED
+  car = left_car([(150., 'stop')])
+  car.run_until(held)
+  car.run(DWELL_S + 0.5)
+  car.step(gas=True, accel=0.)
+  out, dec = car.run_until(held)
+  assert out.shown.kind == UNPROTECTED and 0. <= 242. - car.s < 3.
+
+
+def test_unprotected_latch_is_position_free_and_says_so_through_a_fault():
+  car = left_car()
+  car.run_until(held)
+  s_held = car.s
+  car.turn = None  # the route went away (a reroute, a gap): the latch holds on
+  out, dec, _ = car.run(3.)
+  assert held(out, dec) and car.s - s_held < 0.05
+  car.turn = (400., 8, 'left')  # a new route's maneuver
+  out, dec, _ = car.run(1.)
+  assert held(out, dec) and out.shown.kind == UNPROTECTED
+  assert car.policy.held_stops() and car.policy.held_stops()[0].should_stop
+  out, dec, _ = car.step(gas=True, accel=0.)
+  assert not dec.should_stop
+
+
+def test_a_left_not_held_goes_with_its_maneuver():
+  car = left_car()
+  car.run_until(lambda out, dec: out.stops)
+  car.turn = None  # skipped too fast, or the route changed: no stop for a turn the car isn't taking
+  out, dec, _ = car.step()
+  assert not out.stops and out.shown.kind == 'none'
+
+
+def test_unprotected_turn_texts():
+  from openpilot.selfdrive.turnpilot.control_text import hold_text, is_map_reason
+  assert hold_text(UNPROTECTED, 'awaitingDriver') == ('Stopped at unprotected turn', 'tap gas to go')
+  assert hold_text(UNPROTECTED, 'held') == ('Stopped at unprotected turn', '')
+  assert is_map_reason("Unprotected left ahead") and is_map_reason("Stopped at unprotected left — tap gas to go")

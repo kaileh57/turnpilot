@@ -70,7 +70,7 @@ def plan_events(sm, now: float | None = None) -> list[str]:
   2. a fault (turnpilotUnavailable);
   3. a map stop it can't make gently (turnpilotControlAlert, cannotStopComfortably: take control);
   4. too fast to turn (turnpilotTooFastToTurn);
-  5. a map control's prompt to the driver (turnpilotControlPrompt: stop sign or signal go, yield ahead);
+  5. a map control's prompt to the driver (turnpilotControlPrompt: stop sign, signal or unprotected turn go, yield ahead);
   6. a map control's other alerts (turnpilotControlAlert: a stop line overrun, going on a yellow or a red);
   7. a planned lane change, offered or just aborted (turnpilotLaneChangeLeft/Right/Aborted, LaneChangeEvents);
   8. the wrong lane, or a lane it can't confirm (turnpilotWrongLane);
@@ -117,6 +117,7 @@ CONTROL_PROMPT_TEXT = {
   'stopSignGo': 'Stop sign: check cross traffic, press accelerator to go',
   'signalGo': 'Signal ahead: light not checked, press accelerator to proceed',
   'yieldAhead': 'Yield ahead',
+  'unprotectedTurnGo': 'Unprotected turn: check oncoming traffic, press accelerator to go',
 }
 CONTROL_ALERT_TEXT = {
   'cannotStopComfortably': 'Cannot stop gently for the stop/signal',

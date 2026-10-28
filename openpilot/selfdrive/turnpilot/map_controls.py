@@ -33,6 +33,15 @@ The rules (Kellen, 2026-10-27; /private/tmp/claude-501/stop_design.md):
 - The driver's gas before a stop sign is an override; when it comes off past the line moving, the stop is dropped
   (stopOverrun), else the curve resumes from there (re-seeded, checked for feasibility). Past the line moving with no
   release is an overrun: dropped, logged, alerted. Driven off a held stop under the driver's foot is the same.
+- An unprotected turn (Kellen, 2026-10-27: the same rule as stop signs and lights) is a routed far-side turn (a left on the
+  right) across an oncoming approach (navInstruction.maneuverOpposing present, or unknown: no junction data is never
+  clear) with no stop sign or signal of its own at the junction (one within PROTECT_BEFORE_M before it to PROTECT_PAST_M
+  past it, whatever its state: a signal already holds, a stop sign already stops). turnpilotd hands it in each frame
+  (update()'s turn) and it becomes a control of its own, kind unprotectedTurn, at the junction's hold line less
+  MAP_MARGIN_M: the curve, the latch and the stop sign's gas rules, with no dwell: held, the driver is prompted at once
+  (unprotectedTurnGo), and only a gas tap goes. A failing or missing controls status leaves the turn unprotected. One the
+  car isn't held at goes with its maneuver (skipped too fast, rerouted away, passed); a held one is position-free like
+  any latch. After the go, scene_policy.py's oncoming and pedestrian holds may still stop the car: they only add holds.
 - navd's controlsStatus other than ok (navd always sets it; none is a navd from before controls) raises
   mapControlsUnavailable and keeps "Map stops/signals: <status>" in the reason: no controls on tiles without control
   data is never shown as clear.
@@ -42,9 +51,10 @@ from dataclasses import dataclass, field
 
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
-from openpilot.selfdrive.turnpilot.control_tracker import ControlTracker, TrackedControl
+from openpilot.selfdrive.turnpilot.control_tracker import JUMP_M, ControlTracker, TrackedControl
 from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S, SPEED_CAP_ACCEL_MIN
-from openpilot.selfdrive.turnpilot.scene_policy import HARD_STOP_MIN_M, NO_ACCEL_CAP, STOP_LAG_S, Stop
+from openpilot.selfdrive.turnpilot.route_follower import LEFT, TURN
+from openpilot.selfdrive.turnpilot.scene_policy import HARD_STOP_MIN_M, HOLD_LINE_M, NO_ACCEL_CAP, STOP_LAG_S, Stop
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP
 
 MAP_STOP_DECEL = 1.5          # m/s^2, the braking curve to a map stop point
@@ -67,6 +77,12 @@ DRIVE_OFF_M = 2.              # m a held car moved under the driver's gas: drive
 LIGHT_ASSOC_M = 25.           # a light belongs to the signal control whose stop point is this close to its own
 LIGHT_STALE_S = 0.6           # s: an older light message is stale (unknown)
 
+UNPROTECTED = 'unprotectedTurn'  # MapControlStatus.Kind's name for it
+UNPROTECTED_ROUTE = -1        # its key is (UNPROTECTED_ROUTE, maneuver id): a maneuver's, not a route's control
+MAP_MARGIN_M = 1.             # m short of the hold line an unprotected turn stops, as navd's controls stop short of their line
+PROTECT_BEFORE_M = 30.        # a stop sign or signal this far before the junction (its line, mapped or the junction less 11)...
+PROTECT_PAST_M = 2.           # ...to this far past it is the junction's own: the turn isn't unprotected
+
 GO_STOP_SIGN = "Stop sign: check cross traffic, press accelerator to go"
 GO_SIGNAL = "Signal ahead: light not checked, press accelerator to proceed"
 
@@ -82,6 +98,25 @@ def curve(v_ego: float, d: float) -> float:
 
 def needed(v_ego: float, d: float) -> float:
   return -v_ego ** 2 / (2. * max(d, HARD_STOP_MIN_M))
+
+
+def turn_stop_feasible(v_ego: float, distance: float) -> bool:
+  """An unprotected turn distance m ahead can be stopped for at its hold line at MAP_DECEL_MAX or gentler."""
+  return needed(max(v_ego, 0.), distance - HOLD_LINE_M - MAP_MARGIN_M) >= MAP_DECEL_MAX - 1e-9
+
+
+def unprotected_turn(maneuver, right_hand_traffic: bool = True) -> bool:
+  """A routed turn across the oncoming traffic of the road straight ahead: a junction turn to the far side (a left on the
+  right) whose junction has an oncoming approach, or might have (opposing unknown: no junction data is never clear). A
+  keep, a bend and a T's stem (opposing none) aren't. The junction's own stop sign or signal is MapControlPolicy's to
+  check (protected())."""
+  return maneuver is not None and maneuver.kind == TURN and (maneuver.side == LEFT) == right_hand_traffic and \
+    maneuver.opposing != 'none'
+
+
+def protected(controls, distance: float) -> bool:
+  """A stop sign or signal of the junction distance m ahead stops the car there already."""
+  return any(c.kind in ('stop', 'signal') and distance - PROTECT_BEFORE_M <= c.d <= distance + PROTECT_PAST_M for c in controls)
 
 
 @dataclass
@@ -145,7 +180,9 @@ class ControlState:
   action: str = 'none'
 
 
-def description(c: TrackedControl) -> str:
+def description(c: TrackedControl, turn_name: str = 'left') -> str:
+  if c.kind == UNPROTECTED:
+    return f"unprotected {turn_name}"
   if c.kind == 'stop':
     return "map stop sign (approach unverified)" if c.cross_suspect else "stop sign"
   return "signal" if c.junction else "signal (crossing)"
@@ -158,6 +195,8 @@ class MapControlPolicy:
     self.held: tuple[int, int] | None = None  # the latched control's key
     self.prev_gas = False
     self._alert, self._alert_t = 'none', 0.
+    self.turn: TrackedControl | None = None  # the unprotected turn's control (module docstring)
+    self.turn_name = 'left'
 
   def stop_ahead(self) -> float | None:
     """m to the nearest stop sign or signal the car is going to stop at (not released, not going on a green), or None:
@@ -165,6 +204,11 @@ class MapControlPolicy:
     ds = [0. if c.held else c.d for c in self.tracker.controls.values() if c.kind in ('stop', 'signal') and
           (c.held or c.d > -LATCH_PAST_M) and not (c.state is not None and (c.state.done or c.state.mode != 'stop'))]
     return min(ds) if ds else None
+
+  def turn_engaged(self, maneuver_id: int) -> bool:
+    """The unprotected turn of this maneuver is engaged (stopping for it, held at it, or released from it)."""
+    tc = self.turn
+    return tc is not None and tc.key == (UNPROTECTED_ROUTE, int(maneuver_id)) and tc.engaged
 
   def held_stops(self) -> list:
     """The latch alone, for a faulted plan whose map update failed: a held car stays held."""
@@ -183,6 +227,30 @@ class MapControlPolicy:
               if abs(dist - c.d) < LIGHT_ASSOC_M and min(signals, key=lambda o: abs(dist - o.d), default=c) is c}
     return states.pop() if len(states) == 1 else 'unknown'
 
+  def _turn_control(self, turn, controls, v: float, dt: float) -> TrackedControl | None:
+    """The unprotected turn's control this frame. turn: (maneuver id, m to its junction, 'left' or 'right') for an
+    unprotected_turn() the car is taking (not skipped), or None."""
+    tc = self.turn
+    if tc is not None and tc.held:
+      return tc  # position-free: only its release lets go
+    want = turn is not None and not protected(controls, turn[1])
+    key = (UNPROTECTED_ROUTE, int(turn[0])) if turn is not None else None
+    if tc is not None and (not want or tc.key != key):
+      if tc.engaged and not (tc.state is not None and tc.state.done):
+        cloudlog.event("turnpilot.unprotected_turn_dropped", key=list(tc.key), d=round(tc.d, 1), v=round(v, 2),
+                       why='protected' if turn is not None and key == tc.key else 'maneuver')
+      tc = None
+    if want:
+      d = turn[1] - HOLD_LINE_M - MAP_MARGIN_M
+      if tc is None:
+        tc = TrackedControl(key, UNPROTECTED, d)
+      else:
+        tc.jumped = abs(d - (tc.d - v * dt)) > JUMP_M
+        tc.d = d
+      self.turn_name = turn[2]
+    self.turn = tc
+    return tc
+
   def _release(self, c: TrackedControl, controls, cause: str, v: float, out: MapDecision) -> None:
     st = c.state
     st.done = 'released'
@@ -190,7 +258,9 @@ class MapControlPolicy:
       self.held, c.held = None, False
       out.released_stopped = out.released_stopped or v < LATCH_SPEED
     for o in controls:
-      if o is not c and c.d <= o.d <= c.d + RELEASE_SPAN_M and o.kind != 'yield':
+      if c.kind == UNPROTECTED:
+        break  # past a turn's hold line the route is on another road: nothing there is the same junction's
+      if o is not c and c.d <= o.d <= c.d + RELEASE_SPAN_M and o.kind not in ('yield', UNPROTECTED):
         o.state = o.state or ControlState()
         o.state.done = 'released'
     cloudlog.event("turnpilot.map_stop_released", kind=c.kind, key=list(c.key), cause=cause, d=round(c.d, 1), v=round(v, 2))
@@ -203,11 +273,15 @@ class MapControlPolicy:
     cloudlog.event("turnpilot.map_stop_overrun", error=True, kind=c.kind, key=list(c.key), d=round(c.d, 1), v=round(v, 2))
 
   def update(self, nav, updated: bool, valid: bool, v_ego: float, gas_pressed: bool, lights: Lights = NO_LIGHTS,
-             dt: float = DT_MDL) -> MapDecision:
+             dt: float = DT_MDL, turn=None) -> MapDecision:
     """nav: the latest navInstruction, updated: it arrived this frame, valid: its valid flag; carState's vEgo and
-    gasPressed; lights: light_input()'s."""
+    gasPressed; lights: light_input()'s; turn: (maneuver id, m to its junction, 'left' or 'right') of the route's
+    unprotected_turn() the car is taking, or None."""
     v = max(v_ego, 0.)
     controls = self.tracker.update(nav, updated, valid, v, dt)
+    tc = self._turn_control(turn, controls, v, dt)
+    if tc is not None:
+      controls = sorted(controls + [tc], key=lambda c: c.d)
     gas_edge, gas_lift = gas_pressed and not self.prev_gas, self.prev_gas and not gas_pressed
     self.prev_gas = gas_pressed
     out = MapDecision()
@@ -249,7 +323,7 @@ class MapControlPolicy:
       next((c for c in live if c.d > -OVERRUN_PAST_M), None)
     if pick is not None:
       st = pick.state
-      out.shown = Shown(pick.key[1], pick.kind, pick.d, st.action, st.light, lights.source, self.tracker.status, pick.line_mapped)
+      out.shown = Shown(pick.key[1] & 0xFFFF, pick.kind, pick.d, st.action, st.light, lights.source, self.tracker.status, pick.line_mapped)
       if not out.reason and pick.kind == 'signal' and st.mode == 'go' and lights.lights is not None:
         out.reason = "Green (sim oracle)"
     elif self.tracker.route:
@@ -260,9 +334,15 @@ class MapControlPolicy:
     st = c.state
     st.dwell_t += dt
     st.moved_m += v * dt
-    what = description(c)
+    what = description(c, self.turn_name)
     cause, prompt = None, None
-    if c.kind == 'stop':
+    if c.kind == UNPROTECTED:
+      # no dwell: the driver looks across and goes; until then nothing else releases it
+      prompt = 'unprotectedTurnGo'
+      if gas_edge:
+        cause = 'gas'
+      reason = f"Stopped at {what} — tap gas to go"
+    elif c.kind == 'stop':
       ready = st.dwell_t >= DWELL_S - 1e-9
       st.gas_in_dwell = st.gas_in_dwell or (gas_edge and not ready)  # ignored, and a drive-off on it is an overrun
       prompt = 'stopSignGo' if ready else None
@@ -362,7 +442,10 @@ class MapControlPolicy:
       lit = {'red': "Red light (sim oracle)", 'yellow': "Yellow light (sim oracle)"}.get(st.light)
       reason = (lit + ('' if c.junction else ' (crossing)')) if lit else f"Signal ahead: light not checked{'' if c.junction else ' (crossing)'}"
     else:
-      reason = "Map stop sign, approach unverified" if c.cross_suspect else "Stop sign ahead"
+      if c.kind == UNPROTECTED:
+        reason = f"Unprotected {self.turn_name} ahead"
+      else:
+        reason = "Map stop sign, approach unverified" if c.cross_suspect else "Stop sign ahead"
       if gas_pressed:
         st.override = True
       elif st.override and gas_lift:

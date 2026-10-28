@@ -64,6 +64,14 @@ def test_stop_sign_go_is_tapped_after_a_second():
   assert abs(first * 0.05 - 1.0) < 0.06 and taps.log[0]['reason'] == 'stopSignGo'
 
 
+def test_unprotected_turn_go_is_tapped_after_a_second():
+  from openpilot.tools.sim.bridge.beamng.driver import TAP_GAS, GasTaps
+  taps = GasTaps()
+  out = run_taps(taps, plan_msg('unprotectedTurnGo', 'holding', True), 3.)
+  first = out.index(TAP_GAS)
+  assert abs(first * 0.05 - 1.0) < 0.06 and taps.log[0]['reason'] == 'unprotectedTurnGo'
+
+
 def test_signal_go_only_on_a_ground_truth_green():
   from openpilot.tools.sim.bridge.beamng.driver import GasTaps
   for green in (False, None):  # red or yellow, or not known: never

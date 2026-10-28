@@ -25,6 +25,11 @@ Desire = log.Desire
 THREE_LANES_LEFT_TURN = ((("left",), True), (("straight",), False), (("straight", "right"), False))
 
 
+GO_TAP_S = 1.  # driver.PROMPT_TAP_S
+# a left from a T's stem (no road ahead): no unprotected-turn stop (map_controls.py), for the tests of everything else
+T_LEFT = junction_of("left", opposing='none')
+
+
 class FakeSM:
   def __init__(self):
     self.data = {'carState': car_state(0.), 'carControl': car_control(), 'navInstruction': nav_instruction(0., valid=False),
@@ -53,10 +58,18 @@ class Sim:
     self.model_kw = {}  # synthetic.road() keywords for the model's lanes
     self.model_running = True  # modeld publishing modelV2 (it doesn't while it loads the detector)
     self.nav_filter = None  # (sim, instruction) -> (instruction, valid): what navd sends instead
+    # the driver taps the gas GO_TAP_S after TurnPilot stops the car at an unprotected turn and asks for a go (as the BeamNG
+    # driver does): every left here without junction data, or across a road ahead, is one. False: no taps, for the tests of it
+    self.go_taps = True
+    self._prompted_s = 0.
     self.trace = []
 
   def step(self, objects=(), available=True, steer=0., blinker=False, lat_active=True, yaw_rate=0., gas=False,
            engaged=False):
+    prompted = self.go_taps and self.trace and self.trace[-1][2].controlPrompt == 'unprotectedTurnGo' and self.v < 0.3
+    self._prompted_s = self._prompted_s + DT_MDL if prompted else 0.
+    if self._prompted_s >= GO_TAP_S:
+      gas, self._prompted_s = True, 0.
     self.sm.updated = dict.fromkeys(self.sm.data, False)
     instr = self.navd.update(self.s)
     if instr is not None:
@@ -187,7 +200,10 @@ def test_destination_change_keeps_a_committed_turn():
   after = [(s, v, plan) for s, v, plan in sim.trace if s > switch]
   before = [(v, plan) for s, v, plan in after if s < 300.]
   assert all(plan.desire != CLEAR_DESIRE and plan.speedCap < 6. for _, plan in before)
-  assert all(b[0] <= a[0] + 1e-6 for a, b in zip(before, before[1:], strict=False))  # never speeding up into it
+  # never speeding up into it, short of pulling away from its unprotected stop at the hold line on the driver's go
+  stopped = next(i for i, (v, plan) in enumerate(before) if v < 0.05)
+  assert before[stopped][1].mapControl.kind == 'unprotectedTurn'
+  assert all(b[0] <= a[0] + 1e-6 for a, b in zip(before[:stopped], before[1:stopped], strict=False))
   assert all(plan.desire != Desire.turnLeft for s, _, plan in after if s > 316. and plan.maneuverDistance > TURN_DESIRE_LEAD_M)
   new_left = [s for s in rising(sim.trace, 'desire', Desire.turnLeft) if s > 316.]
   assert new_left and switch + 284. - new_left[0] > MIN_FIRST_PULSE_M and max(v for _, v, _ in after) > 12.
@@ -215,7 +231,8 @@ def test_oncoming_car_holds_unprotected_left():
     x_world = spawn['x'] - 9. * (sim.t - spawn['t'])
     return ({'cls': 'car', 'x': x_world - sim.s, 'y': 5., 'vx': -9.},)
 
-  sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
+  # the scene's hold alone (no unprotected-turn stop at a T's stem): test_go_at_an_unprotected_left_* for one with it
+  sim = Sim([(300., "turn", "left", T_LEFT), (1500., "turn", "right")])
   sim.run(60., objects=oncoming, turn_at=300.)
   assert any(plan.reason == "waiting for oncoming" and plan.state == State.holding for _, _, plan in sim.trace)
   # the car stopped at the hold line while the oncoming car was less than 5 s out, then took the turn
@@ -540,7 +557,7 @@ def invalid_nav(sim):
 
 
 def approach_with_desire_out(cruise=13., to=25.):
-  sim = Sim([(300., "turn", "left", junction_of("left")), (1500., "turn", "right", junction_of("right"))], cruise=cruise)
+  sim = Sim([(300., "turn", "left", T_LEFT), (1500., "turn", "right", junction_of("right"))], cruise=cruise)
   while sim.distance() > to or sim.s < 10.:
     sim.step()
   assert Desire.turnLeft in [p.desire for _, _, p in sim.trace] and sim.trace[-1][2].speedCap < NO_SPEED_CAP
@@ -635,7 +652,7 @@ def test_turn_just_after_a_bend_or_a_new_name_is_slowed_for_not_skipped():
   # goes once the car is where navd moves past the step, not up to a second later
   for first in (("turn", "right", junction_of("right", 0, 60.)), ("new name", "straight", (0., 0., 2))):
     for gap in (40., 50.):
-      sim = Sim([(300.,) + first, (300. + gap, "turn", "left", junction_of("left")), (1500., "turn", "right", junction_of("right"))])
+      sim = Sim([(300.,) + first, (300. + gap, "turn", "left", T_LEFT), (1500., "turn", "right", junction_of("right"))])
       while sim.s < 305. + gap:
         sim.step()
       plans = [p for _, _, p in sim.trace]
@@ -651,7 +668,7 @@ def test_turn_too_close_after_a_bend_for_its_first_pulse_is_skipped_out_loud():
   # announced before the junction, however close it comes after the step
   for first in (("turn", "right", junction_of("right", 0, 60.)), ("new name", "straight", (0., 0., 2))):
     for gap in (5., 8., 10., 12., 15., 20., 25., 30.):
-      sim = Sim([(300.,) + first, (300. + gap, "turn", "left", junction_of("left", 2)), (1500., "turn", "right", junction_of("right", 2))])
+      sim = Sim([(300.,) + first, (300. + gap, "turn", "left", junction_of("left", 2, opposing='none')), (1500., "turn", "right", junction_of("right", 2))])
       while sim.s < 300. + gap + 20.:
         sim.step()
       assert not rising(sim.trace, 'desire', Desire.turnLeft), (first, gap)
@@ -668,7 +685,7 @@ def recover_after_outage(cruise, outage, reengage=1.):
   """The turn desire goes out, then the detector stops for outage s: handback, soft disable (lat active SOFT_DISABLE_S),
   then openpilot disengaged until the driver engages again reengage s after the detector comes back. Returns the sim
   and the trace index at which TurnPilot acts again."""
-  sim = Sim([(300., "turn", "left", junction_of("left")), (1500., "turn", "right", junction_of("right"))], cruise=cruise)
+  sim = Sim([(300., "turn", "left", T_LEFT), (1500., "turn", "right", junction_of("right"))], cruise=cruise)
   while sim.distance() > TURN_DESIRE_LEAD_M - 1. or sim.s < 10.:
     sim.step()
   assert sim.trace[-1][2].desire == Desire.turnLeft
@@ -708,7 +725,7 @@ def test_dropped_turn_taken_up_or_skipped_with_its_pulse_cleared():
   # loud, its pulse cleared from the model, and the turn cap kept until the car is past the junction (never turning
   # from the old pulse at speed, never speeding up into the junction)
   for lat_off, loss, pulse in ((1.5, 2.5, True), (3.0, 4.0, True), (3.2, 3.6, True), (4.4, 5.0, False)):
-    sim = Sim([(300., "turn", "left", junction_of("left")), (1500., "turn", "right", junction_of("right"))], cruise=13.)
+    sim = Sim([(300., "turn", "left", T_LEFT), (1500., "turn", "right", junction_of("right"))], cruise=13.)
     while sim.distance() > 38. or sim.s < 10.:
       sim.step()
     for i in range(int(round(loss / DT_MDL))):
@@ -740,7 +757,7 @@ def test_detector_back_after_a_stop_on_the_approach_keeps_the_turn():
   # stopped at a light 20 m before a committed left, the detector drops for 2.2 s and comes back with openpilot still
   # engaged (inside the soft disable): the standstill re-armed the desire, it wasn't dropped, so the turn isn't skipped
   # and its pulse goes again as the car pulls away
-  sim = Sim([(300., "turn", "left", junction_of("left")), (1500., "turn", "right", junction_of("right"))], cruise=13.)
+  sim = Sim([(300., "turn", "left", T_LEFT), (1500., "turn", "right", junction_of("right"))], cruise=13.)
   while sim.distance() > 20. or sim.s < 10.:
     sim.step()
   assert Desire.turnLeft in [p.desire for _, _, p in sim.trace]
@@ -845,7 +862,7 @@ def test_fault_keeps_the_next_turns_junction_hold():
   # with an oncoming car, still holds for it: maneuver ids never repeat within a drive, so the first left's commitment
   # (or a gas release) can't be read as the next one's
   for fault in (False, True):
-    sim = Sim([(300., "turn", "left"), (700., "turn", "left"), (2500., "turn", "right")])
+    sim = Sim([(300., "turn", "left", T_LEFT), (700., "turn", "left", (270., 180., 2, 'none')), (2500., "turn", "right")])
     oncoming = oncoming_at(700., 400.)
     for _ in range(int(100. / DT_MDL)):
       if fault and 500. < sim.s and not getattr(sim, 'faulted', False):
@@ -890,7 +907,7 @@ def test_fault_keeps_a_junction_hold():
   # route is gone with the fault, but the hold in force stays where it was until the scene says otherwise or the
   # driver presses the gas
   for mode in ('every frame', 'in a gap'):
-    sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
+    sim = Sim([(300., "turn", "left", T_LEFT), (1500., "turn", "right")])
     def car(sim):  # an oncoming car edging up to it
       return ({'cls': 'car', 'x': 305. - sim.s, 'y': 5., 'vx': -1.5},)
     while not (sim.v < 0.05 and sim.s > 250.):
@@ -953,7 +970,7 @@ def test_handback_never_speeds_the_car_up():
   # the driving model falls back 60 m before a left, its desire not out yet: TurnPilot hands back and the route is
   # cancelled, but through the soft disable (openpilot still steering) the car never speeds up. Once openpilot is
   # disengaged the hold goes with it
-  sim = Sim([(300., "turn", "left", junction_of("left")), (1500., "turn", "right", junction_of("right"))], cruise=13.)
+  sim = Sim([(300., "turn", "left", T_LEFT), (1500., "turn", "right", junction_of("right"))], cruise=13.)
   sim.big = True
   while sim.distance() > 60. or sim.s < 10.:
     sim.step()
@@ -1037,7 +1054,7 @@ def test_reroute_onto_the_same_turn_keeps_its_junction_where_it_was():
       if k[0] == 1:
         return invalid_nav(sim)
       if instr.maneuverDistance > -10.:
-        return nav_instruction(J - sim.s + off, "turn", "left", remaining=NEXT - sim.s, junction=junction_of("left"),
+        return nav_instruction(J - sim.s + off, "turn", "left", remaining=NEXT - sim.s, junction=T_LEFT,
                                route_count=1, ahead=[(NEXT - sim.s + off, "turn", "right", junction_of("right"))]), True
       return nav_instruction(NEXT - sim.s + off, "turn", "right", remaining=NEXT - sim.s, junction=junction_of("right"),
                              route_count=1), True
@@ -1203,3 +1220,77 @@ def test_released_hold_at_standstill_pulses_the_turn_again():
   after = sim.trace[start:]
   pulse = next(i for i, (_, _, p) in enumerate(after) if p.desire == Desire.turnRight)
   assert after[pulse][1] < 0.3, "the turn pulsed only once the car moved"
+
+
+# --- unprotected turns (map_controls.py): a left across the road ahead's traffic stops at the hold line for the driver ---
+
+TURNS_AHEAD = [(300., "turn", "left", junction_of("left")), (1500., "turn", "right", junction_of("right"))]
+
+
+def test_unprotected_left_stops_before_the_hold_line_until_the_drivers_tap():
+  sim = Sim(TURNS_AHEAD)
+  sim.go_taps = False
+  plan = stop_at(sim, 300.)
+  assert sim.distance() >= HOLD_LINE_M and 300. - sim.s >= HOLD_LINE_M  # stopped before the line, never past it
+  assert plan.shouldStop and plan.state == State.holding and plan.controlPrompt == 'unprotectedTurnGo'
+  assert plan.mapControl.kind == 'unprotectedTurn' and str(plan.mapControl.action) == 'awaitingDriver'
+  assert plan.reason == "Stopped at unprotected left — tap gas to go"
+  assert any(p.reason == "Unprotected left ahead" for _, _, p in sim.trace)
+  held_s = sim.s
+  sim.run(15.)
+  assert sim.s - held_s < 0.05 and sim.trace[-1][2].shouldStop  # no detection is no clearance: only the driver's go
+  plan = sim.step(gas=True)
+  assert not plan.shouldStop and plan.controlPrompt == 'none'
+  sim.run(15., turn_at=300.)
+  assert sim.s > 320.
+
+
+def test_left_without_junction_data_is_unprotected():
+  sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
+  sim.go_taps = False
+  plan = stop_at(sim, 300.)
+  assert plan.controlPrompt == 'unprotectedTurnGo' and 300. - sim.s >= HOLD_LINE_M
+
+
+def test_left_from_a_t_stem_or_a_right_has_no_unprotected_stop():
+  for maneuvers in ([(300., "turn", "left", junction_of("left", opposing='none')), (1500., "turn", "right", junction_of("right"))],
+                    [(300., "turn", "right", junction_of("right")), (1500., "turn", "left", junction_of("left"))]):
+    sim = Sim(maneuvers)
+    sim.go_taps = False
+    sim.run(40., turn_at=300.)
+    assert sim.s > 320. and not any(p.shouldStop or p.controlPrompt != 'none' for _, _, p in sim.trace if p.maneuverDistance > -20.)
+
+
+def test_signal_at_the_junction_protects_the_left_with_one_stop():
+  sim = Sim(TURNS_AHEAD, controls=[(289., 'signal')])
+  sim.go_taps = False
+  plan = stop_at(sim, 289.)
+  assert plan.mapControl.kind == 'signal' and plan.controlPrompt == 'signalGo'
+  sim.step(gas=True)
+  sim.run(15., turn_at=300.)
+  assert sim.s > 320. and not any(p.mapControl.kind == 'unprotectedTurn' for _, _, p in sim.trace)
+
+
+def test_left_too_fast_to_make_is_skipped_out_loud_not_braked_for():
+  sim = Sim([(90., "turn", "left", junction_of("left")), (2000., "turn", "right")], cruise=20.)
+  sim.v = 20.
+  sim.go_taps = False
+  sim.run(10.)
+  assert any(p.tooFastToTurn for _, _, p in sim.trace)
+  assert not any(p.shouldStop or p.controlAlert == 'cannotStopComfortably' or p.mapControl.kind == 'unprotectedTurn'
+                 for _, _, p in sim.trace[5:])
+  assert sim.s > 120.
+
+
+def test_left_whose_stop_cant_be_made_is_skipped_though_the_turn_could_be():
+  # first seen 31 m out at 10 m/s: slowing to the turn's speed by the junction is fine, but stopping at its hold line
+  # needs -2.3 m/s^2. An unprotected left is only taken from that stop: skipped out loud and rerouted, never braked for
+  for junction, skipped in ((junction_of("left"), True), (T_LEFT, False)):
+    sim = Sim([(31., "turn", "left", junction), (2000., "turn", "right")], cruise=10.)
+    sim.v = 10.
+    sim.go_taps = False
+    sim.run(6., turn_at=31.)
+    assert any(p.tooFastToTurn for _, _, p in sim.trace) == skipped
+    assert not any(p.shouldStop or p.controlAlert == 'cannotStopComfortably' or p.mapControl.kind == 'unprotectedTurn'
+                   for _, _, p in sim.trace)
+    assert any(p.desire == Desire.turnLeft for _, _, p in sim.trace) != skipped
