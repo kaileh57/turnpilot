@@ -3,10 +3,12 @@ import json
 import re
 import socket
 import struct
+import tempfile
 import threading
 import time
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest import mock
 
 import numpy as np
@@ -15,6 +17,9 @@ from openpilot.cereal import messaging
 from openpilot.common.params import Params
 from openpilot.common.qrcode import decode_matrix
 from openpilot.common.test import OpenpilotTestCase
+from openpilot.selfdrive.turnpilot.maps.coverage import coverage_path, save
+from openpilot.selfdrive.turnpilot.maps.status import STATUS_PARAM
+from openpilot.selfdrive.turnpilot.maps.tests.fakes import CHICAGO, INDY, KEY, SEATTLE, WORLD, MapServer, coverage_doc
 from openpilot.selfdrive.turnpilot.web import pairing, places, server, status
 from openpilot.selfdrive.turnpilot.web.store import Store, ensure_token, last_gps_position
 
@@ -40,11 +45,16 @@ class FakeSearch:
 class WebTestCase(OpenpilotTestCase):
   """A real server on a free port, backed by the per-test Params that OpenpilotTestCase isolates."""
   HANDLER_TIMEOUT = None  # a test that waits on timeouts sets a short one
+  COVERAGE = WORLD
 
   def setup_method(self):
     self.params = Params()
     self.search = FakeSearch([{"name": "Cafe", "detail": "1 Main St", "latitude": 39.1, "longitude": -86.2}])
-    self.app = server.App(self.params, reader=None, search=self.search, resolve=places.resolve_apple_maps)
+    maps = tempfile.TemporaryDirectory()
+    self.addCleanup(maps.cleanup)
+    self.maps = Path(maps.name)
+    save(self.COVERAGE, self.maps)  # most of these tests are about the page, not the geofence: there everywhere is mapped
+    self.app = server.App(self.params, reader=None, search=self.search, resolve=places.resolve_apple_maps, maps_dir=self.maps)
     self.token = ensure_token(self.params)
     if self.HANDLER_TIMEOUT:
       patcher = mock.patch.object(server.Handler, "timeout", self.HANDLER_TIMEOUT)
@@ -338,6 +348,113 @@ class TestDestination(WebTestCase):
     assert (code, body) == (200, {"results": []}) and self.search.calls == []
     self.search.error = ConnectionError("offline")
     assert self.call("GET", "/api/search?q=cafe")[0] == 502
+
+
+class TestGeofence(WebTestCase):
+  """The destination endpoint against Indianapolis and Seattle, as the real map server draws them."""
+  COVERAGE = coverage_doc()
+
+  def navigate(self, lon_lat, name="Place"):
+    return self.call("POST", "/api/destination", {"latitude": lon_lat[1], "longitude": lon_lat[0], "name": name})
+
+  def test_inside_is_accepted(self):
+    assert self.navigate(INDY)[0] == 200
+    assert self.navigate(SEATTLE)[0] == 200  # the car's position is unknown here, so either area
+
+  def test_outside_is_refused_and_nothing_is_saved(self):
+    code, body, _ = self.navigate(CHICAGO, "Chicago")
+    assert code == 422
+    assert body["error"] == "Outside TurnPilot's mapped area. TurnPilot can only navigate around Indianapolis and Seattle."
+    assert body["code"] == "outside_coverage"
+    assert [r["id"] for r in body["regions"]] == ["indianapolis", "seattle"]
+    assert self.params.get("NavDestination") is None
+    assert self.call("GET", "/api/favorites")[1]["recents"] == []
+
+  def test_apple_maps_links_are_checked_too(self):
+    code, body, _ = self.call("POST", "/api/destination", {"url": "https://maps.apple.com/?ll=41.88,-87.63&q=Chicago"})
+    assert code == 422 and "Outside" in body["error"]
+
+  def test_car_position_is_checked(self):
+    with mock.patch.object(self.app, "position", return_value=(CHICAGO[1], CHICAGO[0])):
+      code, body, _ = self.navigate(INDY)
+    assert code == 422 and body["error"].startswith("The car is outside")
+    with mock.patch.object(self.app, "position", return_value=(SEATTLE[1], SEATTLE[0])):
+      code, body, _ = self.navigate(INDY)
+    assert code == 422 and body["code"] == "different_regions"
+
+  def test_no_coverage_is_a_loud_refusal(self):
+    coverage_path(self.maps).unlink()
+    code, body, _ = self.navigate(INDY)
+    assert code == 422 and body["code"] == "no_coverage" and "never downloaded" in body["error"]
+    assert self.params.get("NavDestination") is None
+    m = self.call("GET", "/api/status")[1]["map"]
+    assert m["coverage"] is None and "never downloaded" in m["coverage_error"]
+    assert self.call("GET", "/api/coverage")[1]["coverage"] is None
+
+  def test_local_tiles_override_has_no_geofence(self):
+    coverage_path(self.maps).unlink()  # as in the sim
+    self.params.put("TurnPilotValhallaTiles", "/sim/tiles")
+    assert self.navigate(CHICAGO)[0] == 200
+    assert self.call("GET", "/api/status")[1]["map"]["override"] == "/sim/tiles"
+
+  def test_status_map(self):
+    self.params.put(STATUS_PARAM, {"state": "downloading", "message": "Downloading map for this drive…", "short": "Downloading map",
+                                   "code": "", "progress": 0.4, "at": 1})
+    with mock.patch.object(self.app.store, "last_gps", return_value=(INDY[1], INDY[0])):
+      m = self.call("GET", "/api/status")[1]["map"]
+    assert m["car_region"] == "Indianapolis area" and not m["car_outside"]
+    assert m["coverage"]["names"] == "Indianapolis and Seattle"
+    assert m["nav"]["state"] == "downloading" and m["nav"]["progress"] == 0.4
+    assert m["missing"] == ["address", "API key", "certificate"]
+    with mock.patch.object(self.app.store, "last_gps", return_value=(CHICAGO[1], CHICAGO[0])):
+      m = self.call("GET", "/api/status")[1]["map"]
+    assert m["car_outside"] and m["car_region"] is None
+
+  def test_coverage_endpoint(self):
+    body = self.call("GET", "/api/coverage")[1]
+    assert body["coverage"]["type"] == "FeatureCollection" and body["names"] == "Indianapolis and Seattle" and body["error"] is None
+
+  def test_page_has_the_map_and_its_error(self):
+    page = server.INDEX.read_text()
+    assert 'id="mapview"' in page and 'id="maperror"' in page and "Downloading map for this drive" in page
+    script = page.split("<script>")[1]
+    assert "https://" not in script.replace('"http://www.w3.org/2000/svg"', "")  # no tile servers or other hosts
+
+
+class TestMapSettings(WebTestCase):
+  @property
+  def map_server(self):
+    """A fake map server, and no coverage yet: saving the settings fetches it."""
+    if not hasattr(self, "_map_server"):
+      self._map_server = MapServer()
+      self.addCleanup(self._map_server.close)
+      coverage_path(self.maps).unlink()
+    return self._map_server
+
+  def test_save_check_and_never_echo_the_key(self):
+    assert self.map_server
+    assert self.call("GET", "/api/map")[1] == {"host": "", "key_set": False, "key_hint": "", "cert_set": False, "cert_fingerprint": ""}
+    code, body, _ = self.call("POST", "/api/map", {"host": self.map_server.host, "key": KEY, "cert": self.map_server.cert})
+    assert code == 200 and body["coverage_ok"], body
+    assert body["key_set"] and body["key_hint"] == KEY[-4:] and len(body["cert_fingerprint"]) == 95
+    assert self.params.get("TurnPilotMapKey") == KEY
+    for path in ("/api/map", "/api/status", "/api/coverage"):
+      assert KEY not in json.dumps(self.call("GET", path)[1]), path
+    assert self.call("GET", "/api/coverage")[1]["names"] == "Indianapolis and Seattle"  # fetched on save
+    assert self.call("POST", "/api/destination", {"latitude": CHICAGO[1], "longitude": CHICAGO[0]})[0] == 422
+
+  def test_an_empty_field_keeps_the_saved_value_and_errors_show(self):
+    self.call("POST", "/api/map", {"host": self.map_server.host, "key": KEY, "cert": self.map_server.cert})
+    code, body, _ = self.call("POST", "/api/map", {"key": "wrong-key-0000"})
+    assert code == 200 and not body["coverage_ok"] and "API key" in body["coverage_error"]
+    assert self.params.get("TurnPilotMapHost") == self.map_server.host
+    assert self.params.get("TurnPilotMapCert").strip() == self.map_server.cert.strip()
+
+  def test_bad_settings_are_refused(self):
+    assert self.call("POST", "/api/map", {"host": "http://136.113.85.41"})[0] == 400
+    assert self.call("POST", "/api/map", {"cert": "hello"})[0] == 400
+    assert self.call("POST", "/api/map", {})[0] == 400
+    assert self.params.get("TurnPilotMapHost") is None
 
 
 class TestFavorites(WebTestCase):
@@ -717,7 +834,7 @@ class TestStatus(OpenpilotTestCase):
     assert status.maneuver_text("", "", "Main St") == "Main St"
 
   def test_status_endpoint_without_a_reader(self):
-    app = server.App(Params(), reader=None)
+    app = server.App(Params(), reader=None, maps_dir=Path("/nonexistent/turnpilot/maps"))
     assert app.status()["reading"] is False
 
 

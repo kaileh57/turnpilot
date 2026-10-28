@@ -54,7 +54,7 @@ class Director(threading.Thread):
     super().__init__(name='scenario_director', daemon=True)
     self.host, self.port, self.log = host, port, log
     self.jobs: queue.Queue = queue.Queue()
-    self.poses: dict[str, tuple] = {}  # name -> (x, y, heading), the latest
+    self.poses: dict[str, tuple] = {}  # name -> (x, y, heading, z), the latest
     self.walkers: dict[str, dict] = {}
     self.cars: dict[str, dict] = {}
     self.bng = None
@@ -111,7 +111,7 @@ class Director(threading.Thread):
           p[2] = z if abs(z - p[2]) < Z_ABOVE else p[2]  # a missed ray reads 2 km down
         scenario.spawn_pedestrian(self.bng, a.name, *path[0], heading=a.heading)
         self.walkers[a.name] = {'actor': a, 'path': path, 't0': None, 'done': False}
-        self.poses[a.name] = (float(path[0][0]), float(path[0][1]), a.heading)
+        self.poses[a.name] = (float(path[0][0]), float(path[0][1]), a.heading, float(path[0][2]))
       else:
         v = Vehicle(a.name, model=CAR_MODEL, license='SCENARIO', color=(0.75, 0.75, 0.78))
         pos = (float(path[0][0]), float(path[0][1]), float(path[0][2]) + 0.5)
@@ -120,7 +120,7 @@ class Director(threading.Thread):
         v.ai.set_mode('disabled')
         v.control(throttle=0.0, brake=1.0)
         self.cars[a.name] = {'actor': a, 'vehicle': v, 'end_t': None}
-        self.poses[a.name] = (pos[0], pos[1], a.heading)
+        self.poses[a.name] = (pos[0], pos[1], a.heading, pos[2])
 
   def walk(self, name: str):
     self.walkers[name]['t0'] = time.monotonic()
@@ -180,7 +180,7 @@ class Director(threading.Thread):
       t = now - w['t0']
       p, h = walker_pose(w['path'], t, w['actor'].speed)
       scenario.move_pedestrian(self.bng, name, float(p[0]), float(p[1]), float(p[2]), h)
-      self.poses[name] = (float(p[0]), float(p[1]), h)
+      self.poses[name] = (float(p[0]), float(p[1]), h, float(p[2]))
       w['done'] = t * w['actor'].speed > float(arc_lengths(w['path'])[-1])
     if self.cars and now >= self._next_poll:
       self._next_poll = now + POLL_PERIOD
@@ -188,5 +188,5 @@ class Director(threading.Thread):
         if car['end_t'] is not None and now > car['end_t']:
           self._remove_car(name, car)  # past the junction and gone: free the memory
           continue
-        (x, y, _), h = scenario.ego_pose(self.bng, name)
-        self.poses[name] = (x, y, h)
+        (x, y, z), h = scenario.ego_pose(self.bng, name)
+        self.poses[name] = (x, y, h, z)

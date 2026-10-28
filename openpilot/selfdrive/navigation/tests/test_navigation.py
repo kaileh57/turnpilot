@@ -23,6 +23,7 @@ from openpilot.selfdrive.navigation.renderer import MAJOR, MEDIUM, MINOR, SIZE, 
 from openpilot.selfdrive.navigation.route import RouteTracker
 from openpilot.selfdrive.navigation.tiles import RemoteTiles
 from openpilot.selfdrive.navigation.vector_tile import decode_lines, decode_roads
+from openpilot.selfdrive.turnpilot.maps.client import MapError
 
 METER = 1 / 111319.49079327358  # degrees of latitude
 
@@ -83,19 +84,39 @@ def local_archive(data):
     yield archive
 
 
-def mapbox_response(steps):
-  response = MagicMock(status_code=200)
-  response.json.return_value = {'routes': [{'legs': [{'steps': steps}]}]}
-  return response
+class StubRouter:
+  """Stands in for navd's MapRouter (turnpilot/routing/sources.py, tested there): the steps it is given, or its error."""
+  def __init__(self, steps=None):
+    self.steps, self.error, self.calls = steps, None, []
+    self.status = MagicMock()
+
+  @property
+  def call_count(self):
+    return len(self.calls)
+
+  def route(self, start, destination, bearing, language):
+    self.calls.append((start, destination, bearing, language))
+    if self.error is not None:
+      raise self.error
+    return self.steps
+
+  def clear(self):
+    pass
 
 
-def route_engine(sm, pm, values):
+@contextmanager
+def serving(engine, steps):
+  """The router answers with steps; yields it, with the calls made inside the block."""
+  engine.router.steps = steps
+  engine.router.calls = []
+  yield engine.router
+
+
+def route_engine(sm, pm, values, steps=None):
   params = MagicMock()
   params.get.side_effect = values.get
   params.remove.side_effect = lambda key: values.pop(key, None)
-  with patch('openpilot.selfdrive.navigation.navd.Api') as api:
-    api.return_value.get_token.return_value = 'test-token'
-    return RouteEngine(sm, pm, params=params)
+  return RouteEngine(sm, pm, params=params, router=StubRouter(steps))
 
 
 class RangeHandler(BaseHTTPRequestHandler):
@@ -149,13 +170,12 @@ class TestEndToEnd(TileServerCase):
   def test_navd_to_map_frames(self):
     """navd routes a destination over messaging; mapsd fetches tiles over HTTP and renders map frames."""
     destination = {'latitude': 0.01, 'longitude': 0}
-    self.enterContext(patch('requests.get', return_value=mapbox_response([
-      {'geometry': {'coordinates': [[0, -0.01], [0, 0.01]]}, 'distance': 2224, 'duration': 100, 'bannerInstructions': []}])))
+    steps = [{'geometry': {'coordinates': [[0, -0.01], [0, 0.01]]}, 'distance': 2224, 'duration': 100, 'bannerInstructions': []}]
     with OpenpilotPrefix():
       pm = messaging.PubMaster(['navInstruction', 'navRoute', 'gpsLocationExternal'])
       sm = messaging.SubMaster(['gpsLocation', 'gpsLocationExternal', 'navRoute'])
       values = {'NavDestination': dict(destination)}
-      navd = route_engine(messaging.SubMaster(['gpsLocation', 'gpsLocationExternal']), pm, values)
+      navd = route_engine(messaging.SubMaster(['gpsLocation', 'gpsLocationExternal']), pm, values, steps)
       mapsd = MapsD()
       self.addCleanup(mapsd.close)
 
@@ -258,26 +278,24 @@ class TestRouteEngine(unittest.TestCase):
     self.engine = route_engine(self.sm, self.pm, self.values)
     self.engine.last_position, self.engine.last_bearing = (0, 0), 90
     distance = 111.195  # Mapbox's length of 0.001 degrees at the equator
-    self.response = mapbox_response([
+    self.response = [
       {'geometry': {'coordinates': [[0, 0], [0.0005, 0], [0.001, 0]]}, 'distance': distance, 'duration': 10,
        'bannerInstructions': [{'distanceAlongGeometry': 100, 'primary': {'text': 'Turn right', 'type': 'turn', 'modifier': 'right'}}]},
       {'geometry': {'coordinates': [[0.001, 0], [0.002, 0]]}, 'distance': distance, 'duration': 10, 'bannerInstructions': []},
-    ])
+    ]
 
   def last_message(self, service):
     return next(call.args[1] for call in reversed(self.pm.send.call_args_list) if call.args[0] == service)
 
   def load_route(self):
-    with patch('requests.get', return_value=self.response) as get:
+    with serving(self.engine, self.response) as get:
       self.engine.calculate_route((0.002, 0))
     self.engine.send_route()
     return get
 
   def test_request_and_instruction(self):
     get = self.load_route()
-    self.assertEqual(get.call_args.args[0], 'https://api.commadotai.com/v1/nav/directions/v5/mapbox/driving-traffic/0,0;0.002,0')
-    options = get.call_args.kwargs['params']
-    self.assertEqual((options['access_token'], options['bearings'], options['language']), ('test-token', '90,90;', 'en'))
+    self.assertEqual(get.calls, [((0, 0), (0.002, 0), 90, 'en')])  # the ego's position and bearing, and the language
     self.assertEqual(len(self.last_message('navRoute').navRoute.coordinates), 5)
     self.engine.send_instruction()
     message = self.last_message('navInstruction')
@@ -303,7 +321,7 @@ class TestRouteEngine(unittest.TestCase):
   def test_route_sent_on_change_and_periodically(self):
     sent = lambda: sum(call.args[0] == 'navRoute' for call in self.pm.send.call_args_list)  # noqa: E731
     self.sm.frame = 1
-    with patch('requests.get', return_value=self.response):
+    with serving(self.engine, self.response):
       self.engine.update()  # the route to a new destination is sent once
       self.engine.update()
     self.assertEqual(sent(), 1)
@@ -315,7 +333,7 @@ class TestRouteEngine(unittest.TestCase):
     # TurnPilot: a new route can start with a maneuver like the old one's, so one invalid instruction goes between them
     valid = lambda: [call.args[1].valid for call in self.pm.send.call_args_list if call.args[0] == 'navInstruction']  # noqa: E731
     self.sm.frame = 1
-    with patch('requests.get', return_value=self.response):
+    with serving(self.engine, self.response):
       self.engine.update()
       self.values['NavDestination'] = {'latitude': 0, 'longitude': 0.003}
       self.engine.recompute_hold = 0
@@ -329,10 +347,10 @@ class TestRouteEngine(unittest.TestCase):
     for _ in range(REROUTE_COUNTER_MIN):
       self.assertFalse(self.engine.should_recompute())
     self.assertTrue(self.engine.should_recompute())
-    with patch('requests.get') as get:
+    with serving(self.engine, self.response) as get:
       self.engine.recompute_route(gps_ok=False)  # but not while the GPS drifts in a tunnel
-      get.assert_not_called()
-    with patch('requests.get', return_value=self.response) as get:
+      self.assertEqual(get.call_count, 0)
+    with serving(self.engine, self.response) as get:
       self.engine.recompute_route(gps_ok=True)
       self.engine.reroute_counter = REROUTE_COUNTER_MIN  # still off route, but an immediate second recompute is held back
       self.engine.recompute_route(gps_ok=True)
@@ -360,11 +378,11 @@ class TestRouteEngine(unittest.TestCase):
 
   def test_sharp_turn_moves_on_to_the_next_step(self):
     distance = 111.195
-    self.response = mapbox_response([
+    self.response = [
       {'geometry': {'coordinates': [[0, 0], [0.001, 0]]}, 'distance': distance, 'duration': 10,
        'bannerInstructions': [{'distanceAlongGeometry': 100, 'primary': {'text': 'Turn left', 'type': 'turn', 'modifier': 'left'}}]},
       {'geometry': {'coordinates': [[0.001, 0], [0.001, 0.002]]}, 'distance': 2 * distance, 'duration': 20, 'bannerInstructions': []},
-    ])
+    ]
     self.load_route()
     # 22 m up the road it turned into: along the first step that is short of its end + 10 m, but it is on the second
     self.engine.last_position = (0.001, 0.0002)
@@ -374,7 +392,7 @@ class TestRouteEngine(unittest.TestCase):
 
   def test_failed_request_clears_route(self):
     self.load_route()
-    self.response.raise_for_status.side_effect = requests.HTTPError('test failure')
+    self.engine.router.error = MapError('unreachable', "Can't reach the TurnPilot map server")
     self.load_route()
     self.assertIsNone(self.engine.route)
     self.assertEqual(len(self.last_message('navRoute').navRoute.coordinates), 0)
@@ -386,7 +404,7 @@ class TestRouteEngine(unittest.TestCase):
              'gpsLocationExternal': SimpleNamespace(hasFix=True, latitude=2, longitude=2, bearingDeg=0)}
     self.sm.__getitem__.side_effect = fixes.get
     self.sm.logMonoTime = {'gpsLocation': 2, 'gpsLocationExternal': 1}  # replayed logs are judged by receipt time
-    with patch('requests.get', return_value=self.response):
+    with serving(self.engine, self.response):
       self.engine.update()
       self.assertEqual((self.engine.last_position, self.engine.last_bearing), ((1, 1), 180))  # the newest fix wins
       self.sm.valid['gpsLocation'] = False

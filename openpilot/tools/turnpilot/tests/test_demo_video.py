@@ -27,6 +27,12 @@ class TestCut:
     with pytest.raises(ValueError):
       cut(rec(100.0, 10.0), rec(200.0, 10.0))
 
+  def test_route_stats_run(self):
+    stats = [{'run': 1, 'route': 'town15b2', 'end': 'arrived', 'wall_start': 100.0, 'duration_s': 50.0, 'maneuvers_taken': 7,
+              'maneuvers_attempted': 7, 'disengagement_count': 0}]
+    assert demo_video.run_window(stats, 1) == (100.0, 150.0 + demo_video.RUN_TAIL_S)
+    assert demo_video.caption_for(stats, 1) == "route town15b2   run 1 arrived   maneuvers 7/7   disengagements 0"
+
   def test_retime(self):
     # 826 frames at a nominal 60 fps drawn over 14.33 s: each video second is 1.041 real seconds
     meta = {'start': 0.0, 'end': 14.33, 'frames': 826, 'fps': 60}

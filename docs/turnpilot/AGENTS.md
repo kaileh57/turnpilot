@@ -18,7 +18,7 @@ The goal is a destination-to-destination drive with zero disengagements in a rea
 - The interfaces are fixed:
   - the cereal structs `TurnpilotPlan`, `TurnpilotDetections` and `TurnpilotScene` in `openpilot/cereal/custom.capnp`
   - the services `turnpilotPlan`, `turnpilotDetections` and `turnpilotScene`
-  - the params `TurnPilotEnabled`, `TurnPilotShadowMode`, `TurnPilotRouteSource`, `TurnPilotValhallaTiles`, `TurnPilotWebToken` and `TurnPilotFavorites`
+  - the params `TurnPilotEnabled`, `TurnPilotShadowMode`, `TurnPilotRouteSource`, `TurnPilotValhallaTiles`, `TurnPilotWebToken`, `TurnPilotFavorites`, `TurnPilotMapHost`, `TurnPilotMapKey`, `TurnPilotMapCert`, `TurnPilotMapCoverageStatus` and `TurnPilotMapStatus`
 
   If you need a change, make it in your branch and say so in your report.
 - Don't get stuck in analysis paralysis. Build the simple version that works, test it, and move on.

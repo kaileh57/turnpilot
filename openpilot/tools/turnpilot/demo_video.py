@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Demo video: the BeamNG chase view and the openpilot UI side by side, cut to the time both recordings cover (or to one
-scenario run), over a caption strip with the scenario, the maneuvers taken and the disengagements.
+scenario or route_drive run), over a caption strip with the scenario, the maneuvers taken and the disengagements.
 
-The recordings line up by the wall-clock time of their first frames, from `<video>.start.json` next to each: the
-scenario runner writes it for the chase capture (bridge --capture) and record_ui.py for the UI (upstream RECORD=1). The
+The recordings line up by the wall-clock time of their first frames, from `<video>.start.json` next to each:
+chase_render.py writes it for the chase view it renders after a drive, and record_ui.py for the UI (upstream RECORD=1). The
 UI recorder writes frames at its target rate however fast the UI really drew them, so the UI's sidecar also holds its
 frame count and real span, and the UI is retimed to real time. Without a sidecar, pass --chase-start/--ui-start (epoch
 seconds); the file's creation time (macOS st_birthtime) is the last resort.
@@ -86,9 +86,22 @@ def even(x: float) -> int:
   return max(2, int(round(x / 2.0)) * 2)
 
 
-def caption_for(result: dict | None, run: int) -> str:
+def run_window(result: dict | list, run: int) -> tuple[float, float]:
+  """Wall-clock span of a run, plus RUN_TAIL_S: from the scenario runner's result.json or route_stats.py's stats JSON."""
+  if isinstance(result, list):
+    r = result[run - 1]
+    return r['wall_start'], r['wall_start'] + r['duration_s'] + RUN_TAIL_S
+  r = result['runs'][run - 1]
+  return r['t_start_wall'], r['t_end_wall'] + RUN_TAIL_S
+
+
+def caption_for(result: dict | list | None, run: int) -> str:
   if result is None:
     return "TurnPilot"
+  if isinstance(result, list):  # route_stats.py: one entry a run of route_drive
+    r = result[run - 1]
+    return "   ".join([f"route {r['route']}", f"run {r['run']} {r['end']}", f"maneuvers {r['maneuvers_taken']}/{r['maneuvers_attempted']}",
+                        f"disengagements {r['disengagement_count']}"])
   r = result['runs'][run - 1]
   return "   ".join([result['scenario'], f"run {r['run']} {'pass' if r['passed'] else 'fail'}",
                       f"maneuvers {r['maneuvers_taken']}/{r['maneuvers_attempted']}", f"disengagements {len(r['disengagements'])}"])
@@ -126,11 +139,12 @@ def ffmpeg_cmd(chase: Recording, ui: Recording, offsets, caption_path: str, out:
 
 def main(argv=None):
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-  ap.add_argument('--chase', required=True, help='BeamNG chase mp4 (bridge --capture)')
+  ap.add_argument('--chase', required=True, help='BeamNG chase mp4 (beamng/chase_render.py)')
   ap.add_argument('--ui', required=True, help='openpilot UI mp4 (record_ui.py)')
   ap.add_argument('--chase-start', type=float, default=None, help="wall-clock time of the chase video's first frame")
   ap.add_argument('--ui-start', type=float, default=None, help="wall-clock time of the UI video's first frame")
-  ap.add_argument('--result', default='', help="the scenario runner's result.json, for the caption and the run's span")
+  ap.add_argument('--result', default='',
+                  help="the scenario runner's result.json or route_stats.py's <run>_stats.json, for the caption and the run's span")
   ap.add_argument('--run', type=int, default=1, help='run in --result')
   ap.add_argument('--caption', default='', help='caption text (default: from --result)')
   ap.add_argument('--height', type=int, default=540, help='height of each view')
@@ -139,12 +153,12 @@ def main(argv=None):
   args = ap.parse_args(argv)
 
   chase, ui = load(args.chase, args.chase_start), load(args.ui, args.ui_start)
-  result, window = None, None
+  result: dict | list | None = None
+  window = None
   if args.result:
     with open(args.result) as f:
       result = json.load(f)
-    r = result['runs'][args.run - 1]
-    window = (r['t_start_wall'], r['t_end_wall'] + RUN_TAIL_S)
+    window = run_window(result, args.run)
   offsets = cut(chase, ui, window)
   os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
   with tempfile.TemporaryDirectory() as tmp:

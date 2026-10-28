@@ -52,6 +52,41 @@ class BeamNGConfig:
   restore: bool = False  # on exit, undo the global game changes above (signals, HUD, particles, light): the game is shared
 
 
+def load_scenario(bng, cfg: BeamNGConfig, log=print) -> tuple[Vehicle, float]:
+  """Load the bridge's scenario, or reuse it when the game already has it, and set the game up as cfg says, with the
+  ego at cfg's spawn. Returns the ego and the level's time of day from before (for restore_game). The bridge and the
+  chase re-render (chase_render.py) share it, so a re-render sees the game the drive saw."""
+  ego = None
+  if not cfg.reload:
+    try:
+      sc = bng.scenario.get_current()
+      v = sc.vehicles.get('ego')
+      if sc.name == cfg.scenario and getattr(sc.level, 'name', sc.level) == cfg.level and v is not None and v.model == cfg.model:
+        ego = v
+        log(f"reusing the loaded scenario {cfg.scenario}")
+    except Exception as e:
+      log(f"no reusable scenario ({e!r})")
+  if ego is None:
+    sc = Scenario(cfg.level, cfg.scenario, description="TurnPilot sim bridge")
+    ego = Vehicle('ego', model=cfg.model, license='TURNPLT')
+    sc.add_vehicle(ego, pos=cfg.spawn_pos, rot_quat=cfg.spawn_rot)
+    t0 = time.monotonic()
+    sc.make(bng)
+    bng.scenario.load(sc)
+    bng.scenario.start()
+    log(f"loaded {cfg.level} in {time.monotonic() - t0:.0f} s")
+  bng.control.resume()
+  tod0 = float(bng.env.get_tod()['time'])
+  if cfg.lean:
+    bng.ui.hide_hud()
+    bng.settings.set_particles_enabled(False)
+  bng.env.set_tod(tod=cfg.tod, play=False)
+  if cfg.green and cfg.level == 'west_coast_usa':
+    scenario.all_green(bng)
+  bng.vehicles.teleport('ego', cfg.spawn_pos, cfg.spawn_rot)
+  return ego, tod0
+
+
 class BeamNGState(SimulatorState):
   def __init__(self):
     super().__init__()
@@ -103,36 +138,8 @@ class BeamNGWorld(World):
 
   # *** setup ***
   def setup_scenario(self) -> Vehicle:
-    cfg = self.cfg
-    ego = None
     with self.bng_lock:
-      if not cfg.reload:
-        try:
-          sc = self.bng.scenario.get_current()
-          v = sc.vehicles.get('ego')
-          if sc.name == cfg.scenario and getattr(sc.level, 'name', sc.level) == cfg.level and v is not None and v.model == cfg.model:
-            ego = v
-            self.log(f"reusing the loaded scenario {cfg.scenario}")
-        except Exception as e:
-          self.log(f"no reusable scenario ({e!r})")
-      if ego is None:
-        sc = Scenario(cfg.level, cfg.scenario, description="TurnPilot sim bridge")
-        ego = Vehicle('ego', model=cfg.model, license='TURNPLT')
-        sc.add_vehicle(ego, pos=cfg.spawn_pos, rot_quat=cfg.spawn_rot)
-        t0 = time.monotonic()
-        sc.make(self.bng)
-        self.bng.scenario.load(sc)
-        self.bng.scenario.start()
-        self.log(f"loaded {cfg.level} in {time.monotonic() - t0:.0f} s")
-      self.bng.control.resume()
-      self.tod0 = float(self.bng.env.get_tod()['time'])
-      if cfg.lean:
-        self.bng.ui.hide_hud()
-        self.bng.settings.set_particles_enabled(False)
-      self.bng.env.set_tod(tod=cfg.tod, play=False)
-      if cfg.green and cfg.level == 'west_coast_usa':
-        scenario.all_green(self.bng)
-      self.bng.vehicles.teleport('ego', cfg.spawn_pos, cfg.spawn_rot)
+      ego, self.tod0 = load_scenario(self.bng, self.cfg, self.log)
     ego.ai.set_mode('disabled')
     ego.set_shift_mode('realistic_automatic')
     ego.control(gear=BEAMNG_GEAR_D, steering=0.0, throttle=0.0, brake=1.0)
