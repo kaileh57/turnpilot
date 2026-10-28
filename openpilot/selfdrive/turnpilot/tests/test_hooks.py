@@ -9,7 +9,7 @@ from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
 from openpilot.selfdrive.modeld.constants import ModelConstants
-from openpilot.selfdrive.turnpilot.hooks import CLEAR_DESIRE, PLAN_MAX_AGE_S, active_plan, plan_desire
+from openpilot.selfdrive.turnpilot.hooks import CLEAR_DESIRE, PLAN_MAX_AGE_S, active_plan, plan_desire, plan_events
 from openpilot.selfdrive.turnpilot.tests.synthetic import car_state
 
 LaneChangeState = log.LaneChangeState
@@ -50,6 +50,20 @@ def test_active_plan_needs_a_fresh_valid_enabled_plan():
   assert active_plan(FakeSM({'turnpilotPlan': turnpilot_plan(False)}, valid=False)) is None
   assert active_plan(FakeSM({'turnpilotPlan': turnpilot_plan(False, state=State.disabled)})) is None
   assert active_plan(messaging.SubMaster(['turnpilotPlan'])) is None  # a real SubMaster that never got one
+
+
+def test_plan_events():
+  Fault = custom.TurnpilotPlan.Fault
+  for fault, events in ((Fault.none, []), (Fault.error, ['turnpilotUnavailable']), (Fault.noLongitudinal, ['turnpilotUnavailable'])):
+    msg = messaging.new_message('turnpilotPlan')
+    msg.turnpilotPlan.state, msg.turnpilotPlan.fault = State.disabled, fault
+    plan = msg.as_reader().turnpilotPlan
+    assert plan_events(FakeSM({'turnpilotPlan': plan})) == events
+    assert plan_events(FakeSM({'turnpilotPlan': plan}, age=PLAN_MAX_AGE_S + 0.1)) == []  # a dead turnpilotd is processNotRunning
+  assert plan_events(messaging.SubMaster(['turnpilotPlan'])) == []
+  # every event name exists, and has an alert
+  from openpilot.selfdrive.selfdrived.events import EVENTS
+  assert log.OnroadEvent.EventName.turnpilotUnavailable in EVENTS
 
 
 def modeld_inputs(sm, dh_desire=log.Desire.none, lat_active=True):

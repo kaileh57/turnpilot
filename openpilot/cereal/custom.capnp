@@ -27,6 +27,11 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
     left @1;
     right @2;
   }
+  enum Fault {
+    none @0;
+    error @1;           # turnpilotd failed this frame (logged); TurnPilot does nothing until it recovers
+    noLongitudinal @2;  # openpilot doesn't control speed on this car, so TurnPilot does nothing
+  }
   state @0 :State;
   desire @1 :UInt8;               # index into log.Desire; modeld uses it while DesireHelper is idle
   laneChange @2 :LaneChange;      # request for DesireHelper (acts like blinker plus nudge)
@@ -40,6 +45,7 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
   maneuverModifier @10 :Text;     # e.g. "left", "slight right"
   routeValid @11 :Bool;
   shadow @12 :Bool;               # computed but not applied (TurnPilotShadowMode)
+  fault @13 :Fault;               # why a disabled plan is disabled while TurnPilot is on; selfdrived shows it
 }
 
 struct TurnpilotDetections @0xaedffd8f31e7b55d {

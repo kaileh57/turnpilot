@@ -132,6 +132,7 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     excessiveActuation @96;
     bigModelLoading @100;
     bigModelFailed @102;
+    turnpilotUnavailable @105;  # TurnPilot on but doing nothing: turnpilotPlan.fault
 
     lowBatteryDEPRECATED @40;
     soundsUnavailableDEPRECATED @47;

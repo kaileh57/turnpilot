@@ -100,7 +100,8 @@ def test_plan_failure_publishes_a_disabled_plan_and_goes_on():
   assert len(plans) == len(scenes) == 10
   plans = [p.turnpilotPlan for p in plans]
   assert all(p.state == State.disabled and p.reason == turnpilotd.ERROR_REASON and p.desire == 0 for p in plans[:4])
-  assert all(p.state == State.noRoute for p in plans[4:])
+  assert all(p.fault == custom.TurnpilotPlan.Fault.error for p in plans[:4])  # selfdrived shows turnpilotUnavailable
+  assert all(p.state == State.noRoute and p.fault == custom.TurnpilotPlan.Fault.none for p in plans[4:])
   assert errors == ["turnpilotd.scene_failed", "turnpilotd.plan_failed"] * 4  # the tracker reads modelV2 too
 
 

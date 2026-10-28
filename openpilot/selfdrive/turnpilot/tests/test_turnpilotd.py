@@ -8,9 +8,10 @@ from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_control, car_state, model_v2, nav_instruction, scene
 from openpilot.selfdrive.turnpilot.desire_timing import TURN_DESIRE_LEAD_M
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, V_TURN_MIN
-from openpilot.selfdrive.turnpilot.turnpilotd import NO_LONG_REASON, TurnPilot, long_control_for
+from openpilot.selfdrive.turnpilot.turnpilotd import CAR_UNKNOWN_REASON, NO_LONG_REASON, TurnPilot, long_control_for
 
 State = custom.TurnpilotPlan.State
+Fault = custom.TurnpilotPlan.Fault
 LaneChange = custom.TurnpilotPlan.LaneChange
 Desire = log.Desire
 THREE_LANES_LEFT_TURN = ((("left",), True), (("straight",), False), (("straight", "right"), False))
@@ -93,7 +94,7 @@ def test_nothing_without_openpilot_longitudinal():
   sim.run(30., turn_at=300.)
   assert sim.s > 320.
   for _, _, plan in sim.trace:
-    assert plan.state == State.disabled and plan.reason == NO_LONG_REASON
+    assert plan.state == State.disabled and plan.reason == NO_LONG_REASON and plan.fault == Fault.noLongitudinal
     assert (plan.desire, plan.laneChange, plan.signalPrompt) == (Desire.none, LaneChange.none, LaneChange.none)
     assert (plan.accelCap, plan.speedCap, plan.shouldStop) == (NO_ACCEL_CAP, NO_SPEED_CAP, False)
 
@@ -240,7 +241,22 @@ class FakeParams(dict):
 
 
 def test_long_control_from_car_params():
-  assert not long_control_for(FakeParams())  # card hasn't written CarParams yet
+  assert long_control_for(FakeParams()) is None  # card hasn't written CarParams yet: not known
   for long_control in (False, True):
     cp = car.CarParams.new_message(openpilotLongitudinalControl=long_control)
     assert long_control_for(FakeParams(CarParams=cp.to_bytes())) == long_control
+
+
+def test_unknown_longitudinal_is_disabled_without_a_fault():
+  # every drive starts before card has written CarParams: no "TurnPilot unavailable" flash, and nothing acted on
+  sim = Sim([(300., "turn", "left")], long_control=None)
+  sim.run(2.)
+  for _, _, plan in sim.trace:
+    assert plan.state == State.disabled and plan.reason == CAR_UNKNOWN_REASON and plan.fault == Fault.none
+    assert plan.desire == Desire.none and plan.speedCap == NO_SPEED_CAP
+
+
+def test_enabled_plan_has_no_fault():
+  sim = Sim([(300., "turn", "left")])
+  sim.run(2.)
+  assert all(plan.fault == Fault.none for _, _, plan in sim.trace)

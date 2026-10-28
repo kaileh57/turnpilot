@@ -28,6 +28,21 @@ def active_plan(sm, now: float | None = None):
   return None if plan.shadow or plan.state == custom.TurnpilotPlan.State.disabled else plan
 
 
+def plan_events(sm, now: float | None = None) -> list[str]:
+  """selfdrived's onroad event names from a fresh, valid turnpilotPlan (none while it is stale: a dead turnpilotd is
+  processNotRunning already). sm is a SubMaster subscribed to turnpilotPlan."""
+  recv_t = getattr(sm, 'recv_time', {}).get('turnpilotPlan')
+  if recv_t is None or not recv_t or not getattr(sm, 'valid', {}).get('turnpilotPlan', False):
+    return []
+  if (time.monotonic() if now is None else now) - recv_t > PLAN_MAX_AGE_S:
+    return []
+  plan = sm['turnpilotPlan']
+  events = []
+  if plan.fault != custom.TurnpilotPlan.Fault.none:
+    events.append('turnpilotUnavailable')
+  return events
+
+
 def plan_desire(desire: int, lat_active: bool) -> tuple[int, bool]:
   """(desire to feed the model, clear the turn desire history) from turnpilotPlan.desire. No desire while openpilot
   isn't steering (carControl.latActive), so the model never plans a turn the driver didn't engage for; turnpilotd

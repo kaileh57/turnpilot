@@ -23,10 +23,12 @@ from openpilot.selfdrive.turnpilot.scene_policy import NO_ACCEL_CAP, scene_polic
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, turn_speed_cap
 
 State = custom.TurnpilotPlan.State
+Fault = custom.TurnpilotPlan.Fault
 
 APPROACH_M = 150.  # a turn or keep this close (or inside its lane change window) is being approached
 NO_LONG_REASON = "openpilot longitudinal is off"
 ERROR_REASON = "TurnPilot error"
+CAR_UNKNOWN_REASON = "waiting for the car's parameters"
 ERROR_LOG_PERIOD_S = 10.  # s between logged exceptions from one place, so one that fails every frame doesn't flood the log
 # the plan is invalid once carState or modelV2 have failed their checks this many frames in a row (0.5 s at 20 Hz, as
 # hooks.PLAN_MAX_AGE_S), not at the first: a plan invalid for one frame drops its desire for that frame, and modeld takes
@@ -115,25 +117,28 @@ class TurnPilot:
       plan.state = State.following
     return msg
 
-  def plan(self, sm, scene, enabled: bool, shadow: bool, *args, long_control: bool, **kwargs):
+  def plan(self, sm, scene, enabled: bool, shadow: bool, *args, long_control: bool | None, **kwargs):
     """update(), but a disabled plan while openpilot doesn't control speed (on a Tesla, without alpha longitudinal):
-    its speed caps would do nothing there, and the turn desires would go out at whatever speed stock ACC holds."""
+    its speed caps would do nothing there, and the turn desires would go out at whatever speed stock ACC holds.
+    long_control None: card hasn't written CarParams yet, so it isn't known. A disabled plan while TurnPilot is on
+    carries its fault, which selfdrived shows (turnpilotUnavailable): TurnPilot never stops working unannounced."""
     if enabled and not long_control:
       self.reset()
-      return disabled_plan(shadow, NO_LONG_REASON)
+      return disabled_plan(shadow, CAR_UNKNOWN_REASON) if long_control is None else \
+        disabled_plan(shadow, NO_LONG_REASON, Fault.noLongitudinal)
     try:
       return self.update(sm, scene, enabled, shadow, *args, **kwargs)
     except Exception:
       log_error("turnpilotd.plan_failed")
       self.reset()
-      return disabled_plan(shadow, ERROR_REASON)
+      return disabled_plan(shadow, ERROR_REASON, Fault.error)
 
 
-def disabled_plan(shadow: bool, reason: str):
+def disabled_plan(shadow: bool, reason: str, fault=Fault.none):
   """A plan nothing acts on: no desire, no lane change, no limits."""
   msg = messaging.new_message('turnpilotPlan')
   plan = msg.turnpilotPlan
-  plan.state, plan.shadow, plan.reason = State.disabled, shadow, reason
+  plan.state, plan.shadow, plan.reason, plan.fault = State.disabled, shadow, reason, fault
   plan.accelCap, plan.speedCap = NO_ACCEL_CAP, NO_SPEED_CAP
   return msg
 
@@ -156,8 +161,10 @@ def driver_signals_for(params) -> bool:
   return cp is None or cp.brand not in OPENPILOT_SIGNALS_BRANDS
 
 
-def long_control_for(params) -> bool:
-  """CarParams.openpilotLongitudinalControl; False until card has written CarParams."""
+def long_control_for(params) -> bool | None:
+  """CarParams.openpilotLongitudinalControl; None until card has written CarParams, False if they don't read."""
+  if params.get("CarParams") is None:
+    return None
   cp = car_params(params)
   return cp is not None and cp.openpilotLongitudinalControl
 
@@ -174,7 +181,7 @@ def main():
   tracker = None
   enabled = shadow = False
   driver_signals, right_hand_traffic = True, True
-  long_control = False
+  long_control: bool | None = None
   invalid_frames = PLAN_INPUT_GRACE_FRAMES
   while True:
     sm.update(0)
