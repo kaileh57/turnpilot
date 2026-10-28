@@ -1323,3 +1323,27 @@ def test_go_at_an_unprotected_left_with_a_car_coming_still_waits_for_it():
     assert sim.s - held_s < 0.05, "moved with the car still coming"
   sim.run(15., objects=car, turn_at=300.)
   assert sim.s > 320.
+
+
+def test_the_turn_pulses_on_the_go_frame_itself():
+  # BeamNG unprotected_left_visible: let go after its hold, the car drove straight across. The model only takes a rising
+  # edge, so the plan that first lets the car go carries a fresh turnLeft edge, whether the driver tapped at once or long
+  # after, and whether the latch's go or the detector clearing let it go
+  for wait in (0.3, 10.):
+    sim = Sim(TURNS_AHEAD)
+    sim.go_taps = False
+    stop_at(sim, 300.)
+    assert sim.tp.desires.started  # its pulse went out on the approach
+    sim.run(wait)
+    prev = sim.trace[-1][2]
+    plan = sim.step(gas=True)
+    assert not plan.shouldStop and plan.desire == Desire.turnLeft and prev.desire != Desire.turnLeft, wait
+  sim = Sim(TURNS_AHEAD)
+  sim.go_taps = False
+  stop_at(sim, 300.)
+  car = oncoming_from(sim, 340.)
+  sim.step(car(sim), gas=True)
+  while sim.trace[-1][2].shouldStop:
+    sim.step(car(sim))
+    assert sim.t < 60.
+  assert sim.trace[-1][2].desire == Desire.turnLeft and sim.trace[-2][2].desire != Desire.turnLeft

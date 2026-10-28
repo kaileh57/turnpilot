@@ -15,7 +15,10 @@ the turn turned the car on past the exit road, into the curb. That holds for a r
 pulls away after a standstill (STANDSTILL_REARM_S) goes while it has turned less than STANDSTILL_REPULSE_MAX_DEG: waiting
 in the junction for oncoming traffic, 15-25 degrees into a left, longer than the model's queue, the turn would lapse
 (H2, below: with the pulse gone at 5-16 degrees the model gave up 3 turns of 3); further round (stopped halfway for a
-pedestrian) none goes, and the model finishes it (H2: 9 of 10 from 25-42 degrees).
+pedestrian) none goes, and the model finishes it (H2: 9 of 10 from 25-42 degrees). While a hold has the car standing
+(turnpilotd: shouldStop) the turn desire is none, its edge still in the model's queue, so the pulse on the hold's go is
+a fresh edge in the very plan that lets the car go (BeamNG unprotected_left_visible: let go a frame or more before its
+pulse, the car drove straight across the junction).
 A repeat pulse is a short drop to none, long enough that modeld (unsynchronized, conflated subscriber) can't miss it.
 The model keeps the rising edges of the last 132 frames (6.6 s at 20 Hz, the big model's state_desire_q), and
 forgets a pulse when it leaves that queue. A pulse still in the queue once the car is round the corner turns it
@@ -95,6 +98,7 @@ class DesireTiming:
     self._held = False        # held off while openpilot wasn't steering, since the last pulse
     self._rearmed = False     # re-armed by a standstill, since the last pulse
     self._abandoned = False   # abandon()ed: TurnPilot handed back
+    self._held_none = 0       # frames of none while a hold had the car standing, since the last pulse
 
   def _turn_over(self):
     """The maneuver was passed or replaced: clear its turn desire now, or once the car has turned CLEAR_MIN_DEG."""
@@ -136,13 +140,15 @@ class DesireTiming:
 
   def update(self, maneuver, distance: float, maneuver_id: int, passed: bool, v_ego: float,
              steering_angle_deg: float, keep_left_ok: bool, keep_right_ok: bool, dt: float, yaw_rate: float = 0.,
-             lat_active: bool = True, replaced: bool = False, may_start: bool = True, go: bool = False) -> int:
+             lat_active: bool = True, replaced: bool = False, may_start: bool = True, go: bool = False,
+             holding: bool = False) -> int:
     """The desire to publish, CLEAR_DESIRE once a turn is done. maneuver is RouteFollower.upcoming (None when there is
     none); keep_left_ok/keep_right_ok: the model sees a lane line and road that way (lane_planner.ModelLanes);
     yaw_rate: rad/s, left positive; lat_active: carControl.latActive; replaced: RouteFollower.replaced;
     may_start: the car can still make the turn (turn_skip.py); no turn pulse starts while it can't; go: a hold let go of
     the car at standstill (turnpilotd): the turn pulses again now, not once the car moves, since the model won't pull
-    away from a standstill with its pulse forgotten."""
+    away from a standstill with its pulse forgotten; holding: a hold has the car (shouldStop): standing, the turn desire
+    drops to none (its edge stays in the model's queue), so the go's pulse is a fresh edge in the very frame it lets go."""
     if maneuver_id != self.maneuver_id:
       if replaced and self.side and self.turned_deg < TURN_STARTED_DEG:
         self._clear()
@@ -156,7 +162,7 @@ class DesireTiming:
       elif self._pending[2] > CLEAR_WAIT_S:
         self._pending = None
     desire = self._update(maneuver, distance, maneuver_id, passed, v_ego, keep_left_ok, keep_right_ok, dt, yaw_rate, lat_active,
-                          may_start, go)
+                          may_start, go, holding)
     if desire != Desire.none:
       self._pending = None  # the next maneuver's pulse is in the model's queue now
     if self.clear_frames > 0:
@@ -166,7 +172,7 @@ class DesireTiming:
 
   def _update(self, maneuver, distance: float, maneuver_id: int, passed: bool, v_ego: float,
               keep_left_ok: bool, keep_right_ok: bool, dt: float, yaw_rate: float, lat_active: bool, may_start: bool,
-              go: bool = False) -> int:
+              go: bool = False, holding: bool = False) -> int:
     if maneuver_id != self.maneuver_id:
       self.maneuver_id = maneuver_id
       self._reset()
@@ -207,7 +213,16 @@ class DesireTiming:
 
     if v_ego < STANDSTILL_SPEED:
       self._stopped_t += dt
-      if go and turn and self.started and self.turned_deg < STANDSTILL_REPULSE_MAX_DEG and may_start:
+      if holding and turn and self.started:
+        # held standing: none until the go, which then pulses a fresh edge at once; the edge already sent stays queued
+        self.active, self._rearmed, self._gap = False, True, 0
+        self._held_none += 1
+        return Desire.none
+      if go and turn and self.started and self.turned_deg < STANDSTILL_REPULSE_MAX_DEG and may_start and \
+         self._held_none and self._held_none < PULSE_GAP_FRAMES:
+        self._gap = PULSE_GAP_FRAMES - self._held_none  # held under PULSE_GAP_FRAMES: the drop lasts that long all the same
+        self._held_none = 0
+      elif go and turn and self.started and self.turned_deg < STANDSTILL_REPULSE_MAX_DEG and may_start:
         # a hold let go of the car here: pulse now, at standstill (GO_PULSE). A fresh one if the standstill re-armed the
         # turn, else a repeat; then the standstill clock starts over, so the car gets STANDSTILL_REARM_S to move off on it
         self._stopped_t = 0.
@@ -245,6 +260,7 @@ class DesireTiming:
         return Desire.none  # a first pulse past the junction turns the car into the curb (turn_skip.py skips it)
       self.active = self.started = True
       self._held = self._rearmed = False
+      self._held_none = 0
       self.pulses += 1
       self._since_pulse = 0.
       if turn:

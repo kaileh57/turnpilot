@@ -340,11 +340,24 @@ class TurnPilot:
     if cap_on is None and rf.maneuver_id == self.skip_cap_id:
       cap_on = upcoming  # the skipped turn's pulse may have been taken before it was cleared: never sped up into it
 
+    # the scene's holds only ever brake, so they keep the real maneuver through a handback. The press that released a map
+    # stop is its go: the scene's holds (an oncoming car, a pedestrian) only add to it (scene_policy.py)
+    self.go_press = cs.gasPressed and (mapd.gas_go or self.go_press)
+    decision = self.scene_now = self.scene.update(objects, available, maneuver, rf.distance, v_ego, right_hand_traffic, rf.maneuver_id,
+                                                 cs.gasPressed, extra_stops=mapd.stops, go_press=self.go_press)
+    # a hold let go with the car standing (the walker cleared, a stop's go): the model won't pull away on its own, and the
+    # turn's pulse is long forgotten, so it goes again in this very plan, the one that lets the car go: held, the desire
+    # was dropped to none, so it is a fresh edge (desire_timing.py). BeamNG: let go a frame before its pulse, the car drove
+    # straight across the junction
+    self.release_go = self.was_stopping and not decision.should_stop and v_ego < STANDSTILL_SPEED
+    self.was_stopping = decision.should_stop
+
     lanes = model_lanes_from_msg(model)
     desire = self.desires.update(desire_on, rf.distance, rf.maneuver_id, rf.passed, v_ego, cs.steeringAngleDeg,
                                  lanes.keep_left_ok, lanes.keep_right_ok, DT_MDL, default_yaw_rate(cs, model),
                                  lat_active=lat_active, replaced=rf.replaced,
-                                 may_start=skip.feasible_now and not held, go=self.release_go)
+                                 may_start=skip.feasible_now and not held, go=self.release_go,
+                                 holding=decision.should_stop)
     if held and desire not in (Desire.none, CLEAR_DESIRE) and desire != self.last_desire:
       desire = Desire.none  # held: the desire out stays out, but never a new rising edge (a repeat pulse under way)
     plan.desire = self.last_desire = desire
@@ -365,15 +378,6 @@ class TurnPilot:
     if found == LaneMismatch.none and acting and self.lanes.lane_unknown:
       found = LaneMismatch.laneUnknown  # no change from a lane it can't place: said instead
     plan.laneMismatch = self._lane_mismatch(found)
-    # the scene's holds only ever brake, so they keep the real maneuver through a handback. The press that released a map
-    # stop is its go: the scene's holds (an oncoming car, a pedestrian) only add to it (scene_policy.py)
-    self.go_press = cs.gasPressed and (mapd.gas_go or self.go_press)
-    decision = self.scene_now = self.scene.update(objects, available, maneuver, rf.distance, v_ego, right_hand_traffic, rf.maneuver_id,
-                                                 cs.gasPressed, extra_stops=mapd.stops, go_press=self.go_press)
-    # a hold let go with the car standing (the walker cleared, a stop's go): the model won't pull away on its own, and the
-    # turn's pulse is long forgotten, so it goes again next frame (desire_timing.py)
-    self.release_go = self.was_stopping and not decision.should_stop and v_ego < STANDSTILL_SPEED
-    self.was_stopping = decision.should_stop
     plan.accelCap = decision.accel_cap
     # past a bend or a straight-on step, the turn after it is slowed for already (route_follower.py: ahead), and still
     # once the step is dead-reckoned past, until navd moves on to the turn

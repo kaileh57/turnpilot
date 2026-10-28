@@ -431,3 +431,16 @@ def test_go_at_standstill_pulses_now():
   step_through(dt_, [(9., 1, LEFT_TURN, 45., 5., 0., False), (40. / 28.65, 1, LEFT_TURN, 0., 4., 0.5, False),
                      (STANDSTILL_REARM_S + 1., 1, LEFT_TURN, -2., 0., 0., False)])
   assert dt_.update(LEFT_TURN, -2., 1, False, 0., 0., True, True, DT_MDL, 0., go=True) == Desire.none
+
+
+def test_held_standing_the_turn_drops_to_none_so_the_go_is_an_edge_at_once():
+  # a hold that has the car standing (shouldStop) drops the turn desire to none; the go is a fresh edge in its own frame,
+  # however soon. Held fewer than PULSE_GAP_FRAMES frames, the drop is made up to that before the edge
+  for held_frames in (40, PULSE_GAP_FRAMES, 1):
+    dt_ = DesireTiming()
+    step_through(dt_, [(5., 1, LEFT_TURN, 40., 5., 0., False), (0.5, 1, LEFT_TURN, 10., 0., 0., False)])
+    held = [dt_.update(LEFT_TURN, 10., 1, False, 0., 0., True, True, DT_MDL, 0., holding=True) for _ in range(held_frames)]
+    assert set(held) == {Desire.none}, held_frames
+    out = [dt_.update(LEFT_TURN, 10., 1, False, 0., 0., True, True, DT_MDL, 0., go=k == 0) for k in range(6)]
+    first = out.index(Desire.turnLeft)
+    assert first == max(PULSE_GAP_FRAMES - held_frames, 0) and set(out[first:]) == {Desire.turnLeft}, held_frames
