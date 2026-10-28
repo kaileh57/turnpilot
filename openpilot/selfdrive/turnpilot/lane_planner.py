@@ -619,7 +619,9 @@ class LanePlanner:
     self.lane_unknown = self.paint_rule and maneuver is not None and 0. < distance < start and \
       lane_unconfirmed(maneuver, lanes, right_hand_traffic, paint, self.done, self._start)
     idle_reason = LANE_UNKNOWN_REASON if self.lane_unknown else ""
-    if stop_wait and wanted and not self.lane_unknown:
+    # an offer under way was made with room: its own checks (tooSlow, tooLate) see it through or abort it. Only with
+    # nothing offered is the lane unreachable, or would the maneuver it is changing lanes for be skipped mid-offer
+    if stop_wait and wanted and not self.lane_unknown and self.phase == Phase.IDLE and not self._pending:
       nav_known = bool(nav) and not lane_unconfirmed(maneuver, lanes, right_hand_traffic, paint, self.done, self._start)
       self._unreachable = stop_wait == 'unreachable' and nav_known and self.paint_rule
       if stop_wait == 'unreachable' and self._unreachable_logged != maneuver_id:

@@ -868,3 +868,14 @@ def test_lane_change_wait_says_why_no_change_is_offered():
   drive = Drive(1, 0, v=15., paint_rule=False)
   drive.run(m, 200., 1.)
   assert drive.decisions[-1].wait == 'paintRuleOff'
+
+
+def test_an_offer_made_with_room_before_the_stop_is_never_called_unreachable_on_its_way():
+  """The map's lane list wants one change left; the stop 100 m before the turn leaves no room after its go. The change
+  offered before it with room goes on to be made: the room running short during its own warning isn't an unreachable
+  lane (that would skip the turn the car is changing lanes for)."""
+  drive = StopDrive(1, 1, cruise=11.35, stop_at=100.)
+  drive.drive(maneuver("turn", "left", THREE_LANES_LEFT_TURN), 300., 30.)
+  assert drive.offers and drive.lp.changes == 1, (drive.offers, drive.aborts)
+  assert not [a for a, _ in drive.aborts if a == 'tooSlow']
+  assert not any(d.unreachable for d in drive.decisions)

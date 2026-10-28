@@ -126,10 +126,11 @@ class ControlTracker:
   @property
   def off_route_unknown(self) -> bool:
     """Off the route with a destination, past OFF_ROUTE_GRACE_S, and no fresh lookup that says what is ahead (module
-    docstring). Not with no destination (navd's off-route status none on its fresh invalid messages), nor before any route."""
-    if self.route or self.route_count is None or self.gap_t < OFF_ROUTE_GRACE_S:
+    docstring): rerouting, or before the first route (a corridor still downloading). Not with no destination (navd's
+    off-route status none on its fresh invalid messages), nor from a navd never heard from with a route."""
+    if self.route or self.gap_t < OFF_ROUTE_GRACE_S:
       return False
-    if self.off_status == 'none' and self.invalid and self.stale_t <= NAV_STALE_S:
+    if self.off_status == 'none' and (self.route_count is None or (self.invalid and self.stale_t <= NAV_STALE_S)):
       return False  # no destination: navd is on no route, nor trying to be
     return not (self.off_status in LOOKUP_KNOWN and self.lookup_age <= OFF_LOOKUP_STALE_S)
 

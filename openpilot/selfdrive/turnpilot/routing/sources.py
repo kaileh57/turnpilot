@@ -94,8 +94,15 @@ class MapRouter:
 
   def controls_ahead(self, position, bearing) -> tuple[list, str, list]:
     """(controls, status, road) on the road ahead of the car off the route (routing/controls.py: controls_ahead), from the source
-    that routed the last route, or the local tiles. position: navd's (longitude, latitude); bearing: deg. ([], 'failed')
-    with neither: nothing is known about the map here, said so."""
+    that routed the last route, or the local tiles (loaded here if no route has yet: TurnPilotValhallaTiles). position:
+    navd's (longitude, latitude); bearing: deg. ([], 'failed') with neither (a corridor still downloading): nothing is
+    known about the map here, said so."""
+    tiles = local_override(self.params)
+    if self.served is None and tiles and (self.local is None or self.local[0] != tiles):
+      try:
+        self.local = (tiles, self.valhalla(tiles))
+      except Exception:
+        cloudlog.exception(f"turnpilot: TurnPilotValhallaTiles ({tiles}) doesn't load for the controls ahead")
     source = self.served[1:] if self.served is not None else \
       (self.local[1], getattr(self.local[1], 'tiles_dir', None)) if self.local is not None else None
     if source is None:

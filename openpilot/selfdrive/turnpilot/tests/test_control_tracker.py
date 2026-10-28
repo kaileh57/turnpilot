@@ -178,6 +178,9 @@ def test_off_route_stops_unknown_only_after_the_grace_and_with_a_destination():
   no_dest = ControlTracker()
   step(no_dest, nav([], valid=False, off_status='none'), valid=False, n=100)
   assert not no_dest.off_route_unknown  # no destination: navd isn't on a route nor trying to be
+  first = ControlTracker()  # a destination, its first route not in yet (a corridor downloading), nothing looked up ahead
+  step(first, nav([], route_count=0, valid=False, off_status='failed'), valid=False, n=int(OFF_ROUTE_GRACE_S / DT_MDL) + 2)
+  assert first.off_route_unknown
 
 
 def test_off_route_navd_gone_quiet_is_unknown():

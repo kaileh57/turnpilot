@@ -158,6 +158,12 @@ class FakeValhalla:
 
     source.controls = controls
 
+    def controls_ahead(position, heading, tiles_dir=None):
+      source.controls_calls.append(('ahead', position, heading, tiles_dir))
+      return [], 'ok', [position, position]
+
+    source.controls_ahead = controls_ahead
+
     def route(start, destination, bearing, language):
       source.calls.append((start, destination, bearing, language))
       if self.test.route_error is not None:
@@ -465,6 +471,16 @@ class TestLocalOverride(RouterCase):
     self.assertEqual(self.router.controls(steps), ([], 'ok'))
     self.assertEqual(self.built[0].controls_calls, [(steps, '/sim/tiles')])
     self.assertEqual(self.router.controls(list(steps)), ([], 'failed'))
+
+  def test_controls_ahead_on_the_local_tiles_before_any_route(self):
+    """Off the route before the first route is in (navd's off-route lookup), the local tiles answer: the sim's first
+    seconds aren't unknown for want of a route. A corridor's source exists only once it is downloaded: failed till then."""
+    self.assertEqual(self.router.controls_ahead((-87.6, 41.8), 90.)[:2], ([], 'failed'))
+    self.params.values['TurnPilotValhallaTiles'] = '/sim/tiles'
+    self.assertEqual(self.router.controls_ahead((-87.6, 41.8), 90.)[:2], ([], 'ok'))
+    self.assertEqual(self.built[0].controls_calls, [('ahead', (41.8, -87.6), 90., '/sim/tiles')])
+    self.router.route(CHICAGO, CHICAGO, 90, 'en')
+    self.assertEqual(len(self.built), 1)  # the same actor routes
 
   def test_local_tiles_fail_loudly(self):
     self.params.values['TurnPilotValhallaTiles'] = '/sim/tiles'
