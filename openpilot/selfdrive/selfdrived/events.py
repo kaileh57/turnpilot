@@ -331,13 +331,6 @@ def turnpilot_control_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.S
                Priority.LOW, VisualAlert.none, AudibleAlert.prompt, TURNPILOT_CONTROL_ALERT_S)
 
 
-def turnpilot_control_permanent_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int,
-                                      personality) -> Alert:
-  plan = fresh_plan(sm)
-  kind = str(plan.controlAlert) if plan is not None else 'none'
-  return NormalPermanentAlert(CONTROL_ALERT_TITLE.get(kind, "TurnPilot"), CONTROL_ALERT_TEXT.get(kind, "TurnPilot stopped responding"))
-
-
 def startup_master_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
   branch = get_short_branch()  # Ensure get_short_branch is cached to avoid lags on startup
   if "REPLAY" in os.environ:
@@ -769,9 +762,8 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
     ET.WARNING: turnpilot_control_prompt_alert,
   },
 
-  EventName.turnpilotControlAlert: {
+  EventName.turnpilotControlAlert: {  # engaged only: while the driver drives, passing a stop line is theirs to judge
     ET.WARNING: turnpilot_control_alert,
-    ET.PERMANENT: turnpilot_control_permanent_alert,
   },
 
   EventName.laneChange: {
