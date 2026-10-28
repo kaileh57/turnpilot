@@ -139,3 +139,33 @@ def test_refresh_caches_and_records_status(server, tmp_path):
     refresh(params, tmp_path)
   assert e.value.code == 'bad_response'
   assert CoverageCache(tmp_path).get().version == '2026-10-27'
+
+
+def test_real_map_server_corridor_through_the_client_and_unpack(tmp_path):
+  """tools/turnpilot/mapserver/server.py's real handler over TLS, as main() serves it, into MapClient and corridor.unpack:
+  the headers the car relies on (Content-Length for progress and truncation) come from the real server, not the fake."""
+  import threading
+  from openpilot.selfdrive.turnpilot.maps import corridor
+  from tools.turnpilot.mapserver.server import Maps, make_server
+  from tools.turnpilot.mapserver.tests.test_server import SQUARE, FakeRouter, make_region, tile_rel
+
+  near = tile_rel(2, -86.1, 39.8)
+  root = tmp_path / 'regions'
+  root.mkdir()
+  region = make_region(root, 'indianapolis', SQUARE, {near: b'near tile ' * 5000, tile_rel(0, -86, 40): b'hw'},
+                       FakeRouter([[-86.2, 39.7], [-86.0, 39.9]]))
+  cert, key = self_signed()
+  (tmp_path / 'cert.pem').write_text(cert)
+  (tmp_path / 'cert.key').write_text(key)
+  httpd = make_server(Maps([region], KEY), '127.0.0.1', 0, tmp_path / 'cert.pem', tmp_path / 'cert.key')
+  threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05}, daemon=True).start()
+  try:
+    c = MapClient(f"https://127.0.0.1:{httpd.server_address[1]}", KEY, cert, tmp_path)
+    seen = []
+    c.corridor((-86.2, 39.7), (-86.0, 39.9), tmp_path / 'out.tar', lambda done, total: seen.append((done, total)))
+    assert seen[-1][1] is not None and seen[-1][0] == seen[-1][1]  # the progress has a total, and reached it
+    pack = corridor.unpack(tmp_path / 'out.tar', tmp_path / 'packs')
+    assert (pack.tiles / near.removeprefix('tiles/')).read_bytes() == b'near tile ' * 5000
+  finally:
+    httpd.shutdown()
+    httpd.server_close()

@@ -1,15 +1,20 @@
 import hashlib
 import io
 import json
+import socket
+import ssl
 import tarfile
 import threading
+import time
 from http.server import ThreadingHTTPServer
 
 import pytest
 import requests
+import urllib3
 
-from tools.turnpilot.mapserver import geo, tiles
-from tools.turnpilot.mapserver.server import Maps, Refusal, Region, make_handler
+from openpilot.selfdrive.turnpilot.maps.tests.fakes import self_signed
+from tools.turnpilot.mapserver import geo, server as mapserver, tiles
+from tools.turnpilot.mapserver.server import Maps, Refusal, Region, make_handler, make_server
 
 KEY = 'k' * 40
 SQUARE = {'type': 'Polygon', 'coordinates': [[[-87, 39], [-85, 39], [-85, 41], [-87, 41], [-87, 39]]]}
@@ -161,3 +166,95 @@ def test_region_for_prefers_a_shared_region(server):
   with pytest.raises(Refusal):
     maps.region_for((-86, 40), (-122, 47.5))
   assert maps.region_for((-86, 40), (-86.5, 40.5)).id == 'indianapolis'
+
+
+CORRIDOR = {'start': [-86.2, 39.7], 'destination': [-86.0, 39.9]}
+
+
+@pytest.fixture
+def tls_server(server, tmp_path):
+  """The same maps over TLS as main() serves them, with short timeouts and a small connection cap."""
+  _, maps, *_ = server
+  cert, key = self_signed()
+  (tmp_path / 'cert.pem').write_text(cert)
+  (tmp_path / 'cert.key').write_text(key)
+  httpd = make_server(maps, '127.0.0.1', 0, tmp_path / 'cert.pem', tmp_path / 'cert.key',
+                      handshake_timeout=1., request_timeout=1., max_connections=3)
+  threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05}, daemon=True).start()
+  yield f"https://127.0.0.1:{httpd.server_address[1]}", httpd.server_address, str(tmp_path / 'cert.pem')
+  httpd.shutdown()
+  httpd.server_close()
+
+
+def test_an_idle_tcp_connection_does_not_stall_the_server(tls_server):
+  base, address, cert = tls_server
+  idle = socket.create_connection(address)  # never sends a ClientHello, as a port scanner does
+  try:
+    t = time.monotonic()
+    assert requests.get(base + '/v1/health', verify=cert, timeout=(0.5, 0.5)).status_code == 200
+    assert time.monotonic() - t < 0.5
+  finally:
+    idle.close()
+
+
+def test_a_silent_client_is_dropped_after_the_handshake(tls_server):
+  _, address, cert = tls_server
+  context = ssl.create_default_context(cafile=cert)
+  with socket.create_connection(address) as raw, context.wrap_socket(raw, server_hostname='127.0.0.1') as tls:
+    tls.settimeout(5)
+    t = time.monotonic()
+    assert tls.recv(1) == b''  # the server hangs up on a request that never comes
+    assert time.monotonic() - t < 3
+
+
+def test_connections_beyond_the_cap_are_turned_away(tls_server):
+  base, address, cert = tls_server
+  idle = [socket.create_connection(address) for _ in range(3)]
+  try:
+    time.sleep(0.2)
+    with pytest.raises(requests.ConnectionError):
+      requests.get(base + '/v1/health', verify=cert, timeout=(0.5, 0.5))
+  finally:
+    for s in idle:
+      s.close()
+  time.sleep(0.3)
+  assert requests.get(base + '/v1/health', verify=cert, timeout=2).status_code == 200
+
+
+def test_corridor_has_a_content_length(server):
+  base, *_ = server
+  r = requests.post(base + '/v1/corridor', json=CORRIDOR, headers=auth(), timeout=5, stream=True)
+  wire = r.raw.read(decode_content=False)
+  assert r.headers['Content-Encoding'] == 'gzip'
+  assert int(r.headers['Content-Length']) == len(wire)
+  r = requests.post(base + '/v1/corridor', json=CORRIDOR, headers={**auth(), 'Accept-Encoding': 'identity'}, timeout=5)
+  assert 'Content-Encoding' not in r.headers and int(r.headers['Content-Length']) == len(r.content)
+
+
+def test_a_missing_tile_is_a_clean_error_before_any_tar(server):
+  base, maps, near, _ = server
+  (maps.regions[0].path / near).unlink()
+  r = requests.post(base + '/v1/corridor', json=CORRIDOR, headers=auth(), timeout=5)
+  assert r.status_code == 503
+  assert r.json() == {'error': 'region_unavailable'}
+
+
+def test_a_tile_changed_under_the_index_is_a_clean_error(server):
+  base, maps, near, _ = server
+  (maps.regions[0].path / near).write_bytes(b'rebuilt, a different size')
+  r = requests.post(base + '/v1/corridor', json=CORRIDOR, headers=auth(), timeout=5)
+  assert r.status_code == 503 and r.json() == {'error': 'region_unavailable'}
+
+
+def test_an_error_while_streaming_cuts_the_body_short_with_no_json_in_it(server, monkeypatch):
+  base, *_ = server
+
+  def broken(src, dst):
+    dst.write(src.read(10))
+    raise OSError('disk went away')
+
+  monkeypatch.setattr(mapserver, 'send_file', broken)
+  r = requests.post(base + '/v1/corridor', json=CORRIDOR, headers={**auth(), 'Accept-Encoding': 'identity'}, timeout=5, stream=True)
+  assert r.status_code == 200 and int(r.headers['Content-Length']) > 10
+  with pytest.raises(urllib3.exceptions.ProtocolError, match=r'IncompleteRead\(10 bytes read'):  # nothing after the 10 bytes
+    r.raw.read(decode_content=False)
