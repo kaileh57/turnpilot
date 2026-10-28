@@ -17,7 +17,9 @@ TurnPilot acts only while it can do its job (Kellen, 2026-10-27: no degraded mod
   driving model) never started: handback noDetector. modeld publishes no modelV2 while it loads the detector, so the
   load itself doesn't count against it. Nor do frames with openpilot engaged (carControl.enabled) before modeld had
   its chance to load it, LOAD_CHANCE_S disengaged with TurnPilot on: turned on and engaged within modeld's param check,
-  it waits for a disengage, and TurnPilot waits with it.
+  it waits for a disengage, and TurnPilot waits with it. Never silently, though: DETECTOR_START_DEADLINE_S from the
+  first engaged frame with no detection yet (whatever modeld publishes, engaged or not since), it is noDetector too. A
+  load that failed while the driver engaged during it (modeld publishes nothing while it loads) is handed back so.
 - Once it has run, DETECTOR_DEADLINE_S without fresh results is a stopped detector. modeld's own skips stay inside it: a
   slow spell forces a run after 1 s, a failed run retries after 1 s. A second forced wait (2 s) or failure in a row is
   past it.
@@ -140,6 +142,7 @@ class TurnPilot:
       self.stale_s = 0.            # how long the scene has been unavailable
       self.waited_s = 0.           # how long modeld has run since TurnPilot was turned on, before the first detection
       self.disengaged_s = 0.       # ...of it with openpilot disengaged
+      self.engaged_wait_s = 0.     # time since the first engaged frame, before the first detection
     if not keep_turn:
       # maneuver ids never repeat: the scene kept through a fault holds ids (its commitment, a gas release, a carried hold)
       self.follower = RouteFollower(self.follower.maneuver_id + 1 if hasattr(self, 'follower') else 0)
@@ -184,7 +187,8 @@ class TurnPilot:
   def handback(self, available: bool, model_running: bool = True, engaged: bool = False) -> int:
     """Why TurnPilot can't act now, as a Handback: none while it can, and while the detector hasn't started yet, short of
     DETECTOR_START_DEADLINE_S of modeld running (model_running: a modelV2 this frame) once it could load the detector
-    (engaged: carControl.enabled; module docstring). Once a frame: a fault after update() already ran it takes this frame's."""
+    (engaged: carControl.enabled; module docstring), nor past DETECTOR_START_DEADLINE_S from the first engaged frame.
+    Once a frame: a fault after update() already ran it takes this frame's."""
     if self.handback_now is not None:
       return self.handback_now
     self.detector_seen = self.detector_seen or available
@@ -194,11 +198,13 @@ class TurnPilot:
         self.disengaged_s += DT_MDL
       if not engaged or self.disengaged_s >= LOAD_CHANCE_S - DT_MDL / 2:
         self.waited_s += DT_MDL
+    if not self.detector_seen and (engaged or self.engaged_wait_s > 0.):
+      self.engaged_wait_s += DT_MDL
     if self.fell_back:
       self.handback_now = Handback.modelFellBack
     elif self.detector_seen and self.stale_s > DETECTOR_DEADLINE_S - STALE_S:
       self.handback_now = Handback.detectorStopped
-    elif not self.detector_seen and self.waited_s >= DETECTOR_START_DEADLINE_S - DT_MDL / 2:
+    elif not self.detector_seen and max(self.waited_s, self.engaged_wait_s) >= DETECTOR_START_DEADLINE_S - DT_MDL / 2:
       self.handback_now = Handback.noDetector
     else:
       self.handback_now = Handback.none

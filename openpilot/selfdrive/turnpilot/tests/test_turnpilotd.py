@@ -890,16 +890,27 @@ def test_fault_keeps_a_junction_hold():
 
 def test_detector_not_loaded_while_engaged_isnt_a_detector_that_never_started():
   # TurnPilot turned on while disengaged, and openpilot engaged before modeld read TurnPilotEnabled: modeld loads the
-  # detector only while disengaged, so it hasn't tried yet. Engaged frames don't count against its start deadline until
-  # modeld had its chance; TurnPilot waits (not acting), and the deadline runs once openpilot is disengaged
+  # detector only while disengaged, so it hasn't tried yet. Engaged frames don't count against its modelV2 start
+  # deadline until modeld had its chance; TurnPilot waits (not acting). But it never waits silently: from the first
+  # engaged frame with no detection yet, DETECTOR_START_DEADLINE_S on (modeld loading, or not publishing at all: a load
+  # that failed while the driver engaged during it) it hands back noDetector, out loud
+  for model_running in (True, False):
+    sim = Sim([(4000., "turn", "left"), (5000., "turn", "right")])
+    for _ in range(int(0.5 / DT_MDL)):
+      sim.step(available=False)
+    sim.model_running = model_running
+    plans = [sim.step(available=False, engaged=True) for _ in range(int(2 * DETECTOR_START_DEADLINE_S / DT_MDL))]
+    first = next(i for i, p in enumerate(plans) if p.handback == Handback.noDetector)
+    assert abs((first + 1) * DT_MDL - DETECTOR_START_DEADLINE_S) <= 1.5 * DT_MDL, model_running
+    assert all(p.handback == Handback.none and p.state == State.unavailable and p.reason == WAITING_REASON
+               for p in plans[:first]), model_running
+    assert all(p.handback == Handback.noDetector for p in plans[first:]), model_running
+  # ...whether or not openpilot stays engaged
   sim = Sim([(4000., "turn", "left"), (5000., "turn", "right")])
-  for _ in range(int(0.5 / DT_MDL)):
-    sim.step(available=False)
-  plans = [sim.step(available=False, engaged=True) for _ in range(int(2 * DETECTOR_START_DEADLINE_S / DT_MDL))]
-  assert all(p.handback == Handback.none and p.state == State.unavailable and p.reason == WAITING_REASON for p in plans)
-  plans = [sim.step(available=False) for _ in range(int(DETECTOR_START_DEADLINE_S / DT_MDL))]
+  sim.model_running = False
+  plans = [sim.step(available=False, engaged=True)] + [sim.step(available=False) for _ in range(int(20. / DT_MDL))]
   first = next(i for i, p in enumerate(plans) if p.handback == Handback.noDetector)
-  assert abs((first + 1) * DT_MDL - (DETECTOR_START_DEADLINE_S - 0.5)) <= 1.5 * DT_MDL
+  assert abs((first + 1) * DT_MDL - DETECTOR_START_DEADLINE_S) <= 1.5 * DT_MDL
   # disengaged long enough for modeld to have tried: engaged frames count from then on
   sim = Sim([(4000., "turn", "left"), (5000., "turn", "right")])
   for _ in range(int(3. / DT_MDL)):
