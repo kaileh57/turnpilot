@@ -37,8 +37,13 @@ class TestTurnPilotOnroad(OpenpilotTestCase):
 
   def test_nothing_while_following(self):
     for state in ('noRoute', 'following', 'approaching'):
-      assert status_text(plan(state=state, reason='detector unavailable'), True) == ('', '')
+      assert status_text(plan(state=state, reason=''), True) == ('', '')
     assert status_text(None, True) == ('', '')
+
+  def test_unavailable_shows_engaged_or_not(self):
+    for engaged in (True, False):
+      assert status_text(plan(state='unavailable', reason='detector stopped: take control'), engaged) == \
+        ('TurnPilot unavailable', 'detector stopped: take control')
 
   def test_turning(self):
     assert status_text(plan(state='turning', desire=log.Desire.turnLeft), True) == ('Turning left', '')

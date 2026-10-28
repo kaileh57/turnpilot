@@ -135,6 +135,8 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     turnpilotUnavailable @105;  # TurnPilot on but doing nothing: turnpilotPlan.fault
     turnpilotTooFastToTurn @106;  # turnpilotPlan.tooFastToTurn: the turn is skipped and navd reroutes
     turnpilotWrongLane @107;  # turnpilotPlan.laneMismatch
+    turnpilotDetectorStopped @108;  # TurnPilot: the detector stopped, hand back to the driver
+    turnpilotModelFellBack @109;    # TurnPilot: modeld fell back to the small model, which TurnPilot can't navigate on
 
     lowBatteryDEPRECATED @40;
     soundsUnavailableDEPRECATED @47;

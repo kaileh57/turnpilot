@@ -21,6 +21,12 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
     laneChange @5;   # nav lane change requested or in progress
     holding @6;      # scene logic is holding the car (pedestrian, oncoming, cross traffic)
     arrived @7;
+    unavailable @8;  # TurnPilot isn't acting: the detector hasn't started yet, or it handed back (see handback)
+  }
+  enum Handback {
+    none @0;
+    detectorStopped @1;  # the detector produced nothing fresh within its deadline
+    modelFellBack @2;    # modeld fell back from the big driving model to the small one
   }
   enum LaneChange {
     none @0;
@@ -56,6 +62,7 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
   maneuverAngle @16 :Float32;     # deg, unsigned: from the junction's bearings when maneuverGeometryValid, else nominal
   maneuverGeometryValid @17 :Bool;
   maneuverBend @18 :Bool;         # the road bends and no other road meets it there: the model's, not a turn
+  handback @19 :Handback;         # why TurnPilot handed control back; selfdrived soft-disables on it (turnpilot/handback.py)
 }
 
 struct TurnpilotDetections @0xaedffd8f31e7b55d {

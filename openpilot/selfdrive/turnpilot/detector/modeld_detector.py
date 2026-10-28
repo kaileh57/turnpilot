@@ -4,6 +4,11 @@ traffic in turns. It runs in modeld because the chestnut's USB interface is clai
 
 Nothing here runs unless TurnPilotEnabled is set and the compiled pkl for this device and camera size exists
 (compile_detector.py builds it; the pkls are not in git).
+
+Once it's on it stays on for the drive, and nothing here turns it off quietly: without fresh detections turnpilotd hands
+control back to the driver (a soft disable), so every gap is loud. A slow spell only skips frames until a forced run
+measures the time again, a failed run is retried with a backoff and logged, a mid-drive TurnPilotEnabled starts it, and a
+fallback to the small driving model switches to that model's detector, where one exists.
 """
 import time
 from collections import deque
@@ -23,6 +28,14 @@ WIDE_CURVATURE = 0.01      # 1/m (a 100 m radius): at or above this, look throug
 WIDE_HOLD_S = 2.0          # and keep looking through it this long after the turn ends
 TURN_DESIRES = (log.Desire.turnLeft, log.Desire.turnRight)
 TIME_WINDOW = 5            # the detector time estimate is the median of this many runs, so one slow run can't stop it
+# The estimate only changes when it runs, so after this many model frames skipped in a row (1 s) it runs anyway and the
+# estimate starts over from that run: a burst of slow runs under load can't keep it off once the load has gone. Each
+# forced run that still doesn't fit doubles the wait, to the max (8 s); each costs one step past the budget.
+FORCE_RUN_FRAMES = 20
+FORCE_RUN_MAX_FRAMES = 160
+RETRY_S = 1.0              # a failed run is retried after this, doubled for each failure in a row...
+RETRY_MAX_S = 60.          # ...to this
+PARAM_CHECK_S = 1.0        # TurnPilotEnabled is read this often
 
 
 def frame_view(model_state, index: int):
@@ -36,6 +49,10 @@ def frame_view(model_state, index: int):
 
 
 class ModeldDetector:
+  force_after = FORCE_RUN_FRAMES  # model frames skipped in a row before a forced run
+  failures = 0                    # failed runs in a row
+  retry_at = 0.0                  # time.monotonic() a failed detector waits for
+
   def __init__(self, model_state, cam_w: int, cam_h: int, cameras: dict[str, int]):
     """cameras: 'road' and/or 'wide' -> index of its frame in modeld's packed input."""
     from tinygrad.engine.realize import lower_and_compile
@@ -56,7 +73,6 @@ class ModeldDetector:
       self.times.append(time.perf_counter() - t0)
     self.since_run = RUN_EVERY
     self.wide_until = -1.0
-    self.enabled = True
 
   def choose_camera(self, desired_curvature: float, desire: int, now: float) -> str:
     if abs(desired_curvature) >= WIDE_CURVATURE or desire in TURN_DESIRES:
@@ -64,16 +80,28 @@ class ModeldDetector:
     want = 'wide' if now < self.wide_until else 'road'
     return want if want in self.frames else next(iter(self.frames))
 
+  def room(self, model_execution_time: float) -> bool:
+    """Whether this frame has room for a run: the driving model's time plus the estimate fit the budget, or the
+    detector has gone force_after frames without and runs to measure again."""
+    estimate = float(np.median(self.times)) if self.times else 0.
+    if model_execution_time + estimate <= STEP_BUDGET_S:
+      self.force_after = FORCE_RUN_FRAMES
+      return True
+    if self.since_run < self.force_after:
+      return False
+    cloudlog.info(f"turnpilot detector: no room for {self.since_run} frames at {1e3 * estimate:.0f} ms, measuring again")
+    self.times.clear()
+    self.force_after = min(2 * self.force_after, FORCE_RUN_MAX_FRAMES)
+    return True
+
   def step(self, pm, model_state, model_execution_time: float, desired_curvature: float, desire: int, metas: list) -> None:
-    """Called once per model frame after modelV2 is sent. metas: FrameMeta of packed frames 0 and 1."""
-    if not self.enabled:
-      return
+    """Called once per model frame after modelV2 is sent, with the driving model this detector was loaded for.
+    metas: FrameMeta of packed frames 0 and 1."""
     if model_state is not self.model_state:
-      cloudlog.warning("turnpilot detector: driving model switched devices, detector off for this drive")
-      self.enabled = False
-      return
+      # DetectorHost picks the detector by model, so this is a bug: raise for the host to log and retry, never a quiet off
+      raise ValueError("turnpilot detector stepped with a driving model it wasn't loaded for")
     self.since_run += 1
-    if self.since_run < RUN_EVERY or model_execution_time + float(np.median(self.times)) > STEP_BUDGET_S:
+    if self.since_run < RUN_EVERY or time.monotonic() < self.retry_at or not self.room(model_execution_time):
       return
     try:
       cam = self.choose_camera(desired_curvature, desire, time.monotonic())
@@ -86,20 +114,81 @@ class ModeldDetector:
       msg = messaging.new_message('turnpilotDetections', valid=bool(np.isfinite(raw).all()))
       fill_detections(msg.turnpilotDetections, decode(raw, self.lb), meta.frame_id, meta.timestamp_eof, cam, dt)
       pm.send('turnpilotDetections', msg)
+      self.failures = 0
     except Exception:
-      cloudlog.exception("turnpilot detector failed, off for this drive")
-      self.enabled = False
+      self.failures += 1
+      delay = min(RETRY_S * 2 ** (self.failures - 1), RETRY_MAX_S)
+      self.retry_at = time.monotonic() + delay
+      cloudlog.exception(f"turnpilot detector failed ({self.failures} in a row), retrying in {delay:.0f} s")
 
 
 def load(model_state, cam_w: int, cam_h: int, main_wide_camera: bool, use_extra_client: bool) -> ModeldDetector | None:
-  """The detector, or None (modeld then runs exactly as without TurnPilot). modeld only calls this with TurnPilotEnabled set."""
+  """The detector for one driving model's device, or None. DetectorHost only calls this with TurnPilotEnabled set."""
   try:
     path = detector_pkl_path(cam_w, cam_h, model_state.chestnut)
     if not path.is_file():
-      cloudlog.warning(f"turnpilot detector: no {path.name}, detector off")
+      cloudlog.warning(f"turnpilot detector: no {path.name}, so none for the {'big' if model_state.chestnut else 'small'} driving model")
       return None
     cameras = {'wide': 0} if main_wide_camera else ({'road': 0, 'wide': 1} if use_extra_client else {'road': 0})
     return ModeldDetector(model_state, cam_w, cam_h, cameras)
   except Exception:
     cloudlog.exception("turnpilot detector failed to load, detector off")
     return None
+
+
+class DetectorHost:
+  """What modeld holds: a ModeldDetector for each driving model it can run, loaded once TurnPilotEnabled is set and stepped
+  while it stays set. With it unset or no pkl, nothing runs and modeld runs as without TurnPilot.
+
+  Loading takes seconds (the pkl, its compile, warm-up runs), so after startup it waits for openpilot to be disengaged,
+  when a late modelV2 steers nothing. The small model's detector loads with the big one's so a fallback switches over at
+  once. That needs a pkl compiled on the small model's device, and models/ has only the chestnut's, so today a fallback
+  leaves the detector off (logged), which turnpilotd sees as an unavailable scene."""
+
+  def __init__(self, params, cam_w: int, cam_h: int, main_wide_camera: bool, use_extra_client: bool, models: list, load_fn=None):
+    """models: the driving models modeld may run (the active one first); None and repeats are skipped."""
+    self.params = params
+    self.args = (cam_w, cam_h, main_wide_camera, use_extra_client)
+    self.models = [m for i, m in enumerate(models) if m is not None and all(m is not n for n in models[:i])]
+    self.load_fn = load_fn or load
+    self.detectors: list[tuple] | None = None  # (driving model, its detector or None), once loaded
+    self.enabled = False
+    self.next_check = 0.0
+    self.missing = None  # the driving model last reported as having no detector
+    self.failures = 0    # host failures in a row
+
+  def check_enabled(self, now: float) -> bool:
+    if now >= self.next_check:
+      self.next_check = now + PARAM_CHECK_S
+      self.enabled = self.params.get_bool("TurnPilotEnabled")
+    return self.enabled
+
+  def load(self) -> None:
+    self.detectors = [(m, self.load_fn(m, *self.args)) for m in self.models]
+
+  def step(self, pm, model_state, model_execution_time: float, desired_curvature: float, desire: int, metas: list,
+           engaged: bool) -> None:
+    """Called once per model frame after modelV2 is sent, with the model that made it."""
+    try:
+      if not self.check_enabled(time.monotonic()):
+        return
+      if self.detectors is None:
+        if engaged:
+          return
+        cloudlog.warning("turnpilot detector: TurnPilot turned on, loading the detector")
+        self.load()
+      det = next((d for m, d in self.detectors or () if m is model_state), None)
+      if det is None:
+        if self.missing is not model_state:
+          self.missing = model_state
+          cloudlog.warning("turnpilot detector: none for the driving model modeld is running, detector off")
+        return
+      det.step(pm, model_state, model_execution_time, desired_curvature, desire, metas)
+      self.failures = 0
+    except Exception:
+      # never take modeld down: off until the next TurnPilotEnabled check, after a wait doubling from RETRY_S. turnpilotd
+      # hands back to the driver if that outlasts its deadline
+      self.failures += 1
+      delay = min(RETRY_S * 2 ** (self.failures - 1), RETRY_MAX_S)
+      cloudlog.exception(f"turnpilot detector host failed ({self.failures} in a row), retrying in {delay:.0f} s")
+      self.enabled, self.next_check = False, time.monotonic() + delay

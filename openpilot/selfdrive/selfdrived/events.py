@@ -441,6 +441,20 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
     ET.PERMANENT: NormalPermanentAlert("Big Model Failed ", "Restart the car to retry,\nsmall model is still available", duration=20.),
   },
 
+  # TurnPilot handing control back (selfdrive/turnpilot/handback.py): openpilot's standard soft disable, with the
+  # warningSoft chime until TurnPilot's own chimes exist. A stopped detector also blocks engaging while it stays stopped;
+  # after a model fallback openpilot can be engaged again on the small model, without TurnPilot.
+  EventName.turnpilotDetectorStopped: {
+    ET.SOFT_DISABLE: soft_disable_alert("TurnPilot unavailable: detector stopped"),
+    ET.NO_ENTRY: NoEntryAlert("TurnPilot unavailable: detector stopped"),
+    ET.PERMANENT: NormalPermanentAlert("TurnPilot Unavailable", "Detector stopped: take control", duration=10.),
+  },
+
+  EventName.turnpilotModelFellBack: {
+    ET.SOFT_DISABLE: soft_disable_alert("TurnPilot unavailable: driving model fell back"),
+    ET.PERMANENT: NormalPermanentAlert("TurnPilot Unavailable", "Driving model fell back: take control", duration=10.),
+  },
+
   EventName.lateralManeuver: {
     ET.WARNING: longitudinal_maneuver_alert,
     ET.PERMANENT: NormalPermanentAlert("Lateral Maneuver Mode"),

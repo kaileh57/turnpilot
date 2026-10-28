@@ -35,7 +35,10 @@ def signal_prompt(plan, car_state) -> str:
 def status_text(plan, engaged: bool) -> tuple[str, str]:
   """(title, detail) for the status line; ('', '') while TurnPilot is just following or has no route.
 
-  It says what the car is doing, so it needs openpilot engaged, except in shadow mode, where the driver steers."""
+  It says what the car is doing, so it needs openpilot engaged, except in shadow mode, where the driver steers, and
+  except when TurnPilot can't act at all (waiting for its detector, or handed back), which the driver needs to know."""
+  if plan is not None and plan.state == State.unavailable:
+    return 'TurnPilot unavailable', plan.reason
   if plan is None or not (engaged or plan.shadow):
     return '', ''
   detail = ''

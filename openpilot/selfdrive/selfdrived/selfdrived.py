@@ -22,7 +22,8 @@ from openpilot.selfdrive.selfdrived.events import Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
-from openpilot.selfdrive.turnpilot.hooks import plan_events
+from openpilot.selfdrive.turnpilot.handback import HandbackEvents
+from openpilot.selfdrive.turnpilot.hooks import fresh_plan, plan_events
 
 from openpilot.common.version import get_build_metadata
 from openpilot.common.hardware import HARDWARE
@@ -67,6 +68,7 @@ class SelfdriveD:
     self.calibrated_pose: Pose | None = None
     self.excessive_actuation_check = ExcessiveActuationCheck()
     self.excessive_actuation = self.params.get("Offroad_ExcessiveActuation") is not None
+    self.turnpilot_handback = HandbackEvents()
     self.big_model_loading = False
     self.big_model_active = False
     self.big_model_failed = False
@@ -83,7 +85,7 @@ class SelfdriveD:
     # TODO: de-couple selfdrived with card/conflate on carState without introducing controls mismatches
     self.car_state_sock = messaging.sub_sock('carState', timeout=20)
 
-    ignore = self.sensor_packets + self.gps_packets + ['alertDebug', 'lateralManeuverPlan', 'turnpilotPlan']
+    ignore = self.sensor_packets + self.gps_packets + ['alertDebug', 'lateralManeuverPlan', 'turnpilotPlan']  # TurnPilot off: none
     if SIMULATION:
       ignore += ['cabinCameraState', 'managerState']
     if REPLAY:
@@ -350,6 +352,10 @@ class SelfdriveD:
 
     if self.big_model_active and big_failed:
       self.events.add(EventName.bigModelFailed)
+
+    # TurnPilot handing back: its detector stopped, or the model fell back (bigModelFailed above disables too). The
+    # handback outranks TurnPilot's other alerts (hooks.plan_events), and a disabled plan with a fault may carry one
+    self.turnpilot_handback.apply(self.events, fresh_plan(self.sm), self.enabled)
 
     not_running = {p.name for p in self.sm['managerState'].processes if not p.running and p.shouldBeRunning}
     if self.sm.recv_frame['managerState'] and len(not_running):

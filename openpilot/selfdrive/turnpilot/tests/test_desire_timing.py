@@ -310,3 +310,21 @@ def test_navd_going_quiet_mid_turn_still_clears_the_desire():
   assert [d for _, d in out].count(CLEAR_DESIRE) == CLEAR_FRAMES
   first_clear = [d for _, d in out].index(CLEAR_DESIRE)
   assert not out[first_clear][0]  # after the route was lost
+
+
+def test_abandoned_turn_sends_nothing_more_but_is_still_cleared():
+  # TurnPilot hands back 10 degrees into a turn: no further pulse, and the desire still out in the model's queue is cleared
+  # once the car has turned CLEAR_MIN_DEG, once
+  yaw = 0.3  # rad/s, 17 deg/s
+  dt_ = DesireTiming()
+  out = step_through(dt_, [(10., 1, LEFT_TURN, 40., 4., 0., False), (10. / 17.2, 1, LEFT_TURN, 0., 4., yaw, False)])
+  assert Desire.turnLeft in out
+  dt_.abandon()
+  after = step_through(dt_, [(5., 1, None, 0., 4., yaw, False)])  # turnpilotd sends no maneuver once it has handed back
+  assert set(after) == {Desire.none, CLEAR_DESIRE} and after.count(CLEAR_DESIRE) == CLEAR_FRAMES
+  t_clear = after.index(CLEAR_DESIRE) * DT_MDL
+  assert abs(t_clear - (CLEAR_MIN_DEG - 10.) / 17.2) < 0.15
+  # handed back before any turn: nothing to clear, nothing sent
+  dt_ = DesireTiming()
+  dt_.abandon()
+  assert set(step_through(dt_, [(5., 1, None, 30., 4., yaw, False)])) == {Desire.none}

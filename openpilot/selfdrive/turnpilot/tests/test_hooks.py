@@ -180,3 +180,19 @@ def test_stale_or_disabled_plan_never_changes_planner_output():
   baseline = run_planner(None)
   assert run_planner(turnpilot_plan(shadow=False), age=PLAN_MAX_AGE_S + 0.1) == baseline
   assert run_planner(turnpilot_plan(shadow=False, state=State.disabled)) == baseline
+
+
+def test_plan_events_one_slot_by_priority():
+  # handback, then fault, then too fast to turn, then wrong lane: at most one of TurnPilot's alerts a frame
+  Fault, Handback, LaneMismatch = custom.TurnpilotPlan.Fault, custom.TurnpilotPlan.Handback, custom.TurnpilotPlan.LaneMismatch
+  def events(handback=Handback.none, fault=Fault.none, too_fast=False, mismatch=LaneMismatch.none):
+    msg = messaging.new_message('turnpilotPlan')
+    p = msg.turnpilotPlan
+    p.state, p.handback, p.fault, p.tooFastToTurn, p.laneMismatch = State.turning, handback, fault, too_fast, mismatch
+    return plan_events(FakeSM({'turnpilotPlan': msg.as_reader().turnpilotPlan}))
+  everything = dict(fault=Fault.error, too_fast=True, mismatch=LaneMismatch.wrongLaneForTurn)
+  assert events(Handback.detectorStopped, **everything) == []  # handback.py raises the handback's own event
+  assert events(Handback.modelFellBack, **everything) == []
+  assert events(**everything) == ['turnpilotUnavailable']
+  assert events(too_fast=True, mismatch=LaneMismatch.wrongLaneForTurn) == ['turnpilotTooFastToTurn']
+  assert events(mismatch=LaneMismatch.wrongLaneForTurn) == ['turnpilotWrongLane']

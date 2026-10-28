@@ -1,6 +1,7 @@
 from collections import deque
 
 import numpy as np
+import pytest
 
 from openpilot.cereal import log
 from openpilot.common.test import OpenpilotTestCase
@@ -52,7 +53,7 @@ def make_detector(cameras=None, det_time=0.005):
   det.cameras = cameras or {'road': 0, 'wide': 1}
   det.frames = {cam: f'frame{i}' for cam, i in det.cameras.items()}
   det.times = deque([det_time])
-  det.since_run, det.wide_until, det.enabled = RUN_EVERY, -1.0, True
+  det.since_run, det.wide_until = RUN_EVERY, -1.0
   return det
 
 
@@ -90,11 +91,12 @@ class TestModeldDetector(OpenpilotTestCase):
     det.step(pm, det.model_state, STEP_BUDGET_S - 0.007, 0.0, log.Desire.none, [Meta(1), Meta(2)])
     assert len(pm.sent) == 1  # the first frame with room runs, even if it's not on the N-frame grid
 
-  def test_failures_turn_it_off(self):
+  def test_failure_retries_and_a_wrong_model_raises(self):
     det, pm = make_detector(), PM()
     det.run.fail = True
     det.step(pm, det.model_state, 0.010, 0.0, log.Desire.none, [Meta(1), Meta(2)])
-    assert not det.enabled and pm.sent == []
+    assert det.failures == 1 and det.retry_at > 0. and pm.sent == []  # test_detector_recovery.py has the backoff
     det = make_detector()
-    det.step(pm, object(), 0.010, 0.0, log.Desire.none, [Meta(1), Meta(2)])  # modeld fell back to the other model
-    assert not det.enabled and pm.sent == []
+    with pytest.raises(ValueError):  # no quiet off: DetectorHost logs it and retries
+      det.step(pm, object(), 0.010, 0.0, log.Desire.none, [Meta(1), Meta(2)])
+    assert pm.sent == []

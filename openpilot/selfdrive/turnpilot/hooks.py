@@ -15,8 +15,8 @@ PLAN_MAX_AGE_S = 0.5          # s since the last turnpilotPlan (20 Hz): SubMaste
 CLEAR_DESIRE = 255
 
 
-def active_plan(sm, now: float | None = None):
-  """The turnpilotPlan to act on, or None while it is stale, invalid, disabled or in shadow mode.
+def fresh_plan(sm, now: float | None = None):
+  """The turnpilotPlan while it is fresh and valid, whatever its state (a disabled plan may carry a handback), or None.
   sm is a SubMaster subscribed to turnpilotPlan; anything without its recv_time and valid dicts (a test's plain dict)
   gives None."""
   recv_t = getattr(sm, 'recv_time', {}).get('turnpilotPlan')
@@ -24,28 +24,38 @@ def active_plan(sm, now: float | None = None):
     return None
   if (time.monotonic() if now is None else now) - recv_t > PLAN_MAX_AGE_S:
     return None
-  plan = sm['turnpilotPlan']
-  return None if plan.shadow or plan.state == custom.TurnpilotPlan.State.disabled else plan
+  return sm['turnpilotPlan']
+
+
+def active_plan(sm, now: float | None = None):
+  """The turnpilotPlan to act on, or None while it is stale, invalid, disabled or in shadow mode."""
+  plan = fresh_plan(sm, now)
+  return None if plan is None or plan.shadow or plan.state == custom.TurnpilotPlan.State.disabled else plan
 
 
 def plan_events(sm, now: float | None = None) -> list[str]:
   """selfdrived's onroad event names from a fresh, valid turnpilotPlan (none while it is stale: a dead turnpilotd is
-  processNotRunning already). sm is a SubMaster subscribed to turnpilotPlan."""
-  recv_t = getattr(sm, 'recv_time', {}).get('turnpilotPlan')
-  if recv_t is None or not recv_t or not getattr(sm, 'valid', {}).get('turnpilotPlan', False):
+  processNotRunning already). sm is a SubMaster subscribed to turnpilotPlan.
+  TurnPilot's alerts share one slot, at most one of them a frame, by this priority:
+  1. a handback (turnpilotDetectorStopped, turnpilotModelFellBack; handback.py): nothing here while one is set;
+  2. a fault (turnpilotUnavailable);
+  3. too fast to turn (turnpilotTooFastToTurn);
+  4. the wrong lane (turnpilotWrongLane).
+  turnpilotd keeps the lower ones unset while it isn't acting (turnpilotd.py), so this order holds there too."""
+  if not getattr(sm, 'recv_time', {}).get('turnpilotPlan'):
     return []
-  if (time.monotonic() if now is None else now) - recv_t > PLAN_MAX_AGE_S:
+  plan = fresh_plan(sm, now)
+  if plan is None or plan.handback != custom.TurnpilotPlan.Handback.none:
     return []
-  plan = sm['turnpilotPlan']
-  events = []
   if plan.fault != custom.TurnpilotPlan.Fault.none:
-    events.append('turnpilotUnavailable')
-  if not plan.shadow:  # in shadow mode the driver drives, and TurnPilot acts on nothing
-    if plan.tooFastToTurn:
-      events.append('turnpilotTooFastToTurn')
-    if plan.laneMismatch != custom.TurnpilotPlan.LaneMismatch.none:
-      events.append('turnpilotWrongLane')
-  return events
+    return ['turnpilotUnavailable']
+  if plan.shadow:  # in shadow mode the driver drives, and TurnPilot acts on nothing
+    return []
+  if plan.tooFastToTurn:
+    return ['turnpilotTooFastToTurn']
+  if plan.laneMismatch != custom.TurnpilotPlan.LaneMismatch.none:
+    return ['turnpilotWrongLane']
+  return []
 
 
 def plan_desire(desire: int, lat_active: bool) -> tuple[int, bool]:
