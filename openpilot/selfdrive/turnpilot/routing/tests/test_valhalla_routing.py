@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 
@@ -51,8 +51,7 @@ def route_engine(tiles, start, bearing):
   params = MagicMock()
   params.get.side_effect = values.get
   pm = MagicMock()
-  with patch('openpilot.selfdrive.navigation.navd.Api'):
-    engine = RouteEngine(MagicMock(), pm, params=params)
+  engine = RouteEngine(MagicMock(), pm, params=params)
   engine.last_position, engine.last_bearing = start, bearing
   return engine, pm
 

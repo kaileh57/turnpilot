@@ -28,7 +28,7 @@ OPENPILOT_PREFIX=tpsim python -m openpilot.tools.sim.bridge.beamng.scenarios.run
 Bridge options (`--host`, `--signals`, `--reload` and so on) pass through. Every run of an invocation shares one bridge session, because modeld doesn't reconnect to a new VisionIPC server.
 
 - Without `--record`, results go to `~/turnpilot-artifacts/scenarios/<scenario>-<time>/result.json`.
-- With `--record DIR`, they go to `DIR/<scenario>-<time>/`, along with `chase.mp4` (the bridge's `--capture`) and `ui.mp4` (the upstream UI recorded by `openpilot/tools/turnpilot/record_ui.py`). Each video gets a `<video>.start.json` sidecar holding the wall-clock time of its first frame.
+- With `--record DIR`, they go to `DIR/<scenario>-<time>/`, along with `ui.mp4` (the upstream UI recorded by `openpilot/tools/turnpilot/record_ui.py` while the runs drive) and `chase_run<N>.mp4` per run, rendered by `../chase_render.py` from the run's pose log once the bridge has exited. Each video gets a `<video>.start.json` sidecar holding the wall-clock time of its first frame. Block the stack's own UI (`BLOCK=ui`) so only the recorder draws. `--no-chase` skips the render. There is no live chase camera: a third camera costs the driving cameras 6 to 9 pairs a second, at which the model's turns fail.
 - `--cleanup` only sweeps leftover scenario actors out of the game.
 
 ## Scenarios
@@ -71,6 +71,7 @@ Positions are BeamNG world meters and `heading_deg` is counterclockwise from eas
 - wall-clock start, engage and end times
 - pass or fail with reasons
 - the 20 Hz rows it was scored from
+- a 20 Hz pose log from the teleport to the end: the car's IMU pose (`poses`, the fields route_drive logs) and each actor's (`actor_poses`), which `chase_render.py` re-renders
 
 Rescore saved results, or score a recorded drive's rlogs (a real car drive works too):
 
@@ -82,8 +83,10 @@ python -m openpilot.tools.sim.bridge.beamng.scenarios.score --scenario route_dem
 ## Demo videos
 
 ```sh
-python -m openpilot.tools.turnpilot.demo_video --chase DIR/chase.mp4 --ui DIR/ui.mp4 --result DIR/result.json --run 1 -o crosswalk.mp4
+python -m openpilot.tools.turnpilot.demo_video --chase DIR/chase_run1.mp4 --ui DIR/ui.mp4 --result DIR/result.json --run 1 -o crosswalk.mp4
 ```
+
+`../record_scenario.sh` does the whole thing on a fresh stack: restart, record, render, compose.
 
 The tool puts the chase view and the UI side by side, each 540 px high, over a caption strip giving the scenario, pass or fail, maneuvers and disengagements. It cuts to the run's span, plus 2 s at the end.
 

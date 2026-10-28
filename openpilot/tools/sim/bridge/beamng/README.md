@@ -142,8 +142,9 @@ python -m openpilot.tools.sim.bridge.beamng.route_stats loop.json   # writes loo
 ```
 
 `--traffic N` spawns N BeamNG traffic cars and removes them at the end, even if the bridge dies. `--capture f.mp4
---capture-fps 5` records the chase view. A loop needs more than one leg, because on this map one leg from a start
-back near itself never has more than a few turns.
+--capture-fps 5` records the chase view live, at a camera rate the turns fail at; render it after the drive instead
+([Chase view](#chase-view)). A loop needs more than one leg, because on this map one leg from a start back near itself
+never has more than a few turns.
 
 A full drive stops telling you anything at its first missed turn, since the reroute goes elsewhere. `--screen` runs
 one short drive per turn and keep instead (`screen.py`): each starts 130 m before its maneuver in the lane for it,
@@ -160,8 +161,8 @@ with their reasons, desire pulses and lane changes.
 
 Results on 2026-10-27, big model on the chestnut, 20 camera pairs a second, set speed 40 km/h:
 
-- The model forgets a desire pulse about 5 s after it, the length of its desire history: `desireState` falls back
-  5 s after the pulse, and the planned turn goes with it. Gate 1's 40 m lead at 25 km/h fits inside that window. A
+- The model forgets a desire pulse when it leaves its desire history, 132 frames (6.6 s at 20 Hz) after it (first
+  read here as about 5 s): `desireState` falls back then, and the planned turn goes with it. Gate 1's 40 m lead at 25 km/h fits inside that window. A
   car slowed for a junction does not: at g62 the model planned the left, dropped it 10 m out and went straight,
   and a late retry pulse brought the plan back at once. So turnpilotd now pulses on the approach every 3.5 s and
   once more 10 m out, holds the car at 25 km/h until the first pulse, and slows it to 4.3 m/s by 15 m out.
@@ -185,6 +186,83 @@ Results on 2026-10-27, big model on the chestnut, 20 camera pairs a second, set 
   at 1: 12.8 to 14.0), so the cost is the third camera's existence, not its frame rate. The first turn of `short2`
   failed at that rate, and the demo run was recorded without the chase capture.
 - Per-run stats are in `~/turnpilot-artifacts/phase2/h2/*_stats.json` and `stats_table.txt`.
+
+Later on 2026-10-27 (H3), same setup, 19.2-20.0 model runs a second in every run:
+
+- The big model keeps the rising edges of its last 132 frames in a state tensor, `state_desire_q` (132, 1, 8), a
+  shift register max-pooled in groups of 4 (the small model: 100). In H1/H2's rlogs, wherever the car had not
+  turned, `desireState` fell under 0.5 125-134 model frames after a lone pulse.
+- A pulse still in that queue at the end of a turn turns the car on. town15b's leg-2 "left" at (-539, 157) is a
+  52-60 degree turn by the route geometry: the car reached the exit heading at about 46 degrees, kept turning while
+  the 10 m entry pulse was queued, and stopped against the curb at 122-126 degrees in H2's runs 2 and 3.
+  turnpilotd now sends desire 255 (`hooks.CLEAR_DESIRE`) once a turn is done (navd past the junction and 45 degrees
+  turned, or the nominal angle less 10), and modeld zeroes the turn columns of `state_desire_q`. At that left the
+  clear went out at 42-50 degrees and the car peaked at 50-55 degrees, 8 runs of 8. At the 90-degree turns it went
+  out at 46-83 degrees and the car ended at 85-97, except at short2's last right (below).
+- `town15b2` (town15b's first leg and its second up to just past that left, 7 turns, 0.9 km): arrived with no
+  disengagement, gas tap or hold in 5 of 7 runs with the detector up (3 recorded with the UI); 1 more arrived after
+  one gas tap and 1 ended stuck, both at the leg-2 right at (-706, 115), and an eighth run, with the detector
+  already off (below), also stuck there (a ninth held at a left for it). There the car sometimes starts turning only 2-3 m
+  before the maneuver point (4-5 m when it gets round), ends up pointing at the storefront across the street, and
+  the model sees it as a lead at 6.5-8.6 m (prob 0.76-0.91) and stops: 5 of 11 passes today in all routes (3 stuck,
+  2 going on after a tap), 2 of 5 in H2's. The late starts had the car 0.4 m further from the right road edge 10 m
+  out (3.2-3.6 m against 2.7-3.3, the model's own estimate) and 4.2-4.6 m/s there against 3.0-4.6. Screened alone
+  from 73 m out it passed 12 of 12, at a 3.5 or 4.3 m/s corner speed alike, so the slower corner was not kept.
+- `town15b` itself stops at the fork DR272_7 (-486, 159), 55 m past that left: the route goes on at 108 degrees
+  between roads at 82 and 130, with no maneuver. The model took 130 with no desire (3 runs of 3) and 82 with a
+  keepLeft held from 20 m (2 of 2, reverted), so no keep desire fixes it. `fork272` starts just before it.
+  Screening the rest of town15b: the model stops and won't go on at (-167 to -180, -2 to 8) on leg 3, misses the
+  sharp right at (-539, 157) from the east on leg 4, and takes leg 2's last two turns and leg 4's last.
+- `short2`: 3 of 4 clean; the fourth turned the last right on to 127 degrees into the curb after a late start
+  (51 degrees turned at the maneuver point), with the clear at 81 degrees. Gate 1 at group_46_47_48_49, 40 m:
+  left 3 of 4, right 2 of 2.
+- The detector in modeld stops for good after a burst of slow frames: it skips a frame when the model time plus
+  the median of its last 5 run times passes 45 ms, and it only adds a time when it runs. After 3 runs of 37-92 ms
+  (model runs of 58-122 ms, while other work loaded the Mac) it never ran again, and TurnPilot then holds before
+  every left for "detector unavailable" (one town15b2 run held 374 s). Seen in the last 3 sessions today.
+- `control.py` now drops its wound-up speed reference when the car accelerates 1.5 m/s^2 past the request: out of
+  a tight turn the ETK 800 surged at 4.5-4.8 m/s^2 on a 1.0 request, and openpilot latched excessiveActuation.
+- route_drive's JSON has `poses` per run: wall-clock and run time, position and BeamNG's rotation quaternion at
+  20 Hz (`pose_fields`), from the IMU pose, which trails the game by 150-210 ms. Per-run stats are in
+  `~/turnpilot-artifacts/phase3/h3/*_stats.json` and `stats_table.txt`.
+
+`route_stats.py` also says whether the detector was still running at the end of each run (`detector_up`: a
+`turnpilotDetections` in the last 5 s). Count a run only with the detector up and the model at 18 Hz or more.
+
+## Chase view
+
+A live chase camera (`--capture`) costs the driving cameras 6 to 9 pairs a second at any frame rate, and the model's
+turns fail at the 11 to 14 left, so the demo's chase view is rendered after the drive. `chase_render.py` reads a run's
+pose log (route_drive's `poses`, or the scenario runner's `poses` and `actor_poses`), teleports the car to each pose
+on a 20 Hz grid on the game's clock, takes one frame from capture.py's chase camera for each, and writes an mp4 with
+the sidecar `demo_video.py` aligns on. Run it with the bridge stopped, since it moves the same car:
+
+```sh
+python -m openpilot.tools.sim.bridge.beamng.chase_render demo.json --run 1 -o demo_chase.mp4
+python -m openpilot.tools.sim.bridge.beamng.route_stats demo.json   # demo_stats.json
+python -m openpilot.tools.turnpilot.demo_video --chase demo_chase.mp4 --ui demo_ui.mp4 --result demo_stats.json --run 1 -o demo.mp4
+```
+
+`record_route.sh` and `record_scenario.sh` do it all on a fresh stack (`restart_stack.sh`): the drive with the UI
+recorded by `record_ui.py`, the stats, the render and the composed video.
+
+Measured on 2026-10-27:
+
+- The log is the IMU's pose at the camera mount. It holds each IMU batch for one to three 20 Hz rows and trails the
+  game by 150 to 210 ms, so `chase_track.py` keeps the first row of each new value, moves it 0.16 s back, and fits
+  a Gaussian-weighted line (sigma 80 ms) through the rows within 0.25 s of each frame.
+- The teleport position is (0.33, -0.332, 1.066) m from the IMU in the vehicle frame (x left, -y forward, z up), not
+  `cameras.MOUNT`. Teleported with that offset, the IMU read back within 1 cm of the logged pose, and the car settled
+  by less than 1.2 cm.
+- After a teleport, the first one or two new chase frames still show the old pose; in 12 trials the third always
+  showed the new one. The render takes the fourth, with the game running. Paused, the camera renders only on a
+  physics step, and the frame after one step was sometimes the old pose and sometimes missing.
+- BeamNG's own replay (`core_replay`) records in this headless game, and the bridge kept its 20 pairs a second while it
+  did, with the car standing (not measured while driving). But a camera created while the replay is paused never
+  rendered, and the replay's own timeline came out shorter than the wall time it recorded, so it would need its own
+  alignment. The pose log works for any drive that logged poses, so the replay wasn't taken further.
+- The render shows the car's pose only: the wheels don't steer and the body doesn't roll, and BeamNG traffic that
+  isn't a scenario actor isn't there.
 
 ## Scenario hooks
 
@@ -259,7 +337,7 @@ model sees about 12% less time pass than really does, with occasional 100 ms gap
   sensor axes (the yaw rate shows up in its third, "right", component).
 - The game's IMU has no noise or bias.
 - The ETK 800's steering lock (38 degrees) comes from yaw rate at low speed on one street; paramsd learns the rest.
-- `--capture` renders a third camera and costs about 8 camera pairs a second.
+- `--capture` renders a third camera and costs about 8 camera pairs a second; use `chase_render.py` after the drive.
 - modeld doesn't reconnect to a new VisionIPC server: restart it whenever you restart the bridge.
 - A teleport resets the car to P; the bridge shifts it back to D, but openpilot raises `wrongGear` in between and
   disengages, as a real Model 3 would.

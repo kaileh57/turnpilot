@@ -6,7 +6,7 @@ lead distance is the timing lever. Gate 1 (big model, 25 km/h, 2026-10-27) took 
 starts it is latched until the maneuver is passed or the timeout: navd's 1 Hz distance carries a few meters of
 noise, and dropping the desire whenever it read past the lead again sent the model a new rising edge each time.
 A keep toward a side where the model sees no lane line drove the car off the road there, so it is dropped.
-The model forgets a pulse about 5 s after it (the length of its desire history): at junctions where the slow
+The model forgets a pulse 132 frames after it (6.6 s at 20 Hz, its desire history; see below): where the slow
 approach took longer than that, it planned the turn and then dropped it 10 m out, and a late retry pulse brought
 the turn back at once. So a turn desire is pulsed again every REPULSE_S on the approach, and once more ENTRY_M
 before the junction, so the last pulse is fresh for the whole turn: at 4 m/s a turn outlasts one pulse, and the
@@ -19,8 +19,8 @@ on: at a 55 degree "left" the car turned 122-126 degrees into the curb, the last
 So once the turn is done, CLEAR_DESIRE goes out and modeld drops the turn desires from the queue: at the
 junction (navd past it) once the car has turned CLEAR_MIN_DEG, or anywhere within CLEAR_MARGIN_DEG of the turn's
 nominal angle (80 degrees for a left or right).
-Short of CLEAR_MIN_DEG it waits: with the desire gone at 15-32 degrees the model gave up 2 turns of 3, from
-25-42 degrees it finished all 8 on its own.
+Short of CLEAR_MIN_DEG it waits: in H2's single-pulse runs, with the pulse gone at 5-16 degrees the model gave up
+3 turns of 3, and at 25-42 degrees it finished 9 of 10 on its own (the one it gave up was at 32).
 """
 import math
 

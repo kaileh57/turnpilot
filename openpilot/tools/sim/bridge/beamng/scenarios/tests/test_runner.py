@@ -47,7 +47,7 @@ class FakeDirector:
 
   def setup(self, actors):
     for a in actors:
-      self.poses[a.name] = (a.path[0][0], a.path[0][1], a.heading)
+      self.poses[a.name] = (a.path[0][0], a.path[0][1], a.heading, a.path[0][2])
 
   def walk(self, name):
     pass
@@ -148,7 +148,8 @@ def bridge():
   car.cancel = lambda: setattr(car, 'cancelled', True)
   b = SimpleNamespace(simulator_state=SimpleNamespace(), car=car, blinker=(False, False), auto_engage=False, rk_frame=0,
                       set_speed_kph=0.0, rolling_start_kph=0.0, cfg=SimpleNamespace(capture=''), teleports=[], done=False)
-  b.world = SimpleNamespace(capture=None, teleport=lambda pos, rot: b.teleports.append(pos))
+  pose = SimpleNamespace(pos=(1.0, 2.0, 3.0), fwd=(1.0, 0.0, 0.0), up=(0.0, 0.0, 1.0))
+  b.world = SimpleNamespace(capture=None, pose=pose, teleport=lambda pos, rot: b.teleports.append(pos))
   b.shutdown = lambda: setattr(b, 'done', True)
   return b
 
@@ -193,3 +194,8 @@ def test_runs_end_to_end(tmp_path, monkeypatch, name, runs, trigger, failure):
     assert r['failures'][0] == failure
     gap = 'ped_gap' if name.startswith('ped') else 'car_gap'
     assert any(row[gap] is not None for row in r['rows'])
+    assert r['pose_fields'] == run.POSE_FIELDS and len(r['poses']) > 20 * 10
+    assert r['poses'][0][0] <= r['rows'][0]['wall']  # from the teleport on, not only once engaged
+    assert set(r['actor_poses']) == {a.name for a in plan.actors}
+    for a in r['actor_poses'].values():
+      assert len(a['rows'][0]) == len(run.ACTOR_FIELDS)

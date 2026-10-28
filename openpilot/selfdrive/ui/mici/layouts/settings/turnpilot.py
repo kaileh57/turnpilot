@@ -1,6 +1,10 @@
 import pyray as rl
 
+from openpilot.selfdrive.navigation.helpers import latest_gps_source
+from openpilot.selfdrive.turnpilot.maps.coverage import CoverageCache
 from openpilot.selfdrive.turnpilot.web.pairing import pairing_url
+from openpilot.selfdrive.turnpilot.web.store import last_gps_position
+from openpilot.selfdrive.ui.lib.turnpilot import mapped_area_text
 from openpilot.selfdrive.ui.mici.widgets.button import GreyBigButton
 from openpilot.selfdrive.ui.mici.widgets.qr import QR
 from openpilot.selfdrive.ui.ui_state import ui_state
@@ -24,6 +28,8 @@ class PairPhoneScroller(NavScroller):
     self._last_refresh = rl.get_time()
     self._qr = QR(self._url)
     self._url_button = GreyBigButton("", shown_url(self._url))
+    self._coverage = CoverageCache()
+    self._area_button = GreyBigButton("mapped area", self._area_text())
     self._scroller.scroll_indicator_start_after = self._qr
     self._scroller.add_widgets([
       self._qr,
@@ -31,13 +37,21 @@ class PairPhoneScroller(NavScroller):
                     gui_app.texture("icons_mici/settings/device/phone.png", 85, 64)),
       self._url_button,
       GreyBigButton("", "The phone must be on the same network, such as its own hotspot."),
+      self._area_button,
     ])
+
+  def _area_text(self) -> str:
+    """Which of TurnPilot's mapped areas the car is in, from the live fix onroad or the last saved one."""
+    source = latest_gps_source(ui_state.sm)
+    position = (ui_state.sm[source].latitude, ui_state.sm[source].longitude) if source else last_gps_position(ui_state.params)
+    return mapped_area_text(self._coverage, position, (ui_state.params.get("TurnPilotValhallaTiles") or "").strip())
 
   def _update_state(self):
     super()._update_state()
     if rl.get_time() - self._last_refresh < URL_REFRESH_INTERVAL:
       return
     self._last_refresh = rl.get_time()
+    self._area_button.set_value(self._area_text())
     url = pairing_url(ui_state.params)
     if url != self._url:
       self._url = url
