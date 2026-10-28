@@ -1,4 +1,5 @@
 import hashlib
+import os
 import io
 import tarfile
 import time
@@ -110,8 +111,12 @@ def test_prune_keeps_the_newest_and_the_one_in_use(tmp_path):
   packs_dir = tmp_path / 'packs'
   assert corridor.packs(packs_dir) == made  # oldest first, whatever their names
   (packs_dir / '.staging-dead').mkdir()  # left by a crash mid-unpack
+  (packs_dir / '.download-dead.tar').write_bytes(b'cut off')
+  os.utime(packs_dir / '.download-dead.tar', (1, 1))
+  (packs_dir / '.download-live.tar').write_bytes(b'still coming')  # another download in progress
   corridor.prune(packs_dir, keep=3, in_use=made[0])
   assert corridor.packs(packs_dir) == [made[0]] + made[2:]
-  assert not (packs_dir / '.staging-dead').exists()
+  assert not (packs_dir / '.staging-dead').exists() and not (packs_dir / '.download-dead.tar').exists()
+  assert (packs_dir / '.download-live.tar').exists()
   corridor.prune(packs_dir, keep=2)
   assert corridor.packs(packs_dir) == made[3:]

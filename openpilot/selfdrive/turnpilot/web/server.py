@@ -99,7 +99,7 @@ class App:
       nav = read_status(params)
     coverage, error = self.cached_coverage()
     if coverage is None and error is None:
-      error = coverage_cache.NO_COVERAGE.message
+      error = coverage_cache.NO_COVERAGE_MESSAGE
     here = gps
     if here is None and (last := self.store.last_gps()):
       here = {"latitude": last[0], "longitude": last[1]}
@@ -175,7 +175,7 @@ class App:
   def coverage_body(self) -> dict:
     coverage, error = self.cached_coverage()
     if coverage is None:
-      return {"coverage": None, "error": error or coverage_cache.NO_COVERAGE.message}
+      return {"coverage": None, "error": error or coverage_cache.NO_COVERAGE_MESSAGE}
     return {"coverage": coverage.data, "version": coverage.version, "fetched_at": self.coverage.fetched_at,
             "regions": coverage.summary(), "names": coverage.names(), "error": None}
 

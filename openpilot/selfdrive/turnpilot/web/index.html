@@ -272,8 +272,8 @@ function drawMap(car, dest) {
       rings.forEach(function (r) { d += r.map(function (p, i) { var q = xy(p); return (i ? "L" : "M") + q[0].toFixed(1) + " " + q[1].toFixed(1); }).join("") + "Z"; });
     });
     svg.appendChild(svgEl("path", { d: d, "class": "area" }));
-    var fb = bboxOf([f], []), c = xy([(fb[0] + fb[2]) / 2, (fb[1] + fb[3]) / 2]);
-    var label = svgEl("text", { x: c[0].toFixed(1), y: c[1].toFixed(1), "class": "label" });
+    var fb = bboxOf([f], []), c = xy([(fb[0] + fb[2]) / 2, fb[3]]);  // inside the area's top edge, clear of the markers
+    var label = svgEl("text", { x: c[0].toFixed(1), y: Math.min(Math.max(c[1] + 14, 12), H - 4).toFixed(1), "class": "label" });
     label.textContent = f.properties.name || f.properties.id;
     svg.appendChild(label);
   });
@@ -307,20 +307,21 @@ function renderMap(s) {
     if (m.coverage_error) problems.push(m.coverage_error);
     else if (m.car_outside) problems.push(m.outside_message.replace("Outside", "The car is outside"));
   }
-  if (m.nav && m.nav.state === "error") problems.unshift("No route: " + m.nav.message);
+  var nav = s.destination ? m.nav : null;  // navd's status is about the current destination only
+  if (nav && nav.state === "error") problems.unshift("No route: " + nav.message);
   err.hidden = !problems.length;
   err.textContent = problems.join(" ");
 
   var text = "", bad = false;
   if (m.override) text = "Developer override: routing on local tiles (" + m.override + "), no geofence.";
-  else if (m.nav && m.nav.state === "downloading") {
-    text = "Downloading map for this drive…" + (m.nav.progress != null ? " " + percent(m.nav.progress) : "") +
-      (m.nav.bytes ? " (" + (m.nav.bytes / 1e6).toFixed(1) + " MB)" : "");
-  } else if (m.nav && m.nav.state === "checking") text = "Checking the mapped area…";
-  else if (m.nav && m.nav.state === "ready" && s.destination) text = "Ready" + (m.nav.region ? ": map for this drive in the " + m.nav.region : "");
+  else if (nav && nav.state === "downloading") {
+    text = "Downloading map for this drive…" + (nav.progress != null ? " " + percent(nav.progress) : "") +
+      (nav.bytes ? " (" + (nav.bytes / 1e6).toFixed(1) + " MB)" : "");
+  } else if (nav && nav.state === "checking") text = "Checking the mapped area…";
+  else if (nav && nav.state === "ready") text = "Ready" + (nav.region ? ": map for this drive in the " + nav.region : "");
   else if (m.car_region) text = "Car is in the " + m.car_region + ".";
   else if (m.coverage && !m.car) text = "Car position unknown.";
-  if (m.nav && m.nav.state === "error") { text = ""; bad = true; }
+  if (nav && nav.state === "error") { text = ""; bad = true; }
   state.textContent = text;
   state.className = bad ? "bad" : "";
 

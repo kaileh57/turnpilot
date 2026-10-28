@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 
 from openpilot.common.swaglog import cloudlog
-from openpilot.selfdrive.turnpilot.maps.client import MapClient, MapError, write_atomic
+from openpilot.selfdrive.turnpilot.maps.client import MapClient, MapError, missing_config, write_atomic
 from openpilot.selfdrive.turnpilot.maps.geofence import Coverage, Region
 from openpilot.selfdrive.turnpilot.maps.paths import maps_dir, wall_time
 
@@ -17,8 +17,12 @@ REFRESH_PERIOD = 6 * 3600.  # s between refreshes once one worked; the server re
 RETRY_PERIOD = 60.  # s between attempts while offline or misconfigured
 STATUS_PARAM = 'TurnPilotMapCoverageStatus'
 
-NO_COVERAGE = MapError('no_coverage', "TurnPilot has never downloaded its mapped area from the map server, so it can't tell where it " +
-                       "can drive. Set up the map server in the TurnPilot web app with the comma online.", 'No mapped area downloaded')
+NO_COVERAGE_MESSAGE = ("TurnPilot has never downloaded its mapped area from the map server, so it can't tell where it " +
+                       "can drive. Set up the map server in the TurnPilot web app with the comma online.")
+
+
+def no_coverage(detail: str = '') -> MapError:
+  return MapError('no_coverage', NO_COVERAGE_MESSAGE + (f" {detail}" if detail else ''), 'No mapped area downloaded')
 
 
 def coverage_path(directory: Path | None = None) -> Path:
@@ -62,7 +66,7 @@ class CoverageCache:
   def require(self) -> Coverage:
     coverage = self.get()
     if coverage is None:
-      raise NO_COVERAGE
+      raise no_coverage()
     return coverage
 
 
@@ -113,12 +117,19 @@ class CoverageRefresher(threading.Thread):
     self.woken.set()
 
   def run(self):
+    last_error = None
     while not self.stopped.is_set():
       wait = REFRESH_PERIOD
       try:
-        refresh(self.params, self.directory)
+        if missing_config(self.params) and last_error == 'not_configured':
+          wait = RETRY_PERIOD  # not set up (a fresh install, the sim): said once, not every minute
+        else:
+          refresh(self.params, self.directory)
+          last_error = None
       except MapError as e:
-        cloudlog.warning(f"turnpilot coverage refresh failed: {e.code}: {e.message}")
+        if e.code != last_error:
+          cloudlog.warning(f"turnpilot coverage refresh failed: {e.code}: {e.message}")
+        last_error = e.code
         wait = RETRY_PERIOD
       except Exception:
         cloudlog.exception("turnpilot coverage refresh failed")

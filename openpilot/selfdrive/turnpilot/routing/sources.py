@@ -15,7 +15,7 @@ from pathlib import Path
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.turnpilot.maps import corridor
 from openpilot.selfdrive.turnpilot.maps.client import MapClient, MapError, Throttle
-from openpilot.selfdrive.turnpilot.maps.coverage import NO_COVERAGE, CoverageCache, check_trip, refresh
+from openpilot.selfdrive.turnpilot.maps.coverage import CoverageCache, check_trip, no_coverage, refresh
 from openpilot.selfdrive.turnpilot.maps.geofence import Region
 from openpilot.selfdrive.turnpilot.maps.paths import maps_dir
 from openpilot.selfdrive.turnpilot.maps.status import NavStatus
@@ -112,7 +112,7 @@ class MapRouter:
       try:
         return refresh(self.params, self.directory)
       except MapError as e:
-        raise MapError(NO_COVERAGE.code, f"{NO_COVERAGE.message} Fetching it now failed: {e.message}", NO_COVERAGE.short) from None
+        raise no_coverage(f"Fetching it now failed: {e.message}") from None
     return coverage
 
   def route_server(self, start, destination, bearing, language):

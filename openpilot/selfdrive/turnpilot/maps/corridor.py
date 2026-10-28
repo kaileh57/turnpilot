@@ -18,6 +18,7 @@ from openpilot.selfdrive.turnpilot.maps.client import MapError
 MANIFEST = 'manifest.json'
 TILES = 'tiles'
 KEEP_PACKS = 3
+STALE_DOWNLOAD_S = 3600.  # a download this old was cut off by a crash or a restart
 MAX_MANIFEST = 16 * 1024 * 1024
 CHUNK = 1024 * 1024
 
@@ -140,6 +141,9 @@ def prune(packs_dir: Path, keep: int = KEEP_PACKS, in_use: Path | None = None):
   """Delete all but the newest keep packs, never the one in use, and any leftover staging directories or downloads."""
   for stale in packs_dir.glob('.staging-*') if packs_dir.is_dir() else []:
     shutil.rmtree(stale, ignore_errors=True)
+  for stale in packs_dir.glob('.download-*.tar') if packs_dir.is_dir() else []:
+    if stale.stat().st_mtime < time.time() - STALE_DOWNLOAD_S:  # noqa: TID251  # file times are wall clock
+      stale.unlink(missing_ok=True)
   for old in packs(packs_dir)[:-keep] if keep > 0 else packs(packs_dir):
     if in_use is None or old.resolve() != in_use.resolve():
       shutil.rmtree(old, ignore_errors=True)
