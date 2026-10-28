@@ -13,7 +13,7 @@ from openpilot.selfdrive.turnpilot.hooks import CLEAR_DESIRE, plan_events
 from openpilot.selfdrive.turnpilot.route_follower import LEFT, NONE, TURN, RouteFollower, maneuver_from_instruction
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, junction_of, nav_instruction
 from openpilot.selfdrive.turnpilot.tests.test_turnpilotd import Sim
-from openpilot.selfdrive.turnpilot.turn_skip import SKIP_CONFIRM_FRAMES, TurnSkip, can_make_turn, safe_turn_speed
+from openpilot.selfdrive.turnpilot.turn_skip import MIN_FIRST_PULSE_M, SKIP_CONFIRM_FRAMES, TurnSkip, can_make_turn, safe_turn_speed
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP
 
 Desire = log.Desire
@@ -201,6 +201,23 @@ def test_turn_skip_unit():
   # latched for this maneuver, even slowed right down
   assert skip.update(m, 30., 2, 0., desire_out=False).skipped
   assert not skip.update(m, 30., 3, 0., desire_out=False).skipped
+
+
+def test_turn_ahead_of_a_bend_too_close_for_its_first_pulse_is_announced_skipped():
+  # a left MIN_FIRST_PULSE_M or less past where the car is, after a bend: it becomes the maneuver only past the bend,
+  # too late for its first pulse, so its skip is announced now; the bend itself isn't skipped
+  skip = TurnSkip()
+  bend = maneuver_from_instruction(nav_instruction(0., "turn", "right", junction=junction_of("right", 0, 60.)))
+  left = maneuver_from_instruction(nav_instruction(30., "turn", "left", junction=junction_of("left")))
+  assert bend.kind == NONE and left.kind == TURN
+  state = skip.update(bend, 0., 1, 4., False, ahead=left, ahead_distance=30.)
+  assert not state.skipped and state.feasible_now and not state.ahead_skipped
+  state = skip.update(bend, 0., 1, 4., False, ahead=left, ahead_distance=MIN_FIRST_PULSE_M - 1.)
+  assert not state.skipped and state.feasible_now and state.ahead_skipped
+  # not while openpilot isn't steering (no first pulse would go, nor is the turn skipped under the driver)
+  assert not skip.update(bend, 0., 1, 4., False, lat_active=False, ahead=left, ahead_distance=5.).ahead_skipped
+  # once it is the maneuver, it is skipped as too late
+  assert skip.update(left, MIN_FIRST_PULSE_M - 6., 2, 4., False).skipped
 
 
 def test_shadow_plan_raises_no_alert():

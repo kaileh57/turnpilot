@@ -298,10 +298,12 @@ class TurnPilot:
 
     # too fast to make the turn: skipped, so nothing below acts on it (no desire, no cap, no turn holds or lane changes)
     desire_out = self.desires.maneuver_id == rf.maneuver_id and self.desires.started
-    skip = self.skip.update(upcoming, rf.distance, rf.maneuver_id, v_ego, desire_out, right_hand_traffic, lat_active)
+    skip = self.skip.update(upcoming, rf.distance, rf.maneuver_id, v_ego, desire_out, right_hand_traffic, lat_active,
+                            rf.ahead, rf.ahead_distance)
     maneuver = None if skip.skipped else upcoming
-    # navd reroutes on it and selfdrived alerts: only while TurnPilot is driving the route (handback outranks it)
-    plan.tooFastToTurn = skip.skipped and acting
+    # navd reroutes on it and selfdrived alerts: only while TurnPilot is driving the route (handback outranks it). A turn
+    # just past a bend that will be skipped once it is the maneuver is announced now, before its junction (turn_skip.py)
+    plan.tooFastToTurn = (skip.skipped or (skip.ahead_skipped and rf.maneuver_id != self.dropped_id)) and acting
 
     act_on = maneuver if acting and rf.maneuver_id != self.dropped_id else None
     held = act_on is None and rf.maneuver_id == self.turn_held_id

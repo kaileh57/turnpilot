@@ -28,6 +28,10 @@ MIN_FIRST_PULSE_M (between those two) while openpilot is steering is skipped as 
 that close (navd moves past a bend or a straight-on step only 10 m beyond it), or one openpilot engages for that late.
 With openpilot not steering no desire goes out at all, and the driver turning there isn't skipped under them. A pulse
 again for a turn whose desire did go out (on the entry, re-engaging, pulling away) isn't a first pulse.
+A turn just past a bend or a straight-on step (route_follower.py: RouteFollower.ahead) becomes the maneuver only once
+the car is NAVD_ADVANCE_M past that step, at whatever distance it then has: one under MIN_FIRST_PULSE_M away already is
+certain to be skipped tooLate then, which for a turn 10 m or less past the step is at or past its junction. So the skip
+is announced (SkipState.ahead_skipped) from the moment the turn ahead is that close, before the junction.
 Only junction turns (route_follower.TURN) are checked. A keep (slight turns, forks, ramps) is taken at speed by the
 model, and its desire goes at any speed.
 """
@@ -63,6 +67,7 @@ def can_make_turn(v_ego: float, distance: float, angle_deg: float, curb_side: bo
 class SkipState:
   skipped: bool       # this maneuver is skipped for good
   feasible_now: bool  # a desire may start this frame
+  ahead_skipped: bool = False  # the turn after this NONE step (RouteFollower.ahead) will be skipped tooLate: announced now
 
 
 class TurnSkip:
@@ -70,6 +75,7 @@ class TurnSkip:
     self.maneuver_id = -1
     self.skipped = False
     self._infeasible = 0
+    self._ahead_logged = -1  # the maneuver_id of the NONE step whose turn ahead was announced skipped
 
   def skip(self, maneuver, distance: float, maneuver_id: int, v_ego: float, reason: str) -> None:
     """Skip this maneuver for good now, for reason: as when it is too fast to make (turnpilotd: a turn whose desire was
@@ -81,16 +87,23 @@ class TurnSkip:
                    v_ego=round(v_ego, 2))
 
   def update(self, maneuver, distance: float, maneuver_id: int, v_ego: float, desire_out: bool,
-             right_hand_traffic: bool = True, lat_active: bool = True) -> SkipState:
+             right_hand_traffic: bool = True, lat_active: bool = True, ahead=None, ahead_distance: float = float('inf')) -> SkipState:
     """maneuver: RouteFollower.upcoming; desire_out: this maneuver's desire has gone out (DesireTiming.started);
-    lat_active: carControl.latActive."""
+    lat_active: carControl.latActive; ahead, ahead_distance: RouteFollower.ahead past a NONE step, and the distance to it."""
     if maneuver_id != self.maneuver_id:
       self.maneuver_id, self.skipped, self._infeasible = maneuver_id, False, 0
     if self.skipped:
       return SkipState(True, False)
     if maneuver is None or maneuver.kind != TURN:
       self._infeasible = 0
-      return SkipState(False, True)
+      ahead_skipped = maneuver is not None and ahead is not None and ahead.kind == TURN and lat_active and \
+        ahead_distance < MIN_FIRST_PULSE_M
+      if ahead_skipped and self._ahead_logged != maneuver_id:
+        self._ahead_logged = maneuver_id
+        cloudlog.event("turnpilot_turn_skipped", error=True, reason='tooLate', ahead=True, type=ahead.type,
+                       modifier=ahead.modifier, angle_deg=round(ahead.angle_deg, 1), geometry=ahead.geometry,
+                       distance=round(ahead_distance, 1), v_ego=round(v_ego, 2))
+      return SkipState(False, True, ahead_skipped)
     if not desire_out and lat_active and distance < MIN_FIRST_PULSE_M:
       self.skip(maneuver, distance, maneuver_id, v_ego, 'tooLate')
       return SkipState(True, False)

@@ -622,14 +622,18 @@ def test_turn_just_after_a_bend_or_a_new_name_is_slowed_for_not_skipped():
 def test_turn_too_close_after_a_bend_for_its_first_pulse_is_skipped_out_loud():
   # navd moves past a NONE step only 10 m beyond it, so a left 5-30 m after it comes up inside the lead gate 1's model
   # takes a turn from (and under 10 m, past the junction). Its first pulse never goes that late: the turn is skipped out
-  # loud (tooFastToTurn, navd reroutes), not pulsed into a missed turn, or into the curb past the junction
+  # loud (tooFastToTurn, navd reroutes), not pulsed into a missed turn, or into the curb past the junction. The skip is
+  # announced before the junction, however close it comes after the step
   for first in (("turn", "right", junction_of("right", 0, 60.)), ("new name", "straight", (0., 0., 2))):
-    for gap in (5., 8., 12., 15., 20., 25., 30.):
+    for gap in (5., 8., 10., 12., 15., 20., 25., 30.):
       sim = Sim([(300.,) + first, (300. + gap, "turn", "left", junction_of("left", 2)), (1500., "turn", "right", junction_of("right", 2))])
       while sim.s < 300. + gap + 20.:
         sim.step()
       assert not rising(sim.trace, 'desire', Desire.turnLeft), (first, gap)
-      assert any(p.tooFastToTurn for _, _, p in sim.trace), (first, gap)
+      announced = rising(sim.trace, 'tooFastToTurn', True)
+      assert announced and announced[0] < 300. + gap, (first, gap)
+      # and once announced, it stays announced through the junction
+      assert all(p.tooFastToTurn for s, _, p in sim.trace if announced[0] <= s < 300. + gap), (first, gap)
 
 
 SOFT_DISABLE_S = 3.  # selfdrived/state.py SOFT_DISABLE_TIME: lat stays active this long after the handback
