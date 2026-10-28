@@ -1,4 +1,4 @@
-"""TurnPilot on the onroad screen: a short status while it acts, and the prompt to signal for a nav lane change.
+"""TurnPilot on the onroad screen: a short status while it acts, and the countdown and prompt to signal for a nav lane change.
 
 The maneuver itself (arrow, distance, street) is in the navigation panel. Everything here is gated on
 TurnPilotEnabled and a live, valid turnpilotPlan, so nothing shows when TurnPilot is off or turnpilotd is down.
@@ -7,6 +7,7 @@ The text logic is in selfdrive/ui/lib/turnpilot.py.
 import pyray as rl
 
 from openpilot.cereal import log
+from openpilot.selfdrive.turnpilot.hooks import lane_change_text
 from openpilot.selfdrive.ui.lib.turnpilot import signal_prompt
 from openpilot.selfdrive.ui.mici.onroad.alert_renderer import ALERT_MARGIN, Alert, AlertRenderer
 from openpilot.system.ui.lib.application import FontWeight
@@ -24,8 +25,9 @@ def prompt_alert(plan, car_state) -> Alert | None:
   side = signal_prompt(plan, car_state)
   if not side:
     return None
-  # preLaneChange* gets upstream's turn signal icon and small alert background
-  return Alert(text1=f'Signal {side}', text2='shadow mode' if plan.shadow else 'for the route', size=AlertSize.small,
+  # preLaneChange* gets upstream's turn signal icon and small alert background. Engaged, selfdrived's
+  # turnpilotLaneChange* alert says the same and chimes; this shows in shadow mode, and while openpilot isn't engaged
+  return Alert(text1=lane_change_text(plan, side), text2='shadow mode' if plan.shadow else 'for the route', size=AlertSize.small,
                status=AlertStatus.userPrompt, alert_type=f'preLaneChange{side.capitalize()}/turnpilot')
 
 

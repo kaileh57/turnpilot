@@ -47,36 +47,10 @@ class TestSoundd(OpenpilotTestCase):
     clock.return_value = SELFDRIVE_STATE_TIMEOUT + 10
     assert not check_selfdrive_timeout_alert(sm)
 
-  def test_turnpilot_signal_prompt_chime(self):
+  def test_turnpilot_lane_change_chimes_come_from_selfdrived(self):
+    # a TurnPilot prompt alone plays nothing: its chime is selfdrived's turnpilotLaneChange* alert, so one path, no double
     s = Soundd()
-
-    def played():
-      s.current_sound_frame = len(s.loaded_sounds[s.current_sound])
-
     s.get_audible_alert(FakeSM())
-    assert s.current_alert == AudibleAlert.prompt
-    played()
-    s.get_audible_alert(FakeSM())
-    assert s.current_alert == AudibleAlert.none  # once, not again while the prompt stays up
-
-    s.get_audible_alert(FakeSM(blinker=True))  # signaled, so the prompt goes
     assert s.current_alert == AudibleAlert.none
-    s.get_audible_alert(FakeSM())  # and a new prompt chimes again
+    s.get_audible_alert(FakeSM(alert_size=AlertSize.mid, sound=AudibleAlert.prompt))
     assert s.current_alert == AudibleAlert.prompt
-
-    # none under an openpilot alert (the UI shows the alert, not the prompt), or with TurnPilot off
-    for sm in (FakeSM(alert_size=AlertSize.small), FakeSM(state='disabled'), FakeSM(prompt='none')):
-      s = Soundd()
-      s.get_audible_alert(sm)
-      assert s.current_alert == AudibleAlert.none
-
-    # openpilot's own sound plays out first
-    s = Soundd()
-    s.get_audible_alert(FakeSM(sound=AudibleAlert.engage))
-    assert s.current_alert == AudibleAlert.engage
-    played()
-    s.get_audible_alert(FakeSM())
-    s.get_audible_alert(FakeSM())
-    assert s.current_alert == AudibleAlert.prompt
-
-  # TODO: add test with micd for checking that soundd actually outputs sounds
