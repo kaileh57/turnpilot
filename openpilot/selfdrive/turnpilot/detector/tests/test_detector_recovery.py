@@ -4,9 +4,16 @@ from collections import deque
 
 from openpilot.cereal import log
 from openpilot.common.test import OpenpilotTestCase
-from openpilot.selfdrive.turnpilot.detector.modeld_detector import (FORCE_RUN_FRAMES, FORCE_RUN_MAX_FRAMES, RETRY_MAX_S, RETRY_S,
-                                                                     RUN_EVERY, STEP_BUDGET_S, DetectorHost)
+from types import SimpleNamespace
+
+import pytest
+
+from openpilot.selfdrive.turnpilot.detector import modeld_detector
+from openpilot.selfdrive.turnpilot.detector.modeld_detector import (FORCE_RUN_FRAMES, FORCE_RUN_S, RETRY_MAX_S, RETRY_S, RUN_EVERY,
+                                                                     STEP_BUDGET_S, DetectorHost)
 from openpilot.selfdrive.turnpilot.detector.tests.test_modeld_detector import PM, Meta, make_detector
+from openpilot.selfdrive.turnpilot.scene.tracker import STALE_S
+from openpilot.selfdrive.turnpilot.turnpilotd import DETECTOR_DEADLINE_S
 
 METAS = [Meta(1), Meta(2)]
 
@@ -54,15 +61,38 @@ class TestDetectorRecovery(OpenpilotTestCase):
     gaps = run_gaps(det, pm, 40, 0.020)
     assert gaps[0] == FORCE_RUN_FRAMES - RUN_EVERY  # forced, the estimate starting over from that run...
     assert set(gaps[1:]) == {RUN_EVERY}             # ...which fits, so back on the N-frame grid
-    assert det.force_after == FORCE_RUN_FRAMES
 
-  def test_no_room_backs_off(self):
-    # the driving model alone overruns the budget: a forced run now and then, each further apart, to the cap
+  def test_no_room_still_runs_inside_the_deadline(self):
+    # the driving model alone overruns the budget: a forced run every FORCE_RUN_FRAMES, never further apart, so
+    # turnpilotd's deadline never runs out while the detector can still run (a 2.2 s gap at 18 Hz handed back in BeamNG)
     det, pm = make_detector(), PM()
     gaps = run_gaps(det, pm, 1200, STEP_BUDGET_S + 0.005)
-    assert gaps[:5] == [FORCE_RUN_FRAMES - RUN_EVERY, 2 * FORCE_RUN_FRAMES, 4 * FORCE_RUN_FRAMES, FORCE_RUN_MAX_FRAMES,
-                        FORCE_RUN_MAX_FRAMES]
+    assert gaps[0] == FORCE_RUN_FRAMES - RUN_EVERY and set(gaps[1:]) == {FORCE_RUN_FRAMES}
     assert det.failures == 0
+
+  def test_forced_run_is_inside_the_deadline(self):
+    # turnpilotd hands back DETECTOR_DEADLINE_S after the last detections, counting from the scene going stale
+    assert FORCE_RUN_S <= 0.8 * (DETECTOR_DEADLINE_S - STALE_S)
+    assert FORCE_RUN_FRAMES * 0.05 <= FORCE_RUN_S + 1e-9  # at modeld's 20 Hz, the frame count comes first
+
+
+@pytest.mark.parametrize("hz", [20., 18., 12., 6.])
+def test_slow_model_still_runs_inside_the_deadline(monkeypatch, hz):
+  # a loaded host runs the driving model below 20 Hz: the forced run goes by the clock, not by frames, so the gap
+  # between runs stays inside turnpilotd's deadline whatever the rate
+  clock = SimpleNamespace(t=1000.)
+  monkeypatch.setattr(modeld_detector, 'time', SimpleNamespace(monotonic=lambda: clock.t, perf_counter=lambda: clock.t))
+  det, pm = make_detector(), PM()
+  runs = []
+  for _ in range(int(60 * hz)):
+    clock.t += 1. / hz
+    n = len(pm.sent)
+    det.step(pm, det.model_state, STEP_BUDGET_S + 0.005, 0.0, log.Desire.none, METAS)
+    if len(pm.sent) > n:
+      runs.append(clock.t)
+  gaps = [b - a for a, b in zip(runs, runs[1:], strict=False)]
+  assert len(runs) > 30 and max(gaps) <= FORCE_RUN_S + 1. / hz + 1e-6
+  assert max(gaps) < DETECTOR_DEADLINE_S - STALE_S
 
   def test_failure_retries_with_backoff(self):
     det, pm = make_detector(), PM()

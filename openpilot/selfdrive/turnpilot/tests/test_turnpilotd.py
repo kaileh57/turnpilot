@@ -404,7 +404,7 @@ def test_detector_stops_hand_back_without_a_hold():
   sim = Sim([(400., "turn", "left"), (1500., "turn", "right")])
   sim.run(5.)
   assert sim.trace[-1][2].handback == Handback.none
-  # a slow spell: modeld's forced run comes 1 s after the last detection, the scene unavailable from STALE_S: no handback
+  # a slow spell: modeld's forced run comes within 1 s of the last detection, the scene unavailable from STALE_S: no handback
   for _ in range(int((1.0 - STALE_S) / DT_MDL)):
     assert sim.step(available=False).handback == Handback.none
   sim.step()

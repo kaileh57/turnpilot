@@ -21,8 +21,8 @@ TurnPilot acts only while it can do its job (Kellen, 2026-10-27: no degraded mod
   first engaged frame with no detection yet (whatever modeld publishes, engaged or not since), it is noDetector too. A
   load that failed while the driver engaged during it (modeld publishes nothing while it loads) is handed back so.
 - Once it has run, DETECTOR_DEADLINE_S without fresh results is a stopped detector. modeld's own skips stay inside it: a
-  slow spell forces a run after 1 s, a failed run retries after 1 s. A second forced wait (2 s) or failure in a row is
-  past it.
+  slow spell forces a run every 0.8 s however long it lasts (modeld_detector.FORCE_RUN_S), a failed run retries after
+  1 s. A second failure in a row, or a forced run that itself takes too long, is past it.
 - A modelV2 from the small model after one from the big model is a fallback (modelV2.big), for the rest of the drive.
   So is modeld's ChestnutActive False (read in main()): it outlives this process, which TurnPilot turned off and on
   restarts, and covers a big model that failed to load.
@@ -96,7 +96,7 @@ MISMATCH_CONFIRM_FRAMES = 20  # a lane mismatch this many frames in a row (1 s) 
 NO_JUNCTION_DATA_REASON = "no junction data: nominal turn angle"
 JUNCTION_UNCERTAIN_REASON = "junction position uncertain: stopping early"
 # no fresh detections for this long (the scene goes unavailable STALE_S after the last) and the detector has stopped:
-# past modeld's first forced run or retry (1 s), short of its second (2 s)
+# past modeld's forced runs (every 0.8 s) and its first retry (1 s), short of its second (2 s)
 DETECTOR_DEADLINE_S = 1.5
 # no fresh detections this long (in modelV2 frames) after TurnPilot is turned on: the detector never started. modeld
 # loads it at startup, or within a second of a mid-drive enable, and runs it from the next frame

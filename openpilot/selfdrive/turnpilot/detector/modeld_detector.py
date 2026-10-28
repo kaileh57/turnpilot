@@ -13,9 +13,10 @@ Nothing here runs unless TurnPilotEnabled is set and the compiled pkl for this d
 (compile_detector.py builds it; the pkls are not in git).
 
 Once it's on it stays on for the drive, and nothing here turns it off quietly: without fresh detections turnpilotd hands
-control back to the driver (a soft disable), so every gap is loud. A slow spell only skips frames until a forced run
-measures the time again, a failed run is retried with a backoff and logged, a mid-drive TurnPilotEnabled starts it, and a
-fallback to the small driving model switches to that model's detector, where one exists.
+control back to the driver (a soft disable), so every gap is loud. A slow spell only skips frames until a forced run,
+inside turnpilotd's deadline, measures the time again, a failed run is retried with a backoff and logged, a mid-drive
+TurnPilotEnabled starts it, and a fallback to the small driving model switches to that model's detector, where one
+exists.
 """
 import time
 from collections import deque
@@ -39,11 +40,14 @@ WIDE_CURVATURE = 0.01      # 1/m (a 100 m radius): at or above this, look throug
 WIDE_HOLD_S = 2.0          # and keep looking through it this long after the turn ends
 TURN_DESIRES = (log.Desire.turnLeft, log.Desire.turnRight)
 TIME_WINDOW = 5            # the detector time estimate is the median of this many runs, so one slow run can't stop it
-# The estimate only changes when it runs, so after this many model frames skipped in a row (1 s) it runs anyway and the
-# estimate starts over from that run: a burst of slow runs under load can't keep it off once the load has gone. Each
-# forced run that still doesn't fit doubles the wait, to the max (8 s); each costs one step past the budget.
-FORCE_RUN_FRAMES = 20
-FORCE_RUN_MAX_FRAMES = 160
+# The estimate only changes when it runs, so after this many model frames skipped in a row, or this long by the clock
+# (a loaded host runs the driving model below 20 Hz), it runs anyway and the estimate starts over from that run: a burst
+# of slow runs under load can't keep it off once the load has gone. The wait never grows: turnpilotd hands back
+# DETECTOR_DEADLINE_S (1.5 s) after the last detections, so a forced run must land well inside (DETECTOR_DEADLINE_S -
+# STALE_S) of the one before; each costs one step past the budget, one in 16 frames while nothing fits. A detector that
+# can't run in time even so (a forced run itself too slow, failures) is a loud handback in turnpilotd, never quietly off.
+FORCE_RUN_FRAMES = 16      # 0.8 s at 20 Hz
+FORCE_RUN_S = 0.8
 RETRY_S = 1.0              # a failed run is retried after this, doubled for each failure in a row...
 RETRY_MAX_S = 60.          # ...to this
 PARAM_CHECK_S = 1.0        # TurnPilotEnabled is read this often
@@ -89,9 +93,9 @@ class LanePaintReader:
 
 
 class ModeldDetector:
-  force_after = FORCE_RUN_FRAMES  # model frames skipped in a row before a forced run
   failures = 0                    # failed runs in a row
   retry_at = 0.0                  # time.monotonic() a failed detector waits for
+  last_run_t: float | None = None  # time.monotonic() of the last run (None: none yet)
 
   def __init__(self, model_state, cam_w: int, cam_h: int, cameras: dict[str, int]):
     """cameras: 'road' and/or 'wide' -> index of its frame in modeld's packed input."""
@@ -112,7 +116,7 @@ class ModeldDetector:
       t0 = time.perf_counter()
       self.run(input_frame=self.frames[next(iter(self.frames))]).numpy()
       self.times.append(time.perf_counter() - t0)
-    self.since_run = RUN_EVERY
+    self.since_run, self.last_run_t = RUN_EVERY, time.monotonic()
     self.wide_until = -1.0
     self.lane_paint = LanePaintReader(cam_w, cam_h) if 'road' in cameras else None
 
@@ -124,19 +128,18 @@ class ModeldDetector:
 
   def room(self, model_execution_time: float) -> bool:
     """Whether this frame has room for a run: the driving model's time plus the estimate (the detector's, and the lane
-    paint read's while it is on) fit the budget, or the detector has gone force_after frames without and runs to measure
-    again."""
+    paint read's while it is on) fit the budget, or the detector has gone FORCE_RUN_FRAMES or FORCE_RUN_S without and
+    runs to measure again."""
     estimate = float(np.median(self.times)) if self.times else 0.
     if self.lane_paint is not None and self.paint_times:
       estimate += float(np.median(self.paint_times))
     if model_execution_time + estimate <= STEP_BUDGET_S:
-      self.force_after = FORCE_RUN_FRAMES
       return True
-    if self.since_run < self.force_after:
+    waited_s = time.monotonic() - self.last_run_t if self.last_run_t is not None else 0.
+    if self.since_run < FORCE_RUN_FRAMES and waited_s < FORCE_RUN_S:
       return False
-    cloudlog.info(f"turnpilot detector: no room for {self.since_run} frames at {1e3 * estimate:.0f} ms, measuring again")
+    cloudlog.info(f"turnpilot detector: no room for {waited_s:.2f} s at {1e3 * estimate:.0f} ms, measuring again")
     self.times.clear()
-    self.force_after = min(2 * self.force_after, FORCE_RUN_MAX_FRAMES)
     return True
 
   def step(self, pm, model_state, model_execution_time: float, desired_curvature: float, desire: int, metas: list) -> None:
@@ -153,7 +156,7 @@ class ModeldDetector:
       t0 = time.perf_counter()
       raw = self.run(input_frame=self.frames[cam]).numpy()
       dt = time.perf_counter() - t0
-      self.since_run = 0
+      self.since_run, self.last_run_t = 0, time.monotonic()
       meta = metas[self.cameras[cam]]
       dets = decode(raw, self.lb)
       msg = messaging.new_message('turnpilotDetections', valid=bool(np.isfinite(raw).all()))
