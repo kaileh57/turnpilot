@@ -132,3 +132,10 @@ def test_offer_hides_only_the_stock_prompt_for_its_own_side():
   assert not hides_stock_lane_change(('turnpilotLaneChangeRight',), Dir.left)
   assert not hides_stock_lane_change(('turnpilotLaneChangeAborted',), Dir.left)
   assert not hides_stock_lane_change((), Dir.right)
+
+
+def test_lane_not_confirmed_is_said_with_a_chime():
+  a, = alerts(EventName.turnpilotWrongLane, FakeSM(plan(laneMismatch='laneUnknown')))
+  assert a.alert_text_1 == "Can't Confirm Lane" and a.audible_alert == AudibleAlert.prompt
+  a, = alerts(EventName.turnpilotWrongLane, FakeSM(plan(laneMismatch='wrongLaneForTurn')))
+  assert a.alert_text_1 == "Wrong Lane" and a.audible_alert == AudibleAlert.none

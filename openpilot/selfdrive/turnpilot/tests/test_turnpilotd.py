@@ -5,7 +5,7 @@ from opendbc.car.structs import car
 from openpilot.cereal import custom, log
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S, CLEAR_DESIRE, lane_change_events, plan_accel
-from openpilot.selfdrive.turnpilot.lane_planner import LC_WARN_S, lane_change_window
+from openpilot.selfdrive.turnpilot.lane_planner import LANE_UNKNOWN_REASON, LC_WARN_S, lane_change_window
 from openpilot.selfdrive.turnpilot.scene.lane_paint import UNKNOWN, LinePaint
 from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP, ONCOMING_TTA_S, PED_STOP_GAP_M
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_control, car_state, junction_of, model_v2, nav_instruction, scene
@@ -47,6 +47,7 @@ class Sim:
     self.s, self.v, self.cruise, self.t = 0., cruise, cruise, 0.
     self.model_lanes, self.shadow, self.driver_signals, self.long_control = model_lanes, shadow, driver_signals, long_control
     self.big = False
+    self.model_kw = {}  # synthetic.road() keywords for the model's lanes
     self.model_running = True  # modeld publishing modelV2 (it doesn't while it loads the detector)
     self.nav_filter = None  # (sim, instruction) -> (instruction, valid): what navd sends instead
     self.trace = []
@@ -61,7 +62,7 @@ class Sim:
     self.sm.put('carState', car_state(self.v, steer, left_blinker=blinker, yaw_rate=yaw_rate, gas_pressed=gas))
     self.sm.put('carControl', car_control(lat_active, engaged))
     if self.model_running:
-      self.sm.put('modelV2', model_v2(*self.model_lanes, big=self.big))
+      self.sm.put('modelV2', model_v2(*self.model_lanes, big=self.big, **self.model_kw))
     plan = self.tp.plan(self.sm, scene(objects, available), True, self.shadow, self.driver_signals, paint=self.paint,
                         paint_rule=self.paint_rule, inputs_valid=self.inputs_valid, long_control=self.long_control).as_reader().turnpilotPlan
     a = min(plan_accel(plan.accelCap, plan.speedCap, self.v), (self.cruise - self.v) / 2., 1.5)
@@ -300,6 +301,24 @@ def test_lane_change_from_lane_paint():
   assert all(plan.laneChange == LaneChange.none and plan.laneChangeOffer == LaneChange.none for _, _, plan in sim.trace)
   assert any(plan.laneChangePaintRule == LaneChange.left for _, _, plan in sim.trace)
 
+
+
+def test_lane_not_confirmed_is_said_not_changed():
+  # one lane in from a curb lane with no edge line: the model sees room on the right but no line, so it can't say whether
+  # the car is in the middle lane or the curb lane. No change from a lane it can't place: the plan says so instead
+  sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., nav_lanes={0: THREE_LANES_LEFT_TURN}, model_lanes=(1, 0),
+            paint=(UNKNOWN, BW, BW, UNKNOWN))
+  sim.model_kw = {'shoulder': 4.}
+  sim.run(25.)
+  assert all(plan.laneChange == LaneChange.none and plan.laneChangeOffer == LaneChange.none for _, _, plan in sim.trace)
+  unknown = [plan for _, _, plan in sim.trace if plan.laneMismatch == custom.TurnpilotPlan.LaneMismatch.laneUnknown]
+  assert unknown and all(plan.reason == LANE_UNKNOWN_REASON for plan in unknown)
+  # the curb lane's line read: the same road plans its changes
+  sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., nav_lanes={0: THREE_LANES_LEFT_TURN}, model_lanes=(1, 0),
+            paint=(UNKNOWN, BW, BW, UNKNOWN))
+  sim.run(25.)
+  assert any(plan.laneChange == LaneChange.left for _, _, plan in sim.trace)
+  assert all(plan.laneMismatch == custom.TurnpilotPlan.LaneMismatch.none for _, _, plan in sim.trace)
 
 def test_shadow_computes_the_same_plan():
   def oncoming(sim):

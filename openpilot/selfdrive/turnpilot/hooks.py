@@ -59,7 +59,7 @@ def plan_events(sm, now: float | None = None) -> list[str]:
   2. a fault (turnpilotUnavailable);
   3. too fast to turn (turnpilotTooFastToTurn);
   4. a planned lane change, offered or just aborted (turnpilotLaneChangeLeft/Right/Aborted, LaneChangeEvents);
-  5. the wrong lane (turnpilotWrongLane).
+  5. the wrong lane, or a lane it can't confirm (turnpilotWrongLane).
   The alerts of 3 to 5 are all Priority.LOW, where AlertManager shows the newest, so the order is kept by not raising the
   lower ones: the wrong lane isn't raised while a lane change is offered or its abort holds (the car is in a turn-only
   lane at an intersection before the turn the change is for), and lane_change_events raises nothing while the plan is

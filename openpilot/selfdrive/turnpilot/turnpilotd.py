@@ -334,6 +334,8 @@ class TurnPilot:
     plan.laneChangePaintRule = rule.lane_change if rule.lane_change != LaneChange.none else rule.prompt
     found = lane_mismatch(act_on, rf.distance, rf.through_lanes, rf.through_distance, lanes, v_ego, right_hand_traffic) \
       if acting else LaneMismatch.none  # handback outranks it, and with the maneuver dropped it would misread the lane
+    if found == LaneMismatch.none and acting and self.lanes.lane_unknown:
+      found = LaneMismatch.laneUnknown  # no change from a lane it can't place: said instead
     plan.laneMismatch = self._lane_mismatch(found)
     # the scene's holds only ever brake, so they keep the real maneuver through a handback
     decision = self.scene_now = self.scene.update(objects, available, maneuver, rf.distance, v_ego, right_hand_traffic, rf.maneuver_id,
