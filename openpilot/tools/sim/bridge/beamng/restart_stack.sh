@@ -3,16 +3,19 @@
 # and the children a killed manager orphans, wait until no process holds the chestnut (the eGPU modeld runs on), set the
 # TurnPilot params, and start launch_openpilot.sh in the background. A fresh manager also clears the
 # Offroad_ExcessiveActuation that a collision latches in selfdrived. BLOCK adds processes to leave out, e.g. "ui" when the
-# UI is recorded on its own (record_ui.py). navd routes on TURNPILOT_TILES, by default the plain west_coast_usa tiles.
+# UI is recorded on its own (record_ui.py). navd routes on TURNPILOT_TILES, by default the west_coast_usa_signals tiles
+# (sim_tiles.sh): with them not built it stops here, before touching the running stack.
 set -u
 LOG=$1
 BLK=${2:-}
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 ROOT="$( cd "$DIR/../../../../.." && pwd )"
+TILES=$("$DIR/sim_tiles.sh") || exit 1
+export TURNPILOT_TILES=$TILES
+echo "tiles: $TURNPILOT_TILES"
 cd "$ROOT"
 source .venv/bin/activate
 export OPENPILOT_PREFIX=${OPENPILOT_PREFIX:-tph1} PYTHONPATH=$ROOT
-export TURNPILOT_TILES=${TURNPILOT_TILES:-$HOME/turnpilot_data/valhalla/west_coast_usa}
 pkill -INT -f "system/manager/manager.py" 2>/dev/null
 for i in $(seq 1 30); do
   pgrep -f "system/manager/manager.py|selfdrive.modeld.modeld" >/dev/null || break

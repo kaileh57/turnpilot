@@ -11,7 +11,8 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 ROOT="$( cd "$DIR/../../../../.." && pwd )"
 PY=$ROOT/.venv/bin/python
 mkdir -p "$OUT"
-bash "$DIR/restart_stack.sh" "$OUT/${NAME}_stack.log" ui > /dev/null 2>&1
+bash "$DIR/restart_stack.sh" "$OUT/${NAME}_stack.log" ui > "$OUT/${NAME}_restart.log" 2>&1 || {
+  cat "$OUT/${NAME}_restart.log"; echo "restart_stack.sh failed: no fresh stack"; exit 1; }
 sleep 5
 cd "$ROOT"
 export OPENPILOT_PREFIX=${OPENPILOT_PREFIX:-tph1} PYTHONPATH=$ROOT

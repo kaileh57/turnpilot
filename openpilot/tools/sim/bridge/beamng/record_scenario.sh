@@ -2,7 +2,7 @@
 # record_scenario.sh <scenario> <dir> <scenarios/run.py args...>: a recorded scenario, start to composed demo videos. On a
 # fresh stack without its UI, scenarios/run.py --record records the UI while the runs drive and renders each run's chase
 # view after (chase_render.py); demo_video.py then composes <dir>/<scenario>-<time>/demo_run<N>.mp4 for every run.
-# TURNPILOT_TILES picks navd's tiles (the lanes tiles for lane_change).
+# TURNPILOT_TILES picks navd's tiles (restart_stack.sh: the signals tiles by default; the lanes tiles for lane_change).
 #   bash openpilot/tools/sim/bridge/beamng/record_scenario.sh ped_in_path ~/turnpilot-artifacts/demo/final --runs 2
 set -u
 NAME=$1; OUT=$2; shift 2
@@ -10,7 +10,8 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 ROOT="$( cd "$DIR/../../../../.." && pwd )"
 PY=$ROOT/.venv/bin/python
 mkdir -p "$OUT"
-bash "$DIR/restart_stack.sh" "$OUT/${NAME}_stack.log" ui > /dev/null 2>&1
+bash "$DIR/restart_stack.sh" "$OUT/${NAME}_stack.log" ui > "$OUT/${NAME}_restart.log" 2>&1 || {
+  cat "$OUT/${NAME}_restart.log"; echo "restart_stack.sh failed: no fresh stack"; exit 1; }
 sleep 5
 cd "$ROOT"
 export OPENPILOT_PREFIX=${OPENPILOT_PREFIX:-tph1} PYTHONPATH=$ROOT
