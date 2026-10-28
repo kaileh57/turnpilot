@@ -63,3 +63,20 @@ def test_turnpilot_chimes_load_and_differ():
   assert len(tp) == 5 and all(AudibleAlert.schema.enumerants[name] in sound_list for name in tp)
   left, right = s.loaded_sounds[AudibleAlert.tpLaneChangeLeft], s.loaded_sounds[AudibleAlert.tpLaneChangeRight]
   assert len(left) == len(right) and not (left == right).all()
+
+
+def test_turnpilot_handback_ramps_like_warning_soft():
+  # the handback replaces warningSoft in TurnPilot's soft disable: in a quiet cabin it climbs to full volume as that does
+  from unittest import mock
+  from openpilot.selfdrive.ui.soundd import MAX_VOLUME, Soundd
+  volumes = {}
+  with mock.patch("openpilot.selfdrive.ui.soundd.time.monotonic", return_value=100.) as clock:
+    for alert in (AudibleAlert.warningSoft, AudibleAlert.tpHandback):
+      s = Soundd()
+      s.current_volume = 0.07  # a quiet cabin's
+      clock.return_value = 100.
+      s.update_alert(alert)
+      clock.return_value = 102.5
+      s.ramp_volume()
+      volumes[alert] = s.current_volume
+  assert volumes[AudibleAlert.tpHandback] == volumes[AudibleAlert.warningSoft] > 0.5 * MAX_VOLUME

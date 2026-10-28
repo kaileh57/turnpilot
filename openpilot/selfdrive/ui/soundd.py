@@ -61,6 +61,12 @@ sound_list: dict[int, tuple[str, int | None, float]] = {
   CRITICAL_MAX: ("dm_critical_max.wav", None, MAX_VOLUME),
 }
 
+# critical alerts: their volume ramps from the cabin's level to MAX_VOLUME over ALERT_RAMP_TIME. TurnPilot's handback
+# takes warningSoft's place in its soft disable, so it ramps the same, but keeps its own sound (no CRITICAL_MAX switch:
+# the soft disable is over long before ALERT_MAX_TIME)
+RAMPED_ALERTS = (AudibleAlert.warningSoft, AudibleAlert.warningImmediate, AudibleAlert.tpHandback)
+
+
 def check_selfdrive_timeout_alert(sm):
   ss_missing = time.monotonic() - sm.recv_time['selfdriveState']
 
@@ -147,12 +153,21 @@ class Soundd:
       return
     self.pending_stop = False
     if self.current_alert != new_alert and (new_alert != AudibleAlert.none or current_alert_played_once):
-      if new_alert in (AudibleAlert.warningSoft, AudibleAlert.warningImmediate):
+      if new_alert in RAMPED_ALERTS:
         self.ramp_start_volume = self.current_volume
         self.ramp_start_time = time.monotonic()
       self.current_alert = new_alert
       self.current_sound = new_alert
       self.current_sound_frame = 0
+
+  def ramp_volume(self):
+    if self.current_alert in RAMPED_ALERTS:
+      elapsed = time.monotonic() - self.ramp_start_time
+      ramp_vol = float(np.interp(elapsed, [0, ALERT_RAMP_TIME], [self.ramp_start_volume, MAX_VOLUME]))
+      self.current_volume = max(self.current_volume, ramp_vol)
+      if self.current_alert != AudibleAlert.tpHandback and elapsed >= ALERT_MAX_TIME and self.current_sound != CRITICAL_MAX:
+        self.current_sound = CRITICAL_MAX
+        self.current_sound_frame = 0
 
   def get_audible_alert(self, sm):
     if sm.updated['selfdriveState']:
@@ -198,13 +213,7 @@ class Soundd:
 
         self.get_audible_alert(sm)
 
-        if self.current_alert in (AudibleAlert.warningSoft, AudibleAlert.warningImmediate):
-          elapsed = time.monotonic() - self.ramp_start_time
-          ramp_vol = float(np.interp(elapsed, [0, ALERT_RAMP_TIME], [self.ramp_start_volume, MAX_VOLUME]))
-          self.current_volume = max(self.current_volume, ramp_vol)
-          if elapsed >= ALERT_MAX_TIME and self.current_sound != CRITICAL_MAX:
-            self.current_sound = CRITICAL_MAX
-            self.current_sound_frame = 0
+        self.ramp_volume()
 
         rk.keep_time()
 
