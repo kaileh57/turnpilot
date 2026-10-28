@@ -8,10 +8,12 @@ import json
 import os
 import tempfile
 import time
+import zlib
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import requests
+import urllib3
 
 from openpilot.selfdrive.turnpilot.maps.paths import maps_dir
 
@@ -134,9 +136,10 @@ class MapClient:
   def corridor(self, start, destination, out: Path, progress=None, coverage_names: str = '') -> int:
     """Download the corridor tar for (lon, lat) start and destination to out, and return its size.
 
-    The server gzips the tar (Content-Encoding: gzip) when asked, as requests does by default. iter_content decodes it;
-    Content-Length is then the compressed size, so progress(received, total or None) counts bytes off the wire, from
-    the response's tell(), which reads nothing itself."""
+    The server gzips the tar (Content-Encoding: gzip) when asked, as requests does by default. It is decoded here
+    rather than by urllib3, which accepts a gzip stream that stops short of its end. So a download that broke off is
+    caught three ways: fewer bytes than Content-Length, a gzip stream that never reached its end, and (in unpack) a tar
+    that ends early. progress(received, total or None) counts bytes off the wire against Content-Length."""
     resp = self.request('POST', '/v1/corridor', json={'start': list(start), 'destination': list(destination)}, stream=True)
     with resp:
       if resp.status_code == 422:
@@ -144,27 +147,47 @@ class MapClient:
       if resp.status_code != 200:
         raise self.unexpected(resp, 'the corridor request')
       total = resp.headers.get('Content-Length')
-      total = int(total) if total and total.isdigit() else None
-      size = 0
+      total = int(total) if total and total.isascii() and total.isdigit() else None
+      encoding = resp.headers.get('Content-Encoding', '').strip().lower()
+      if encoding not in ('', 'identity', 'gzip'):
+        raise MapError('bad_response', f"The map server sent the map with an encoding TurnPilot can't read ({encoding}).",
+                       'Map server sent a bad map')
+      gunzip = zlib.decompressobj(wbits=31) if encoding == 'gzip' else None
+      received = size = 0
 
-      def received():
-        tell = getattr(resp.raw, 'tell', None)
-        return tell() if tell is not None else size
+      def broke_off(detail: str) -> MapError:
+        return MapError('unreachable', f"The map download from {self.host} broke off ({detail}).", 'Map download broke off', retry=True)
 
       try:
         with open(out, 'wb') as f:
-          for chunk in resp.iter_content(CHUNK):
+          chunks = resp.raw.stream(CHUNK, decode_content=False)
+          while True:
+            try:
+              chunk = next(chunks, None)
+            except (urllib3.exceptions.HTTPError, requests.exceptions.RequestException, OSError) as e:
+              raise broke_off(type(e).__name__) from None
+            if chunk is None:
+              break
+            received += len(chunk)
+            if gunzip is not None:
+              try:
+                chunk = gunzip.decompress(chunk)
+              except zlib.error as e:
+                raise MapError('bad_response', f"The map download from {self.host} is not valid gzip ({e}).", 'Map server sent a bad map',
+                               retry=True) from None
             f.write(chunk)
             size += len(chunk)
             if progress is not None:
-              progress(received(), total)
-      except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError,
-              requests.exceptions.ContentDecodingError) as e:
-        raise MapError('unreachable', f"The map download from {self.host} broke off ({type(e).__name__}).", 'Map download broke off',
-                       retry=True) from None
-      if total is not None and received() != total:
-        raise MapError('unreachable', f"The map download from {self.host} ended at {received()} of {total} bytes.",
-                       'Map download broke off', retry=True)
+              progress(received, total)
+          if gunzip is not None:
+            if not gunzip.eof:
+              raise broke_off(f"the gzip stream ended early, after {received} bytes")
+            f.write(gunzip.flush())
+      except OSError as e:
+        raise MapError('storage', f"TurnPilot can't save the map download on the comma ({type(e).__name__}: {e}).",
+                       "Can't save the map", retry=True) from None
+      if total is not None and received != total:
+        raise broke_off(f"{received} of {total} bytes")
     return size
 
 

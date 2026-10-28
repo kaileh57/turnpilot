@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import time
@@ -292,6 +293,37 @@ class TestMapRouter(RouterCase):
       with patch('openpilot.selfdrive.turnpilot.maps.client.requests.request', side_effect=requests.ConnectionError) as request:
         self.refused('unreachable')
         request.assert_called_once()
+
+  def test_a_cut_off_download_backs_off_before_downloading_again(self):
+    """A clean hang-up mid-stream with no Content-Length: one download, a visible error, then the retry wait."""
+    self.server.corridor = (200, make_pack({f'tiles/2/000/000/{i:03d}.gph': os.urandom(4000) for i in range(10)}), 'application/x-tar')
+    for gz in (True, False):
+      self.router.failure = None
+      self.server.requests.clear()
+      self.server.gzip, self.server.send_length, self.server.cut_at = gz, False, 20000
+      e = self.refused('unreachable' if gz else 'bad_pack')
+      self.assertTrue(e.retry)
+      self.refused(e.code)
+      self.assertEqual(len(self.server.corridor_requests()), 1)  # the second try waits for RETRY_SECONDS
+      with patch('openpilot.selfdrive.turnpilot.routing.sources.time.monotonic', return_value=time.monotonic() + RETRY_SECONDS + 1):
+        self.refused(e.code)
+      self.assertEqual(len(self.server.corridor_requests()), 2)
+
+  def test_any_download_failure_is_a_map_error_with_the_backoff(self):
+    with patch.object(corridor, 'unpack', side_effect=RuntimeError('surprise')):
+      e = self.refused('download_failed')
+      self.assertIn('RuntimeError: surprise', e.message)
+      self.refused('download_failed')
+    self.assertEqual(len(self.server.corridor_requests()), 1)
+
+  def test_routing_that_fails_on_a_fresh_corridor_is_not_downloaded_again(self):
+    self.route_error = RuntimeError('Locations are in unconnected regions')
+    self.refused('routing_failed')
+    for _ in range(3):
+      self.refused('routing_failed')
+    self.assertEqual(len(self.server.corridor_requests()), 1)
+    self.route_error = None
+    self.assertEqual(self.router.route(START, DESTINATION, 90, 'en'), STEPS)  # it works once routing does
 
   def test_settings_changes_retry_at_once(self):
     self.params.values['TurnPilotMapKey'] = 'wrong'

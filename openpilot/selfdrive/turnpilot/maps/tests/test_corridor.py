@@ -120,3 +120,25 @@ def test_prune_keeps_the_newest_and_the_one_in_use(tmp_path):
   assert (packs_dir / '.download-live.tar').exists()
   corridor.prune(packs_dir, keep=2)
   assert corridor.packs(packs_dir) == made[3:]
+
+
+BIG = {f'tiles/2/000/000/{i:03d}.gph': os.urandom(3000) for i in range(4)}
+
+
+@pytest.mark.parametrize('compress', [False, True])
+@pytest.mark.parametrize('keep', [0.2, 0.4, 0.55])  # the tiles end at about 0.6, then come the tar's zero records
+def test_a_cut_off_pack_is_a_retryable_bad_pack(tmp_path, compress, keep):
+  """A download that broke off (no Content-Length, a clean FIN) must be a MapError the router can back off on, not a
+  raw tarfile.ReadError or EOFError."""
+  import gzip
+  data = make_pack(BIG)
+  data = gzip.compress(data) if compress else data
+  e = rejected(tmp_path, data[:int(len(data) * keep)], 'failed its check')
+  assert e.retry
+
+
+def test_a_pack_that_cannot_be_written_is_a_map_error(tmp_path):
+  clash = make_pack({'tiles/2/000/000/001.gph': b'a'}, extra=[member('tiles/2/000/000/001.gph/x.gph')],
+                    manifest_files={'tiles/2/000/000/001.gph': hashlib.sha256(b'a').hexdigest(),
+                                    'tiles/2/000/000/001.gph/x.gph': hashlib.sha256(b'x').hexdigest()})
+  rejected(tmp_path, clash, 'failed its check')

@@ -134,9 +134,14 @@ class MapRouter:
     region = check_trip(coverage, start, destination)
     self.download(start, destination, region, coverage.names())
     assert self.corridor is not None
-    steps = self.routed(self.corridor.source, start, destination, bearing, language, 'the downloaded map')
-    if not steps:
-      raise MapError('no_route', "No route on the downloaded map for this drive.", 'No route found')
+    try:
+      steps = self.routed(self.corridor.source, start, destination, bearing, language, 'the downloaded map')
+      if not steps:
+        raise MapError('no_route', "No route on the downloaded map for this drive.", 'No route found')
+    except MapError as e:
+      # the corridor is kept, and the same destination waits out the retry time before it is downloaded again
+      self.failure = Failure(destination, self.config(), e, time.monotonic())
+      raise
     self.ready(region)
     return steps
 
@@ -162,6 +167,11 @@ class MapRouter:
     except MapError as e:
       self.failure = Failure(destination, config, e, time.monotonic())
       raise
+    except Exception as e:  # anything else is still a failure the driver sees, and waits out the retry time
+      cloudlog.exception("turnpilot: corridor download failed")
+      error = MapError('download_failed', f"The map download failed: {type(e).__name__}: {e}", 'Map download failed', retry=True)
+      self.failure = Failure(destination, config, error, time.monotonic())
+      raise error from None
 
   def fetch(self, start, destination, region: Region, names: str) -> Corridor:
     client = self.client_factory(self.params, self.directory)

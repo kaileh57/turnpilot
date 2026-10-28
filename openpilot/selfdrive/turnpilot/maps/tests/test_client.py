@@ -169,3 +169,29 @@ def test_real_map_server_corridor_through_the_client_and_unpack(tmp_path):
   finally:
     httpd.shutdown()
     httpd.server_close()
+
+
+@pytest.mark.parametrize('send_length', [True, False])
+def test_a_gzip_download_cut_off_is_caught(server, tmp_path, send_length):
+  """The server hangs up partway (OOM kill, restart): with or without Content-Length, the download is not complete."""
+  import os
+  server.corridor = (200, make_pack({f'tiles/2/{i}.gph': os.urandom(5000) for i in range(20)}), 'application/x-tar')
+  server.send_length, server.cut_at = send_length, 30000
+  with pytest.raises(MapError) as e:
+    client_for(server, tmp_path).corridor(INDY, INDY_EAST, tmp_path / 'out.tar')
+  assert (e.value.code, e.value.short, e.value.retry) == ('unreachable', 'Map download broke off', True)
+
+
+def test_a_plain_download_cut_off_is_caught_by_its_length(server, tmp_path):
+  server.corridor, server.gzip, server.cut_at = (200, make_pack({'tiles/2/0.gph': b'x' * 50000}), 'application/x-tar'), False, 20000
+  with pytest.raises(MapError) as e:
+    client_for(server, tmp_path).corridor(INDY, INDY_EAST, tmp_path / 'out.tar')
+  assert e.value.code == 'unreachable' and e.value.retry
+
+
+def test_a_download_that_cannot_be_saved_is_a_map_error(server, tmp_path):
+  server.corridor = (200, make_pack({'tiles/2/0.gph': b'x'}), 'application/x-tar')
+  (tmp_path / 'out.tar').mkdir()  # as a full or read-only /data would fail the write
+  with pytest.raises(MapError) as e:
+    client_for(server, tmp_path).corridor(INDY, INDY_EAST, tmp_path / 'out.tar')
+  assert e.value.code == 'storage' and e.value.retry
