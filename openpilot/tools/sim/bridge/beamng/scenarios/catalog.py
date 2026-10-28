@@ -60,6 +60,11 @@ class Entry:
 SCENARIOS = {
   'ped_crosswalk_right': Entry('turn', junction=(-768.6, 555.2), turn='right', actor='crosswalk', timeout_s=120.),
   'unprotected_left': Entry('turn', junction=(-650.1, 481.7), turn='left', actor='oncoming', timeout_s=150.),
+  # unprotected_left comes downhill onto a shelf on a ~21% hill, and the arm straight across drops away past it: the
+  # oncoming cars are out of the cameras' view until they top the shelf, about 13 m from the car. This is the same
+  # junction from the south-east, up a gentle grade, with the arm across rising about 3 m over its first 85 m.
+  'unprotected_left_visible': Entry('turn', junction=(-650.1, 481.7), turn='left', from_heading_deg=137., actor='oncoming',
+                                    timeout_s=150.),
   # gate1's approach: eastbound on the 140 m straight from the bridge's default spawn
   'ped_in_path': Entry('straight', junction=(-768.9, 661.4), turn='right', from_heading_deg=0., actor='standing', end_on_stop_s=4.,
                        timeout_s=90.),
