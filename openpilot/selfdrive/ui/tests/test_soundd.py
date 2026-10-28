@@ -12,18 +12,15 @@ AlertSize = log.SelfdriveState.AlertSize
 class FakeSM(dict):
   """selfdriveState, carState and turnpilotPlan, all alive, valid and updated."""
 
-  def __init__(self, prompt='right', state='laneChange', blinker=False, alert_size=AlertSize.none, sound=AudibleAlert.none,
-               reason='', enabled=True):
+  def __init__(self, prompt='right', state='laneChange', blinker=False, alert_size=AlertSize.none, sound=AudibleAlert.none):
     ss = messaging.new_message('selfdriveState', valid=True)
     ss.selfdriveState.alertSize = alert_size
     ss.selfdriveState.alertSound = sound
-    ss.selfdriveState.enabled = enabled
     cs = messaging.new_message('carState', valid=True)
     cs.carState.rightBlinker = blinker
     tp = messaging.new_message('turnpilotPlan', valid=True)
     tp.turnpilotPlan.state = state
     tp.turnpilotPlan.signalPrompt = prompt
-    tp.turnpilotPlan.reason = reason
     super().__init__(selfdriveState=ss.as_reader().selfdriveState, carState=cs.as_reader().carState,
                      turnpilotPlan=tp.as_reader().turnpilotPlan)
     self.alive = self.valid = self.updated = dict.fromkeys(self, True)
@@ -81,20 +78,5 @@ class TestSoundd(OpenpilotTestCase):
     s.get_audible_alert(FakeSM())
     s.get_audible_alert(FakeSM())
     assert s.current_alert == AudibleAlert.prompt
-
-  def test_turnpilot_blind_turn_prompt_chime(self):
-    from openpilot.selfdrive.turnpilot.scene_policy import BLIND_TURN_REASON
-    s = Soundd()
-    s.get_audible_alert(FakeSM(prompt='none', state='holding', reason=BLIND_TURN_REASON))
-    assert s.current_alert == AudibleAlert.prompt
-    s.current_sound_frame = len(s.loaded_sounds[s.current_sound])
-    s.get_audible_alert(FakeSM(prompt='none', state='holding', reason=BLIND_TURN_REASON))
-    assert s.current_alert == AudibleAlert.none  # once
-    # not while the driver drives, or for another hold
-    for sm in (FakeSM(prompt='none', state='holding', reason=BLIND_TURN_REASON, enabled=False),
-               FakeSM(prompt='none', state='holding', reason='pedestrian in path')):
-      s = Soundd()
-      s.get_audible_alert(sm)
-      assert s.current_alert == AudibleAlert.none
 
   # TODO: add test with micd for checking that soundd actually outputs sounds

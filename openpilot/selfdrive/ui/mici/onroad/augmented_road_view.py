@@ -224,7 +224,7 @@ class AugmentedRoadView(CameraView):
 
     # TurnPilot's signal prompt takes the alert slot and its status the top of the view, only while openpilot has no alert
     plan = active_plan(ui_state.sm, ui_state.turnpilot_enabled)
-    self._signal_prompt.set_alert(prompt_alert(plan, ui_state.sm['carState'], ui_state.engaged) if alert_to_render is None else None)
+    self._signal_prompt.set_alert(prompt_alert(plan, ui_state.sm['carState']) if alert_to_render is None else None)
     prompt, prompt_out = self._signal_prompt.will_render()  # also while it fades out
     if alert_to_render is None:
       alert_to_render, not_animating_out = prompt, prompt_out

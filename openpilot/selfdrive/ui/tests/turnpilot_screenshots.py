@@ -22,7 +22,6 @@ import numpy as np
 import pyray as rl
 
 from openpilot.common.prefix import OpenpilotPrefix
-from openpilot.selfdrive.turnpilot.scene_policy import BLIND_TURN_REASON
 
 FPS = 60
 SETTLE_FRAMES = 90  # filters, fades and nav animations settle within 1.5 s
@@ -76,8 +75,6 @@ def onroad_scenes() -> list[Scene]:
     Scene('16_disengaged_holding', {'state': 'holding', 'reason': 'pedestrian in path', 'routeValid': True}, engaged=False),
     Scene('17_disengaged_shadow_turning', dict(turning, shadow=True), nav=dict(ROUTE, maneuverDistance=12.),
           params={'TurnPilotShadowMode': True}, engaged=False),
-    Scene('18_blind_turn_prompt', {'state': 'holding', 'reason': BLIND_TURN_REASON, 'shouldStop': True, 'routeValid': True},
-          car={'vEgo': 0., 'standstill': True}, nav=dict(ROUTE, maneuverDistance=8.)),
   ]
 
 

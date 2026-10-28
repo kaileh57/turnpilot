@@ -1,5 +1,4 @@
-"""TurnPilot on the onroad screen: a short status while it acts, and its prompts: signal for a nav lane change, or check
-traffic and press the gas at a turn across traffic it can't see.
+"""TurnPilot on the onroad screen: a short status while it acts, and the prompt to signal for a nav lane change.
 
 The maneuver itself (arrow, distance, street) is in the navigation panel. Everything here is gated on
 TurnPilotEnabled and a live, valid turnpilotPlan, so nothing shows when TurnPilot is off or turnpilotd is down.
@@ -8,7 +7,7 @@ The text logic is in selfdrive/ui/lib/turnpilot.py.
 import pyray as rl
 
 from openpilot.cereal import log
-from openpilot.selfdrive.ui.lib.turnpilot import driver_prompt
+from openpilot.selfdrive.ui.lib.turnpilot import signal_prompt
 from openpilot.selfdrive.ui.mici.onroad.alert_renderer import ALERT_MARGIN, Alert, AlertRenderer
 from openpilot.system.ui.lib.application import FontWeight
 from openpilot.system.ui.widgets import Widget
@@ -21,20 +20,17 @@ TEXT_COLOR = rl.Color(255, 255, 255, int(255 * 0.9))  # alert text
 DETAIL_COLOR = rl.Color(255, 255, 255, int(255 * 0.65))  # alert subtext
 
 
-def prompt_alert(plan, car_state, engaged: bool) -> Alert | None:
-  prompt = driver_prompt(plan, car_state, engaged)
-  if not prompt:
+def prompt_alert(plan, car_state) -> Alert | None:
+  side = signal_prompt(plan, car_state)
+  if not side:
     return None
-  if prompt == 'gas':
-    return Alert(text1='Check traffic', text2='then press gas to turn', size=AlertSize.small, status=AlertStatus.userPrompt,
-                 alert_type='turnpilotBlindTurn/turnpilot')
   # preLaneChange* gets upstream's turn signal icon and small alert background
-  return Alert(text1=f'Signal {prompt}', text2='shadow mode' if plan.shadow else 'for the route', size=AlertSize.small,
-               status=AlertStatus.userPrompt, alert_type=f'preLaneChange{prompt.capitalize()}/turnpilot')
+  return Alert(text1=f'Signal {side}', text2='shadow mode' if plan.shadow else 'for the route', size=AlertSize.small,
+               status=AlertStatus.userPrompt, alert_type=f'preLaneChange{side.capitalize()}/turnpilot')
 
 
 class SignalPrompt(AlertRenderer):
-  """TurnPilot's prompt, drawn as a userPrompt alert. The owner sets it each frame, only while openpilot has no alert."""
+  """The signal prompt, drawn as a userPrompt alert. The owner sets it each frame, only while openpilot has no alert."""
 
   def __init__(self):
     super().__init__()
