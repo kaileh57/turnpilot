@@ -254,8 +254,10 @@ class TurnPilot:
     # the scene's holds only ever brake, so they keep the real maneuver through a handback
     decision = self.scene.update(objects, available, maneuver, rf.distance, v_ego, right_hand_traffic, rf.maneuver_id, cs.gasPressed)
     plan.accelCap = decision.accel_cap
-    # past a bend or a straight-on step, the turn after it is slowed for already (route_follower.py: ahead)
-    ahead_cap = turn_speed_cap(rf.ahead, rf.ahead_distance, v_ego, right_hand_traffic) if act_on is not None else NO_SPEED_CAP
+    # past a bend or a straight-on step, the turn after it is slowed for already (route_follower.py: ahead), and still
+    # once the step is dead-reckoned past, until navd moves on to the turn
+    ahead_on = acting and rf.valid and rf.maneuver_id != self.dropped_id
+    ahead_cap = turn_speed_cap(rf.ahead, rf.ahead_distance, v_ego, right_hand_traffic) if ahead_on else NO_SPEED_CAP
     plan.speedCap = min(decision.speed_cap, turn_speed_cap(cap_on, rf.distance, v_ego, right_hand_traffic), ahead_cap)
     plan.shouldStop = decision.should_stop
     no_junction_data = maneuver is not None and maneuver.kind in (TURN, KEEP) and not maneuver.geometry
@@ -293,15 +295,16 @@ class TurnPilot:
   def _take_up_dropped(self, upcoming, rf, v_ego: float) -> None:
     """TurnPilot acts again after a handback (the detector is back): the maneuver dropped at the handback is never left
     half driven, capped with no desire and no alert. A held turn desire still out (openpilot stayed engaged) drives on,
-    as does a turn the driver has already started; a maneuver whose desire never went out is taken up as on a fresh
-    engage. A turn whose desire was dropped while openpilot was off is skipped out loud (tooFastToTurn, navd reroutes):
-    the car is inside the turn's lead by now, where a fresh pulse isn't taken."""
+    as does a turn the driver has already started and one a standstill re-armed (it pulses again as the car pulls away);
+    a maneuver whose desire never went out is taken up as on a fresh engage. A turn whose desire was dropped while
+    openpilot was off is skipped out loud (tooFastToTurn, navd reroutes): the car is inside the turn's lead by now, where
+    a fresh pulse isn't taken."""
     d = self.desires
     dropped = self.dropped_id == rf.maneuver_id and d.maneuver_id == rf.maneuver_id
     self.dropped_id = self.turn_cap_id = self.turn_held_id = None
     if not dropped or upcoming is None:
       return
-    if d.started and d.side != 0 and not d.done and not d.active and d.turned_deg < TURN_STARTED_DEG:
+    if d.started and d.side != 0 and not d.done and d.held_off and d.turned_deg < TURN_STARTED_DEG:
       self.skip.skip(upcoming, rf.distance, rf.maneuver_id, v_ego, 'desireDropped')
     else:
       d.resume()

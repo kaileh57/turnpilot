@@ -104,6 +104,11 @@ class DesireTiming:
     self.done, self.active = True, False
     self._abandoned = True
 
+  @property
+  def held_off(self) -> bool:
+    """The desire was dropped while openpilot wasn't steering, and no pulse has gone since."""
+    return self._held
+
   def resume(self):
     """TurnPilot acts again after a handback: a maneuver abandoned before any desire went out for it is taken up again,
     as on a fresh engage. One whose desire went out stays done (turnpilotd decides about a held turn)."""

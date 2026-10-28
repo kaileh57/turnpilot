@@ -627,3 +627,29 @@ def test_detector_back_within_the_soft_disable_keeps_the_turn():
   after = [p for s, _, p in sim.trace[back:] if s < 300.]
   assert after and all(p.desire in (Desire.turnLeft, Desire.none) and not p.tooFastToTurn for p in after)
   assert after[0].desire == Desire.turnLeft and all(p.state == State.turning for p in after[:5])
+
+
+
+def test_detector_back_after_a_stop_on_the_approach_keeps_the_turn():
+  # stopped at a light 20 m before a committed left, the detector drops for 2.2 s and comes back with openpilot still
+  # engaged (inside the soft disable): the standstill re-armed the desire, it wasn't dropped, so the turn isn't skipped
+  # and its pulse goes again as the car pulls away
+  sim = Sim([(300., "turn", "left", junction_of("left")), (1500., "turn", "right", junction_of("right"))], cruise=13.)
+  while sim.distance() > 20. or sim.s < 10.:
+    sim.step()
+  assert Desire.turnLeft in [p.desire for _, _, p in sim.trace]
+  sim.cruise = 0.
+  for _ in range(int(3. / DT_MDL)):  # brake to a stop
+    sim.step()
+  for i in range(int(3.7 / DT_MDL)):  # stopped past STANDSTILL_REARM_S, the detector down from 0.5 s to 2.7 s
+    sim.v = 0.
+    sim.step(available=not 0.5 <= i * DT_MDL < 2.7)
+  assert any(p.handback == Handback.detectorStopped for _, _, p in sim.trace)
+  assert sim.trace[-1][2].handback == Handback.none
+  stop = len(sim.trace)
+  sim.cruise = 13.
+  for _ in range(int(10. / DT_MDL)):
+    sim.step()
+  assert sim.s > 300.
+  assert not any(p.tooFastToTurn for _, _, p in sim.trace)
+  assert rising(sim.trace[stop:], 'desire', Desire.turnLeft)
