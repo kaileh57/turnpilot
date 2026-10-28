@@ -56,7 +56,8 @@ class GasTaps:
     of the game) is green, once the car has stood STOPPED_TAP_S, never on red, yellow or a light it can't read;
     signal_tap False never taps it (the stop-at-the-line runs);
   - stall, only with stall_tap (exploring by hand, never a scored run): standing engaged STALL_S with nothing held and no
-    prompt (plan not holding, no shouldStop): the model stopped on its own. Off, a car left standing (no pull-away after a
+    prompt (plan not holding, no shouldStop): the model stopped on its own. TurnPilot's own carStoppedGo prompt for that
+    (turnpilotd.py) is never tapped otherwise: a scored run's car left standing stays a failure to see. Off, a car left standing (no pull-away after a
     hold let go, as BeamNG ped_crosswalk_right did) is the run's failure to see, not the driver's to push on, and a push
     in a queue would drive the car at the lead (scenarios/score.py fails a press TurnPilot asked no go for).
   Never while TurnPilot holds the car for anything else: a pedestrian, the stop sign's dwell. And never while TurnPilot

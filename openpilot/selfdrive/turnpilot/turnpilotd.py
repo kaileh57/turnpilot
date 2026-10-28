@@ -46,6 +46,10 @@ was; scene_policy.py), which plannerd acts on (hooks.limits_plan), so a turnpilo
 drives the car on through a pedestrian. Its desire and lane change are never acted on.
 Once the detector is back and TurnPilot acts again, the dropped maneuver is taken up or skipped out loud, never left
 half driven (_take_up_dropped).
+Standing engaged STOPPED_PROMPT_S with nothing of TurnPilot's holding the car (no shouldStop, no cap biting), no lead from
+the model, no map control within STOPPED_CONTROL_M, gas and brake off, the model stopped on its own: the plan asks for the
+driver's go (controlPrompt carStoppedGo, "Car stopped — tap gas to continue", a chime). TurnPilot never goes itself: the
+driver's tap does, and the wait starts over.
 A handback or a fault cancels a lane change that is offered and not yet started, with laneChangeAbort handedBack or
 fault for ABORT_HOLD_S (selfdrived raises turnpilotLaneChangeAborted); TurnPilot turned off cancels it as turnedOff.
 A change DesireHelper has started goes on, and one it may have started on the request already isn't announced as
@@ -110,6 +114,12 @@ HANDBACK_REASON = {Handback.detectorStopped: "detector stopped: take control",
 WAITING_REASON = "waiting for the detector"
 DISENGAGE_ON_ACCEL_REASON = "map stops need DisengageOnAccelerator off"
 STANDSTILL_SPEED = 0.3  # m/s: a hold let go slower than this pulls the car away with a fresh turn pulse
+# standing engaged this long with nothing of TurnPilot's holding the car, no lead and no map control within STOPPED_CONTROL_M,
+# the model stopped on its own (BeamNG route_demo, 2026-10-28: 470 s on an empty road): the driver is asked for the go
+STOPPED_PROMPT_S = 5.
+STOPPED_CONTROL_M = 30.
+STOPPED_LEAD_PROB = 0.5  # modelV2.leadsV3[0].prob over this is a lead (plannerd's own threshold)
+STOPPED_REASON = "Car stopped — tap gas to continue"
 
 
 class ErrorLog:
@@ -161,6 +171,7 @@ class TurnPilot:
       self.waited_s = 0.           # how long modeld has run since TurnPilot was turned on, before the first detection
       self.disengaged_s = 0.       # ...of it with openpilot disengaged
       self.engaged_wait_s = 0.     # time since the first engaged frame, before the first detection
+    self.stopped_s = 0.            # standing engaged with nothing holding the car (carStoppedGo)
     if not keep_turn:
       # maneuver ids never repeat: the scene kept through a fault holds ids (its commitment, a gas release, a carried hold)
       self.follower = RouteFollower(self.follower.maneuver_id + 1 if hasattr(self, 'follower') else 0)
@@ -421,6 +432,8 @@ class TurnPilot:
     no_junction_data = maneuver is not None and maneuver.kind in (TURN, KEEP) and not maneuver.geometry
     plan.reason = decision.reason or lane_reason or mapd.reason or (NO_JUNCTION_DATA_REASON if no_junction_data else "")
     fill_map_control(plan, mapd)
+    if self.stopped_unheld(sm, cs, v_ego, acting, decision, mapd):
+      plan.controlPrompt, plan.reason = 'carStoppedGo', STOPPED_REASON
     # an unprotected turn's hold line is at the nearest of navd's readings of its junction (route_follower.py): readings
     # that far apart, it may be well short of the line, said out loud rather than guessed (never over the infeasible stop)
     if isinstance(turn, tuple) and self.turn_committed and rf.junction_spread > UNCERTAIN_M and \
@@ -456,6 +469,21 @@ class TurnPilot:
     else:
       plan.state = State.following
     return msg
+
+  def stopped_unheld(self, sm, cs, v_ego: float, acting: bool, decision, mapd) -> bool:
+    """The car has stood engaged STOPPED_PROMPT_S with nothing holding it (module docstring): ask for the driver's go."""
+    model = sm['modelV2']
+    lead = len(model.leadsV3) > 0 and model.leadsV3[0].prob > STOPPED_LEAD_PROB
+    near = [c for c in list(self.map_controls.tracker.controls.values()) + [self.map_controls.turn]
+            if c is not None and abs(c.d) < STOPPED_CONTROL_M]
+    unheld = acting and sm['carControl'].enabled and v_ego < STANDSTILL_SPEED and not decision.should_stop and \
+      not decision.holding and not lead and not near and not cs.gasPressed and not cs.brakePressed and mapd.prompt == 'none'
+    was = self.stopped_s >= STOPPED_PROMPT_S - 1e-6
+    self.stopped_s = self.stopped_s + DT_MDL if unheld else 0.
+    now = self.stopped_s >= STOPPED_PROMPT_S - 1e-6
+    if now and not was:
+      cloudlog.event("turnpilot.stopped_unheld", error=True, stood_s=round(self.stopped_s, 1), reason=decision.reason)
+    return now
 
   def map_update(self, sm, v_ego: float, gas_pressed: bool, turn=None):
     """This frame's MapControlPolicy decision, from navInstruction's controls and turnpilotLights (once a frame), and the

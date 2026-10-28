@@ -152,6 +152,8 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
     signalGo @2;     # a signal ahead with the light not checked: press the accelerator to proceed
     yieldAhead @3;   # visual only
     unprotectedTurnGo @4;  # held at an unprotected turn's hold line: check oncoming traffic, press the accelerator to go
+    carStoppedGo @5;       # standing engaged with nothing of TurnPilot's holding it, no lead and no map control near: the
+                           # model stopped on its own; the driver's gas tap goes, TurnPilot never does (turnpilotd.py)
   }
   enum ControlAlert {
     none @0;

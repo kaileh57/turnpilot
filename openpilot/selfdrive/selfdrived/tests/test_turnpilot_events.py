@@ -156,6 +156,10 @@ def test_map_control_prompts_chime_and_yield_is_silent():
   assert a.audible_alert == AudibleAlert.prompt
   a, = alerts(EventName.turnpilotControlPrompt, FakeSM(plan(controlPrompt='unprotectedTurnGo')))
   assert a.alert_text_1 == 'Unprotected Turn'
+  # the model stopped on its own, nothing holding the car: the driver's go, with a chime
+  a, = alerts(EventName.turnpilotControlPrompt, FakeSM(plan(controlPrompt='carStoppedGo', reason='Car stopped — tap gas to continue')))
+  assert a.alert_text_1 == 'Car stopped — tap gas to continue' and 'press accelerator to continue' in a.alert_text_2
+  assert a.audible_alert == AudibleAlert.prompt
 
 
 def test_map_control_alerts():
