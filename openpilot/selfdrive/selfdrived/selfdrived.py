@@ -23,7 +23,7 @@ from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 from openpilot.selfdrive.turnpilot.handback import HandbackEvents
-from openpilot.selfdrive.turnpilot.hooks import fresh_plan, plan_events
+from openpilot.selfdrive.turnpilot.hooks import LaneChangeEvents, fresh_plan, plan_events, shown_plan
 
 from openpilot.common.version import get_build_metadata
 from openpilot.common.hardware import HARDWARE
@@ -99,6 +99,8 @@ class SelfdriveD:
                                    self.camera_packets + self.sensor_packets + self.gps_packets,
                                   ignore_alive=ignore, ignore_avg_freq=ignore,
                                   ignore_valid=ignore, frequency=int(1/DT_CTRL))
+
+    self.turnpilot_events = LaneChangeEvents()
 
     # read params
     self.is_metric = self.params.get_bool("IsMetric")
@@ -315,11 +317,19 @@ class SelfdriveD:
     # ******************************************************************************************
 
     # Handle lane change
+    # TurnPilot: a planned lane change's warning and abort; while one is offered its alert says what to do, not stock's
+    turnpilot_offer = False
+    # (shown_plan: a fault's disabled plan carries its abort; the alert priority is in hooks.plan_events)
+    for name in self.turnpilot_events.update(shown_plan(self.sm), DT_CTRL):
+      self.events.add(getattr(EventName, name))
+      turnpilot_offer = turnpilot_offer or name != 'turnpilotLaneChangeAborted'
     if self.sm['modelV2'].meta.laneChangeState == LaneChangeState.preLaneChange:
       direction = self.sm['modelV2'].meta.laneChangeDirection
       if (CS.leftBlindspot and direction == LaneChangeDirection.left) or \
          (CS.rightBlindspot and direction == LaneChangeDirection.right):
         self.events.add(EventName.laneChangeBlocked)
+      elif turnpilot_offer:
+        pass
       else:
         if direction == LaneChangeDirection.left:
           self.events.add(EventName.preLaneChangeLeft)

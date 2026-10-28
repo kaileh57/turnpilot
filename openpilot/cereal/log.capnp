@@ -138,6 +138,11 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     turnpilotDetectorStopped @108;  # TurnPilot: the detector stopped, hand back to the driver
     turnpilotModelFellBack @109;    # TurnPilot: modeld fell back to the small model, which TurnPilot can't navigate on
 
+    # TurnPilot: a planned lane change is coming (chime, countdown), and one was aborted before it started
+    turnpilotLaneChangeLeft @110;
+    turnpilotLaneChangeRight @111;
+    turnpilotLaneChangeAborted @112;
+
     lowBatteryDEPRECATED @40;
     soundsUnavailableDEPRECATED @47;
     deviceFallingDEPRECATED @71;

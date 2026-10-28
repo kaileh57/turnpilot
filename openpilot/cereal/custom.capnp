@@ -63,6 +63,33 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
   maneuverGeometryValid @17 :Bool;
   maneuverBend @18 :Bool;         # the road bends and no other road meets it there: the model's, not a turn
   handback @19 :Handback;         # why TurnPilot handed control back; selfdrived soft-disables on it (turnpilot/handback.py)
+  laneChangePaintRule @20 :LaneChange;  # laneChange, or signalPrompt where the driver signals, as it would be with
+                                        # TurnPilotLanePaintActive on; equal to it when it is on
+  # A planned lane change (lane_planner.py): warned of, confirmed by the driver's blinker where openpilot can't signal,
+  # and checked every frame until DesireHelper starts it; selfdrived raises turnpilotLaneChangeLeft/Right and
+  # turnpilotLaneChangeAborted from these.
+  enum LaneChangeAbort {
+    none @0;
+    lineNotBroken @1;  # the ego line that way no longer reads broken white (solid, yellow, unknown, not read)
+    noLane @2;         # the model sees no lane that way, or only beyond a yellow line
+    laneParked @3;     # something stopped in that lane ahead: a parking strip
+    blindspot @4;      # the car's blind spot signal on that side
+    carInLane @5;      # a car in the target lane, by TurnPilot's cameras
+    noSignal @6;       # no blinker from the driver in time, or it went off before the change started
+    routeChanged @7;   # a new maneuver, or no route
+    notNeeded @8;      # already in the lane the maneuver needs
+    tooLate @9;        # too close to the maneuver to start
+    tooSlow @10;       # below DesireHelper's lane change speed
+    timedOut @11;      # DesireHelper waited too long to start (blind spot)
+    turnedOff @12;     # TurnPilotLanePaintActive turned off
+    badInputs @13;     # carState or modelV2 failing their checks
+    stale @14;         # turnpilotPlan stopped arriving (raised by selfdrived, never published)
+    handedBack @15;    # TurnPilot handed back (handback): the offer is cancelled with it
+    fault @16;         # TurnPilot faulted (fault): the plan goes disabled, and the offer with it
+  }
+  laneChangeOffer @21 :LaneChange;      # the change warned of, from the warning until it starts or aborts
+  laneChangeCountdown @22 :Float32;     # s of the warning left; 0 once the change may go
+  laneChangeAbort @23 :LaneChangeAbort; # why the last change was aborted, held about 2 s; none otherwise
 }
 
 struct TurnpilotDetections @0xaedffd8f31e7b55d {
@@ -79,11 +106,39 @@ struct TurnpilotDetections @0xaedffd8f31e7b55d {
     x1 @4 :Float32;
     y1 @5 :Float32;
   }
+  struct LanePaint {
+    # What one of modelV2's lane lines is painted as, read off the road camera (selfdrive/turnpilot/scene/lane_paint.py)
+    enum Kind {
+      unknown @0;  # not readable: out of view, hidden, low line probability, uncalibrated, too few samples
+      none @1;     # readable road, no paint
+      broken @2;   # dashes or Botts' dots
+      solid @3;
+    }
+    enum Color {
+      unknown @0;
+      white @1;
+      yellow @2;
+    }
+    kind @0 :Kind;
+    color @1 :Color;
+    confidence @2 :Float32;  # 0-1
+    coverage @3 :Float32;    # share of the sampled road with paint, over the last 1.5 s
+  }
   frameId @0 :UInt32;
   timestampEof @1 :UInt64;
   camera @2 :Camera;
   executionTime @3 :Float32;   # s
   detections @4 :List(Detection);
+  lanePaint @5 :List(LanePaint);  # on the road camera's frame of this step, aligned with modelV2.laneLines; empty when not read
+  enum LanePaintStatus {
+    unset @0;        # a log from before the field
+    read @1;
+    wideCamera @2;   # this run was on the wide camera; the paint is only read on the road camera
+    noModel @3;      # no modelV2 for this very frame yet, or no device type to pick the lens
+    disabled @4;     # the paint failed earlier and is off for the drive, or modeld has no road camera
+  }
+  lanePaintStatus @6 :LanePaintStatus;
+  lanePaintTime @7 :Float32;      # s spent reading the paint in this step, 0 when not read; executionTime is the detector's alone
 }
 
 struct TurnpilotScene @0xf35cc4560bbf6ec2 {

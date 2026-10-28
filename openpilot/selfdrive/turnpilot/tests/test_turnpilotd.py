@@ -1,9 +1,12 @@
 """turnpilotd closed loop: synthetic navd, model and scene around a point-mass car that follows the plan's limits."""
+from unittest import mock
+
 from opendbc.car.structs import car
 from openpilot.cereal import custom, log
 from openpilot.common.realtime import DT_MDL
-from openpilot.selfdrive.turnpilot.hooks import CLEAR_DESIRE, plan_accel
-from openpilot.selfdrive.turnpilot.lane_planner import lane_change_window
+from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S, CLEAR_DESIRE, lane_change_events, plan_accel
+from openpilot.selfdrive.turnpilot.lane_planner import LC_WARN_S, lane_change_window
+from openpilot.selfdrive.turnpilot.scene.lane_paint import UNKNOWN, LinePaint
 from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP, ONCOMING_TTA_S, PED_STOP_GAP_M
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_control, car_state, model_v2, nav_instruction, scene
 from openpilot.selfdrive.turnpilot.desire_timing import TURN_DESIRE_LEAD_M
@@ -36,8 +39,10 @@ class FakeSM:
 
 
 class Sim:
-  def __init__(self, maneuvers, cruise=13., nav_lanes=None, model_lanes=(0, 0), shadow=False, driver_signals=False, long_control=True):
+  def __init__(self, maneuvers, cruise=13., nav_lanes=None, model_lanes=(0, 0), shadow=False, driver_signals=False, paint=(),
+               paint_rule=True, long_control=True):
     self.navd, self.tp, self.sm = FakeNavd(maneuvers, nav_lanes), TurnPilot(), FakeSM()
+    self.paint, self.paint_rule, self.inputs_valid = paint, paint_rule, True
     self.s, self.v, self.cruise, self.t = 0., cruise, cruise, 0.
     self.model_lanes, self.shadow, self.driver_signals, self.long_control = model_lanes, shadow, driver_signals, long_control
     self.big = False
@@ -51,8 +56,8 @@ class Sim:
     self.sm.put('carState', car_state(self.v, steer, left_blinker=blinker, yaw_rate=yaw_rate))
     self.sm.put('carControl', car_control(lat_active))
     self.sm.put('modelV2', model_v2(*self.model_lanes, big=self.big))
-    plan = self.tp.plan(self.sm, scene(objects, available), True, self.shadow, self.driver_signals,
-                        long_control=self.long_control).as_reader().turnpilotPlan
+    plan = self.tp.plan(self.sm, scene(objects, available), True, self.shadow, self.driver_signals, paint=self.paint,
+                        paint_rule=self.paint_rule, inputs_valid=self.inputs_valid, long_control=self.long_control).as_reader().turnpilotPlan
     a = min(plan_accel(plan.accelCap, plan.speedCap, self.v), (self.cruise - self.v) / 2., 1.5)
     if plan.shouldStop:
       a = min(a, -1.)
@@ -197,21 +202,72 @@ def test_pedestrian_in_path_stops_then_goes():
   assert sim.s > 205.
 
 
-def test_lane_change_request_and_driver_prompt():
-  sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., nav_lanes={0: THREE_LANES_LEFT_TURN}, model_lanes=(2, 0))
-  sim.run(15.)
-  requests = [(s, plan) for s, _, plan in sim.trace if plan.laneChange == LaneChange.left]
-  assert requests and all(plan.state == State.laneChange for _, plan in requests)
-  start, end = lane_change_window(15., 2)
-  assert 500. - start < requests[0][0] < 500. - end
+BW, SW = LinePaint('broken', 'white', 0.9, 0.3), LinePaint('solid', 'white', 0.9, 0.95)
+BROKEN_WHITE_LEFT = (UNKNOWN, BW, SW, UNKNOWN)
 
+
+def test_lane_change_warned_then_requested():
   sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., nav_lanes={0: THREE_LANES_LEFT_TURN}, model_lanes=(2, 0),
-            driver_signals=True)
-  sim.run(15.)
-  assert any(plan.signalPrompt == LaneChange.left and plan.state == State.laneChange for _, _, plan in sim.trace)
+            paint=BROKEN_WHITE_LEFT)
+  sim.run(25.)
+  offers = rising(sim.trace, 'laneChangeOffer', LaneChange.left)
+  requests = [(s, plan) for s, _, plan in sim.trace if plan.laneChange == LaneChange.left]
+  assert offers and requests and all(plan.state == State.laneChange for _, plan in requests)
+  start, end = lane_change_window(15., 2)
+  assert 500. - start < offers[0] < 500. - end
+  assert abs((requests[0][0] - offers[0]) - LC_WARN_S * 15.) < 2.  # the warning's 3 s at 15 m/s
+  counting = [plan.laneChangeCountdown for s, _, plan in sim.trace if offers[0] <= s < requests[0][0]]
+  assert counting[0] > LC_WARN_S - 0.1 and counting[-1] < 0.1 and all(a >= b for a, b in zip(counting, counting[1:], strict=False))
+  assert all(plan.laneChangeAbort == 'none' for _, _, plan in sim.trace)
+
+  # the Tesla: the prompt and countdown, nothing until the driver's blinker
+  sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., nav_lanes={0: THREE_LANES_LEFT_TURN}, model_lanes=(2, 0),
+            driver_signals=True, paint=BROKEN_WHITE_LEFT)
+  sim.run(10.)
+  assert any(plan.signalPrompt == LaneChange.left and plan.laneChangeOffer == LaneChange.left and plan.state == State.laneChange
+             for _, _, plan in sim.trace)
   assert all(plan.laneChange == LaneChange.none for _, _, plan in sim.trace)
   plan = sim.step(blinker=True)
   assert plan.laneChange == LaneChange.left
+
+
+def test_no_paint_no_lane_change_and_aborts_reach_the_plan():
+  # the map's lanes alone, with no paint read, no longer move the car
+  sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., nav_lanes={0: THREE_LANES_LEFT_TURN}, model_lanes=(2, 0))
+  sim.run(25.)
+  assert all(plan.laneChange == LaneChange.none and plan.laneChangeOffer == LaneChange.none for _, _, plan in sim.trace)
+  # paint lost under an offer: the plan says why, for selfdrived's alert
+  sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., model_lanes=(1, 0), paint=BROKEN_WHITE_LEFT)
+  while not sim.trace or sim.trace[-1][2].laneChangeOffer == LaneChange.none:
+    sim.step()
+  sim.paint = ()
+  plan = sim.step()
+  assert plan.laneChangeAbort == 'lineNotBroken' and plan.laneChangeOffer == LaneChange.none and plan.laneChange == LaneChange.none
+  # inputs failing their checks abort too
+  sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., model_lanes=(1, 0), paint=BROKEN_WHITE_LEFT)
+  while not sim.trace or sim.trace[-1][2].laneChangeOffer == LaneChange.none:
+    sim.step()
+  sim.inputs_valid = False
+  assert sim.step().laneChangeAbort == 'badInputs'
+
+
+def test_lane_change_from_lane_paint():
+  # no map lanes: the broken white line on the left lets the car over toward a left turn; none read, no change
+  sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., model_lanes=(1, 0), paint=BROKEN_WHITE_LEFT)
+  sim.run(25.)
+  requests = [s for s, _, plan in sim.trace if plan.laneChange == LaneChange.left]
+  start, end = lane_change_window(15.)
+  assert requests and 500. - start < requests[0] < 500. - end
+  assert all(plan.laneChange != LaneChange.right for _, _, plan in sim.trace)
+  assert all(plan.laneChangePaintRule == plan.laneChange for _, _, plan in sim.trace)
+  sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., model_lanes=(1, 0))
+  sim.run(25.)
+  assert all(plan.laneChange == LaneChange.none for _, _, plan in sim.trace)
+  # TurnPilotLanePaintActive off: nothing acts or is offered, and laneChangePaintRule says what would have been asked for
+  sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., model_lanes=(1, 0), paint=BROKEN_WHITE_LEFT, paint_rule=False)
+  sim.run(25.)
+  assert all(plan.laneChange == LaneChange.none and plan.laneChangeOffer == LaneChange.none for _, _, plan in sim.trace)
+  assert any(plan.laneChangePaintRule == LaneChange.left for _, _, plan in sim.trace)
 
 
 def test_shadow_computes_the_same_plan():
@@ -376,3 +432,40 @@ def test_small_model_from_the_start_is_not_a_fallback():
   for _ in range(int(5. / DT_MDL)):
     plan = sim.step(available=False)
   assert plan.handback == Handback.none and plan.reason == WAITING_REASON and not sim.tp.cancel_route
+
+
+def offered_sim(**kwargs):
+  sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., model_lanes=(1, 0), paint=BROKEN_WHITE_LEFT, **kwargs)
+  while not sim.trace or sim.trace[-1][2].laneChangeOffer == LaneChange.none:
+    sim.step()
+  return sim
+
+
+def test_handback_cancels_an_offered_lane_change_out_loud():
+  sim = offered_sim()
+  plans = [sim.step(available=False) for _ in range(int(3. / DT_MDL))]
+  first = next(i for i, p in enumerate(plans) if p.handback != Handback.none)
+  assert all(p.laneChangeOffer == LaneChange.left for p in plans[:first])
+  held = [p for p in plans[first:] if p.laneChangeAbort == 'handedBack']
+  assert plans[first].laneChangeAbort == 'handedBack' and abs(len(held) * DT_MDL - ABORT_HOLD_S) < 2 * DT_MDL
+  assert all(p.laneChangeOffer == LaneChange.none and p.laneChange == LaneChange.none and p.signalPrompt == LaneChange.none
+             for p in plans[first:])
+
+
+def test_fault_or_turning_off_cancels_an_offered_lane_change_out_loud():
+  for stop in ('no_long', 'error', 'off'):
+    sim = offered_sim()
+    if stop == 'no_long':
+      sim.long_control = False
+      plans = [sim.step() for _ in range(int(3. / DT_MDL))]
+    elif stop == 'error':
+      sim.tp.update = mock.Mock(side_effect=RuntimeError("synthetic failure"))
+      plans = [sim.step() for _ in range(int(3. / DT_MDL))]
+    else:
+      plans = [sim.tp.plan(sim.sm, scene(), False, False, long_control=True).as_reader().turnpilotPlan for _ in range(int(3. / DT_MDL))]
+    reason = 'turnedOff' if stop == 'off' else 'fault'
+    assert all(p.state == State.disabled and p.laneChangeOffer == LaneChange.none for p in plans), stop
+    held = [p for p in plans if p.laneChangeAbort == reason]
+    assert plans[0].laneChangeAbort == reason and abs(len(held) * DT_MDL - ABORT_HOLD_S) < 2 * DT_MDL, stop
+    # selfdrived raises the abort from the disabled plan
+    assert lane_change_events(plans[0]) == ('turnpilotLaneChangeAborted',), stop
