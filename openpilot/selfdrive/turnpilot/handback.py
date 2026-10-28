@@ -44,3 +44,12 @@ class HandbackEvents:
     elif started or handback == Handback.detectorStopped:
       events.append(EVENTS[handback])  # disengaged: the alert once it starts, and no engaging while the detector is out
     return events
+
+  def apply(self, events, plan, enabled: bool) -> None:
+    """Add this frame's events to selfdrived's Events. On a fallback upstream's bigModelFailed soft-disables too, and on
+    the same frame its alert would win the tie (same priority, lower event id): TurnPilot's replaces it, so the driver
+    reads why TurnPilot handed back. The disable is the same; bigModelFailed's own alert shows when TurnPilot's lags it."""
+    for event in self.update(plan, enabled):
+      events.add(event)
+    if EventName.turnpilotModelFellBack in events.names:
+      events.events = [e for e in events.events if e != EventName.bigModelFailed]

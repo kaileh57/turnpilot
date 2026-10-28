@@ -350,8 +350,7 @@ class SelfdriveD:
       self.events.add(EventName.bigModelFailed)
 
     # TurnPilot handing back: its detector stopped, or the model fell back (bigModelFailed above disables too)
-    for event in self.turnpilot_handback.update(active_plan(self.sm), self.enabled):
-      self.events.add(event)
+    self.turnpilot_handback.apply(self.events, active_plan(self.sm), self.enabled)
 
     not_running = {p.name for p in self.sm['managerState'].processes if not p.running and p.shouldBeRunning}
     if self.sm.recv_frame['managerState'] and len(not_running):

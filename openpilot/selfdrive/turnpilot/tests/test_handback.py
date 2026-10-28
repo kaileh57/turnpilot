@@ -1,6 +1,8 @@
 """selfdrived's side of a TurnPilot handback: its events through openpilot's own state machine."""
+from opendbc.car.structs import car
 from openpilot.cereal import log, messaging
 from openpilot.common.realtime import DT_CTRL
+from openpilot.selfdrive.selfdrived.alertmanager import AlertManager
 from openpilot.selfdrive.selfdrived.events import ET, EVENTS, Events
 from openpilot.selfdrive.selfdrived.state import SOFT_DISABLE_TIME, StateMachine
 from openpilot.selfdrive.turnpilot.handback import Handback, HandbackEvents
@@ -25,8 +27,7 @@ class Selfdrived:
 
   def step(self, p, engage=False):
     self.events.clear()
-    for e in self.handback.update(p, self.sm.state in ENABLED):
-      self.events.add(e)
+    self.handback.apply(self.events, p, self.sm.state in ENABLED)
     if engage:
       self.events.add(EventName.buttonEnable)
     self.sm.update(self.events)
@@ -87,3 +88,21 @@ def test_disengaged_handback_alerts_once_and_shadow_does_nothing():
   assert events[0] == [EventName.turnpilotModelFellBack] and not any(events[1:])  # its permanent alert, once
   sd = Selfdrived()
   assert set(sd.run(None, 2.)) == {State.enabled}  # turnpilotd in shadow mode or down: active_plan() is None
+
+
+def test_the_driver_reads_turnpilots_alert_on_a_fallback():
+  # bigModelFailed soft-disables on the same fallback; on the same frame its alert would win the priority tie
+  def shown(frames):
+    am, hb = AlertManager(), HandbackEvents()
+    for frame, (big_failed, handback) in enumerate(frames):
+      events = Events()
+      if big_failed:
+        events.add(EventName.bigModelFailed)
+      hb.apply(events, plan(handback), True)
+      args = [car.CarParams.new_message(), car.CarState.new_message(), None, False, int(SOFT_DISABLE_TIME / DT_CTRL), None]
+      am.add_many(frame, events.create_alerts([ET.SOFT_DISABLE], args))
+      am.process_alerts(frame, set())
+    return am.current_alert.alert_text_2
+  assert shown([(True, Handback.modelFellBack)]) == "TurnPilot unavailable: driving model fell back"
+  assert shown([(True, Handback.none), (True, Handback.modelFellBack)]) == "TurnPilot unavailable: driving model fell back"
+  assert shown([(True, Handback.none)]) == "Big Model Failed"  # TurnPilot off or in shadow mode: upstream's, unchanged
