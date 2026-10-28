@@ -288,6 +288,7 @@ def make_handler(maps: Maps, request_timeout: float = REQUEST_TIMEOUT, header_ti
       log.info("%s %s", self.address_string(), format % args)
 
     def send_json(self, code, obj):
+      self.request_read()  # a refusal before the body was read writes with the per-write timeout, not the deadline's rest
       body = json.dumps(obj).encode()
       self.headers_sent = True
       self.send_response(code)
