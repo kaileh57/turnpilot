@@ -1,5 +1,6 @@
 """The runner's state machine, dry: a fake bridge, director, SubMaster and clock around a car that drives the scenario's
 approach, turns at the junction and stops at the destination. Catches the sequencing the live game can't be used for."""
+import dataclasses
 import json
 import math
 import os
@@ -278,3 +279,78 @@ def test_driver_taps_the_gas_where_turnpilot_asks_for_a_go(monkeypatch):
     gas.append(b.driver_gas)
     clock.t += 0.05
   assert TAP_GAS in gas and runner.taps.log[0]['reason'] == 'stopSignGo'
+
+
+def row_runner(monkeypatch, name):
+  """A runner on the scenario's plan, its car at the spawn heading for the junction, for a row taken mid-run."""
+  clock = Clock()
+  plan = catalog.build(name)
+  world = World(plan, clock)
+  monkeypatch.setattr(run, 'wall', clock.wall)
+  runner = run.Runner(plan, 1, '/tmp', 'http://127.0.0.1:8088', 'tok', 'host', 0)
+  runner.sm, runner.director, runner.t_engaged, runner.route_id = FakeSM(world), FakeDirector(), clock.t, 'r'
+  b = bridge()
+  world.step(b)
+  runner.sm.update()
+  return runner, b, plan
+
+
+def test_a_row_on_a_plan_without_actors():
+  """lane_change has a junction and no actors: its rows have no pacer and no gaps, and no run ends 'error' on them."""
+  with pytest.MonkeyPatch.context() as mp:
+    runner, b, plan = row_runner(mp, 'lane_change')
+    assert not plan.actors and plan.junction is not None
+    r = runner.row(b, runner.t_engaged + 1.0)
+  assert r['pacer_dx'] is None and r['car_gap'] is None and r['j_ahead'] is not None
+
+
+def test_a_row_once_the_pacer_is_gone():
+  """The director drops the pacer's pose when its script ends, while the car may still be driving: the row says so."""
+  with pytest.MonkeyPatch.context() as mp:
+    runner, b, plan = row_runner(mp, 'occupied_lane')
+    runner.director.setup(plan.actors)
+    r = runner.row(b, runner.t_engaged + 1.0)
+    pacer = next(a for a in plan.actors if a.trigger == 'pace')
+    assert r['pacer_dx'] is not None
+    runner.director.poses.pop(pacer.name)
+    r = runner.row(b, runner.t_engaged + 1.0)
+  assert r['pacer_dx'] is None
+
+
+def test_the_pacer_dx_is_the_pacers():
+  """With an actor after the pacer in the plan, pacer_dx is still the pacer's, not the last actor's."""
+  with pytest.MonkeyPatch.context() as mp:
+    runner, b, plan = row_runner(mp, 'occupied_lane')
+    pacer = next(a for a in plan.actors if a.trigger == 'pace')
+    other = dataclasses.replace(pacer, name='other', trigger='setup', path=[(p[0] + 500., p[1], p[2]) for p in pacer.path])
+    plan.actors = [pacer, other]
+    runner.director.setup(plan.actors)
+    r = runner.row(b, runner.t_engaged + 1.0)
+  x, y = b.simulator_state.position.x, b.simulator_state.position.y
+  h = math.radians(90.0 - b.simulator_state.bearing)
+  p = runner.director.poses[pacer.name]
+  assert r['pacer_dx'] == round((p[0] - x) * math.cos(h) + (p[1] - y) * math.sin(h), 2)
+
+
+def test_lane_change_runs_end_to_end(tmp_path, monkeypatch):
+  """The scenario without actors, through the whole run: it arrives, its rows taken on the way."""
+  clock = Clock()
+  plan = catalog.build('lane_change')
+  world = World(plan, clock)
+  monkeypatch.setattr(run, 'time', SimpleNamespace(monotonic=clock.monotonic, strftime=lambda *a: 'now'))
+  monkeypatch.setattr(run, 'wall', clock.wall)
+  monkeypatch.setattr(run, 'Director', FakeDirector)
+  monkeypatch.setattr(run, 'web_call', world.web)
+  monkeypatch.setattr(run.messaging, 'SubMaster', lambda services: FakeSM(world))
+  runner = run.Runner(plan, 1, str(tmp_path), 'http://127.0.0.1:8088', 'tok', 'host', 0)
+  b = bridge()
+  b.world.teleport = lambda pos, rot: (b.teleports.append(pos), setattr(world, 's', 0.0), setattr(world, 'hold', None))
+  b.simulator_state.position, b.simulator_state.bearing, b.simulator_state.wheel_speed = SimpleNamespace(x=0, y=0, z=0), 0.0, 0.0
+  for _ in range(int(200 / DT)):
+    world.step(b)
+    if runner(b):
+      break
+    clock.t += DT
+  out = json.load(open(tmp_path / 'result.json'))
+  assert [r['outcome'] for r in out['runs']] == ['arrived']
+  assert out['runs'][0]['rows'] and all(row['pacer_dx'] is None for row in out['runs'][0]['rows'])
