@@ -163,7 +163,11 @@ class TurnPilot:
     if not keep_turn:
       # maneuver ids never repeat: the scene kept through a fault holds ids (its commitment, a gas release, a carried hold)
       self.follower = RouteFollower(self.follower.maneuver_id + 1 if hasattr(self, 'follower') else 0)
+      old = getattr(self, 'desires', None)
       self.desires = DesireTiming()
+      if old is not None and not detector:
+        # a turn desire still in the model's queue (a turn passed during a fault) comes out of it as for any passed turn
+        self.desires.carry_clear(old)
       self.skip = TurnSkip()
       self.dropped_id: int | None = None  # the maneuver in hand at a handback: not taken up again
       self.turn_cap_id: int | None = None  # ...whose turn speed cap stays, its desire having gone out

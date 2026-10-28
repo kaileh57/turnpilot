@@ -137,6 +137,14 @@ class DesireTiming:
     if self.started and self.side and not self.done:
       self.turned_deg += math.degrees(yaw_rate * dt) * self.side
 
+  def carry_clear(self, old: "DesireTiming"):
+    """Take over old's turn desire to clear (turnpilotd replaced it: a fault or TurnPilot off, its turn over meanwhile):
+    cleared from the model's queue now if the car has turned CLEAR_MIN_DEG, else once it has, as for a passed turn."""
+    old._turn_over()
+    self._pending, self.clear_frames = old._pending, old.clear_frames
+    if self._pending is not None and self._pending[0] >= CLEAR_MIN_DEG:
+      self._clear()
+
   def cancel(self):
     """A turn skipped with its desire out but not yet turned on (turnpilotd: a dropped turn too close to pulse again):
     its desire comes out of the model's queue now, and nothing more goes for it."""

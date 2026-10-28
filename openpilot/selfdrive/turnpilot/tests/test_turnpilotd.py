@@ -1151,6 +1151,19 @@ def test_a_fault_in_a_committed_turn_doesnt_hold_it_past_its_junction():
     late = [(s, p.desire) for s, _, p in sim.trace if s > 300. + 15. and p.desire == Desire.turnLeft]
     assert not late, (how, late[:3])
     assert sim.tp.follower.maneuver.side == -1, how  # the right after it is the maneuver now
+  # a fault long enough that the turn is round and passed while it lasts: the turn's pulse still comes out of the model's
+  # queue once TurnPilot runs again, and nothing is skipped or pulsed afresh
+  sim = Sim([(300., "turn", "left", T_LEFT), (1500., "turn", "right", junction_of("right"))])
+  while sim.distance() > 3. or sim.s < 10.:
+    sim.step()
+  sim.cruise = 4.3
+  sim.tp.update = mock.Mock(side_effect=RuntimeError("synthetic failure"))
+  while sim.s < 316.:
+    sim.step(yaw_rate=0.5 if sim.s < 312. else 0.)
+  del sim.tp.update
+  plans = [sim.step() for _ in range(int(2. / DT_MDL))]
+  assert any(p.desire == CLEAR_DESIRE for p in plans)
+  assert not any(p.desire == Desire.turnLeft or p.tooFastToTurn for p in plans)
 
 # --- map stop control (map_controls.py) ---
 
