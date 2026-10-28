@@ -63,7 +63,8 @@ Positions are BeamNG world meters and `heading_deg` is counterclockwise from eas
 `result.json` holds every run. Each run records:
 
 - the outcome: `arrived`, `disengaged`, `stopped`, `timeout`, `no destination`, `no route`, `no engagement` or `error`
-- maneuvers taken out of attempted. A maneuver is attempted once the car is within 30 m of it while engaged, and taken if navd then moves on to the next step without a reroute.
+- maneuvers taken out of attempted. A maneuver is attempted once the car is within 30 m of it while engaged. It is taken if navd then moves on to the next step without a reroute, the car stays on the route for 20 m of the next step (`left_route_after`), and for a turn, the car's heading turns at least 45 degrees its way (`turn_deg`; a recorded drive's rows have no heading). Going straight on past a turn moves navd on to the next step all the same, then leaves the car off the route, so it counts as not taken.
+- gas taps: each press of the gas while engaged, with the go TurnPilot asked for (`prompt`), the hold's reason and how long the car had stood (`stopped_s`). `driver_taps` is the sim driver's own log of the taps it gave.
 - disengagements, each with the driver override or the last alert as its cause
 - holds, each with its reason, its duration, and whether the car stopped and then moved on
 - the closest the camera mount came to the mannequin and to the other cars (`min_gap_ped_m`, `min_gap_car_m`)

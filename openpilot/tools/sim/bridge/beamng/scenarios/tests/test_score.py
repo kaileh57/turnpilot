@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 import openpilot.cereal.messaging as messaging
@@ -98,6 +100,45 @@ class TestManeuvers:
                   (2.0, {'nav_dist': 80.0, 'nav_remaining': 400.0, 'nav_mod': 'left', 'route': 2})])
     ms = score.maneuvers(rows)
     assert (ms[0]['attempted'], ms[0]['taken']) == (True, False)
+
+  def straight_through(self, heading=None):
+    """The car drives straight on past a right turn. navd projects it past the step's end and moves on to the next step
+    10 m past the junction, so the step changes like a taken turn; then the car is off the next step's road: navd sends
+    no instruction, and reroutes 4 s later, well outside the reroute window around the step change."""
+    h = {} if heading is None else {'heading': heading}
+    return drive(route([(150.0, 'turn', 'right'), (200.0, 'turn', 'left'), (80.0, 'arrive', '')])[:1] +
+                 [(1.5, {**h, 'nav_type': 'turn', 'nav_mod': 'left', 'nav_dist': lambda tau: round(200.0 - 10.0 * tau, 1),
+                         'nav_remaining': lambda tau: round(280.0 - 10.0 * tau, 1)}),
+                  (4.0, {**h, 'nav_valid': False, 'nav_dist': 0.0, 'nav_remaining': 0.0}),
+                  (3.0, {**h, 'route': 2, 'nav_type': 'turn', 'nav_mod': 'right', 'nav_dist': lambda tau: round(150.0 - 10.0 * tau, 1),
+                         'nav_remaining': lambda tau: round(420.0 - 10.0 * tau, 1)})])
+
+  def test_straight_through_a_turn_is_not_taken(self):
+    ms = score.maneuvers(self.straight_through())
+    assert (ms[0]['modifier'], ms[0]['attempted'], ms[0]['taken']) == ('right', True, False)
+    assert ms[0]['left_route_after']
+    res = score.summarize('route_demo', self.straight_through(), 'arrived')
+    assert any('maneuvers' in f for f in res['failures'])
+
+  def test_a_turn_without_the_heading_change_is_not_taken(self):
+    # navd stays on the route (the next step runs along the road the car went on), but the car never turned
+    rows = drive(route([(150.0, 'turn', 'right'), (200.0, 'turn', 'left'), (80.0, 'arrive', '')]))
+    for r in rows:
+      r['heading'] = 0.0
+    ms = score.maneuvers(rows)
+    assert [m['taken'] for m in ms] == [False, False] and ms[0]['turn_deg'] == pytest.approx(0.0)
+
+  def test_a_turn_with_its_heading_change_is_taken(self):
+    rows = drive(route([(150.0, 'turn', 'right'), (200.0, 'turn', 'left'), (80.0, 'arrive', '')]))
+    # 90 degrees right through the first junction (t 14-16 s), then 90 left through the second (t 34-36 s)
+    for r in rows:
+      t = r['t']
+      r['heading'] = -math.pi / 2 * min(max((t - 14.0) / 2.0, 0.0), 1.0) + math.pi / 2 * min(max((t - 34.0) / 2.0, 0.0), 1.0)
+    ms = score.maneuvers(rows)
+    assert [m['taken'] for m in ms] == [True, True]
+    assert ms[0]['turn_deg'] == pytest.approx(90.0, abs=1.0) and ms[1]['turn_deg'] == pytest.approx(90.0, abs=1.0)
+    rows_wrong = [dict(r, heading=-r['heading']) for r in rows]  # turned the wrong way each time
+    assert [m['taken'] for m in score.maneuvers(rows_wrong)] == [False, False]
 
   def test_not_attempted_when_disengaged(self):
     rows = drive([(3.0, {'enabled': False, 'nav_dist': lambda tau: round(40.0 - 10.0 * tau, 1),

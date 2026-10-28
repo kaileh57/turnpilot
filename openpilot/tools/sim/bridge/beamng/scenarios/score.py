@@ -21,6 +21,8 @@ Score a recorded drive: python -m openpilot.tools.sim.bridge.beamng.scenarios.sc
 import argparse
 import json
 
+import numpy as np
+
 from openpilot.selfdrive.turnpilot.lane_planner import LC_BLOCK_X_M
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, TURN, classify
 
@@ -31,6 +33,8 @@ HOLD_MERGE_S = 1.0     # holds with the same reason this close together are one
 ATTEMPT_M = 30.        # reaching this close to a maneuver on the route is an attempt
 STEP_CHANGE_M = 2.     # the distance left after the current maneuver changing by more than this is a new step
 REROUTE_WINDOW_S = 1.5 # a new navRoute this close to a step change means navd rerouted (it runs at 1 Hz)
+CONFIRM_M = 20.        # after navd moves on, the car stays on the route this far along the next step: the step was taken
+TURN_TAKEN_DEG = 45.   # a turn is taken only if the car's heading turned this far its way (the junctions are ~90 degrees)
 ARRIVE_M = 15.         # route_follower.ARRIVE_DIST_M, measured to the destination in the game
 CAUSE_WINDOW_S = 5.    # a disengagement's cause is the last alert this soon before it
 COLLISION_GAP_M = 2.5  # camera mount to object: about where the bumper touches (the mount sits ~2 m behind it)
@@ -146,31 +150,75 @@ def gas_taps(rows) -> list[dict]:
   return out
 
 
+def _after_advance(rows, i: int) -> tuple[bool, int]:
+  """From row i, where navd moved on to a new step: (whether the car left the route, the row where that was settled).
+  On the route, the new step's instruction stays valid on the same route until the car has driven CONFIRM_M along it.
+  Off it (it went straight on past a turn: navd projects it past the step's end and moves on all the same), navd sends
+  no instruction (OFF_ROUTE_DISTANCE) and reroutes seconds later, outside REROUTE_WINDOW_S."""
+  base_route, base_left = rows[i].get('route'), rows[i]['nav_remaining']
+  for j in range(i, len(rows)):
+    r = rows[j]
+    if not r.get('nav_valid') or r.get('route') != base_route:
+      return True, j
+    if base_left - r['nav_remaining'] >= CONFIRM_M:
+      return False, j
+  return False, len(rows) - 1
+
+
+def _turn_deg(rows, a: int, b: int, side: int) -> float | None:
+  """The most the car's heading turned toward `side` (route_follower.LEFT/RIGHT) over rows a..b, in degrees; None
+  without headings (a recorded drive's rows)."""
+  hs = [r['heading'] for r in rows[a:b + 1] if r.get('heading') is not None]
+  if len(hs) < 2:
+    return None
+  turned = (np.unwrap(np.array(hs)) - hs[0]) * side
+  return round(float(np.degrees(turned.max())), 1)
+
+
 def maneuvers(rows) -> list[dict]:
   """The turns and keeps of the route in the order navd gave them: attempted once the car came within ATTEMPT_M while
-  engaged, taken if navd then moved on to the next step of the same route. A missed turn makes navd reroute instead,
-  which shows as a new navRoute around the step change (navd sends the instruction and the route in either order)."""
-  valid = [r for r in rows if r.get('nav_valid')]
-  route_changes = [b['t'] for a, b in zip(valid, valid[1:], strict=False) if a.get('route') is not None and b.get('route') != a.get('route')]
+  engaged. Taken if navd then moved on to the next step of the same route and the car stayed on it (_after_advance), and
+  for a turn, where the rows have headings, if the car's heading turned TURN_TAKEN_DEG its way. A missed turn makes navd
+  reroute, which shows as a new navRoute around the step change (navd sends the instruction and the route in either
+  order), or as the car off the route just after it: a straight-through at a turn moves navd on, then off the route."""
+  route_changes = []
+  prev = None
+  for r in rows:
+    if r.get('nav_valid'):
+      if prev is not None and prev.get('route') is not None and r.get('route') != prev.get('route'):
+        route_changes.append(r['t'])
+      prev = r
   steps: list[dict] = []
   cur = None
-  for r in valid:
+  for i, r in enumerate(rows):
+    if not r.get('nav_valid'):
+      continue
     future = r['nav_remaining'] - r['nav_dist']  # navd: the route left after this step's maneuver, fixed per step
     if cur is None or abs(future - cur['future']) > STEP_CHANGE_M:
       if cur is not None:
         rerouted = any(abs(t - r['t']) <= REROUTE_WINDOW_S for t in route_changes)
         cur['end'] = 'advanced' if future < cur['future'] and not rerouted else 'reroute'
-      cur = {'future': future, 'type': r.get('nav_type', ''), 'modifier': r.get('nav_mod', ''), 'attempted': False, 't': None}
+        cur['end_i'] = i
+      cur = {'future': future, 'type': r.get('nav_type', ''), 'modifier': r.get('nav_mod', ''), 'attempted': False, 't': None,
+             'attempt_i': None}
       steps.append(cur)
     cur['type'], cur['modifier'] = r.get('nav_type', ''), r.get('nav_mod', '')
     if r['nav_dist'] < ATTEMPT_M and r['enabled'] and not cur['attempted']:
-      cur['attempted'], cur['t'] = True, r['t']
+      cur['attempted'], cur['t'], cur['attempt_i'] = True, r['t'], i
   out = []
   for s in steps:
-    kind, _ = classify(s['type'], s['modifier'])
-    if kind in (TURN, KEEP):
-      out.append({'type': s['type'], 'modifier': s['modifier'], 'attempted': s['attempted'], 't': s['t'],
-                  'taken': s['attempted'] and s.get('end') == 'advanced'})
+    kind, side = classify(s['type'], s['modifier'])
+    if kind not in (TURN, KEEP):
+      continue
+    advanced = s['attempted'] and s.get('end') == 'advanced'
+    left_route, turn_deg = False, None
+    if advanced:
+      left_route, settled = _after_advance(rows, s['end_i'])
+      if kind == TURN:
+        turn_deg = _turn_deg(rows, s['attempt_i'], settled, side)
+    taken = advanced and not left_route and (turn_deg is None or turn_deg >= TURN_TAKEN_DEG)
+    out.append({'type': s['type'], 'modifier': s['modifier'], 'attempted': s['attempted'], 't': s['t'], 'taken': taken,
+                'left_route_after': left_route, 'turn_deg': turn_deg})
   return out
 
 
