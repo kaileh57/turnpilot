@@ -12,8 +12,8 @@
 <link rel="icon" href="/icon.png">
 <title>TurnPilot</title>
 <style>
-:root { --fg: #000; --bg: #fff; --dim: #555; --line: #000; --accent: #0057ff; }
-@media (prefers-color-scheme: dark) { :root { --fg: #fff; --bg: #000; --dim: #aaa; --line: #fff; --accent: #2f6bff; } }
+:root { --fg: #000; --bg: #fff; --dim: #555; --line: #000; --accent: #0057ff; --bad: #c40000; --area: rgba(0, 87, 255, .14); }
+@media (prefers-color-scheme: dark) { :root { --fg: #fff; --bg: #000; --dim: #aaa; --line: #fff; --accent: #2f6bff; --bad: #ff5a5a; --area: rgba(47, 107, 255, .25); } }
 * { box-sizing: border-box; }
 body { margin: 0; padding: 16px max(16px, env(safe-area-inset-right)) calc(32px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
   max-width: 640px; margin: 0 auto; background: var(--bg); color: var(--fg);
@@ -42,6 +42,21 @@ form input { flex: 1; min-width: 0; }
 .note { color: var(--dim); font-size: 15px; margin: 8px 0; }
 #error { color: var(--accent); font-weight: 600; min-height: 1.35em; margin: 8px 0 0; }
 details { margin-top: 28px; } summary { min-height: 44px; font-weight: 600; }
+#maperror { color: var(--bad); font-weight: 700; border: 2px solid var(--bad); padding: 10px 12px; margin: 8px 0 0; }
+#mapstate { margin: 8px 0 0; font-weight: 600; }
+#mapstate.bad { color: var(--bad); }
+#mapview { display: block; width: 100%; height: auto; border: 2px solid var(--line); margin-top: 8px; }
+#mapview .area { fill: var(--area); stroke: var(--accent); stroke-width: 1.5; fill-rule: evenodd; vector-effect: non-scaling-stroke; }
+#mapview .label { fill: var(--accent); font: 600 11px -apple-system, system-ui, sans-serif; text-anchor: middle; }
+#mapview .car { fill: var(--fg); stroke: var(--bg); stroke-width: 2; }
+#mapview .dest { fill: var(--accent); stroke: var(--bg); stroke-width: 2; }
+#mapview .out { fill: var(--bad); }
+.legend { color: var(--dim); font-size: 14px; margin: 4px 0 0; }
+#mapform label { display: block; margin: 10px 0 4px; font-weight: 600; }
+#mapform input, #mapform textarea { width: 100%; min-height: 44px; padding: 8px; border: 2px solid var(--line); background: var(--bg);
+  color: var(--fg); font: 15px ui-monospace, Menlo, monospace; border-radius: 0; }
+#mapform textarea { min-height: 120px; }
+#mapform button { margin-top: 12px; width: 100%; }
 code { display: block; word-break: break-all; margin: 4px 0 12px; padding: 8px; border: 1px solid var(--line); font: 14px ui-monospace, Menlo, monospace; }
 </style>
 </head>
@@ -51,6 +66,12 @@ code { display: block; word-break: break-all; margin: 4px 0 12px; padding: 8px; 
 <div id="app">
 <div id="status"><div class="note">Connecting...</div></div>
 <div id="error" role="alert"></div>
+
+<h2>Mapped area</h2>
+<div id="maperror" role="alert" hidden></div>
+<div id="mapstate"></div>
+<svg id="mapview" viewBox="0 0 320 200" role="img" aria-label="TurnPilot's mapped area"></svg>
+<div class="legend" id="maplegend"></div>
 
 <h2>Search</h2>
 <form id="searchform">
@@ -63,6 +84,21 @@ code { display: block; word-break: break-all; margin: 4px 0 12px; padding: 8px; 
 <div id="favorites"></div>
 <h2>Recent</h2>
 <div id="recents"></div>
+
+<details id="mapsettings">
+  <summary>Map server</summary>
+  <div class="note">TurnPilot downloads the map for each drive from its own map server. The key is stored on the comma and never shown again.</div>
+  <form id="mapform" onsubmit="return false">
+    <label for="maphost">Address</label>
+    <input id="maphost" type="text" placeholder="https://136.113.85.41" autocomplete="off" autocapitalize="none" spellcheck="false">
+    <label for="mapkey">API key</label>
+    <input id="mapkey" type="password" placeholder="not set" autocomplete="off" autocapitalize="none" spellcheck="false">
+    <label for="mapcert">Server certificate (PEM)</label>
+    <textarea id="mapcert" placeholder="-----BEGIN CERTIFICATE-----" autocapitalize="none" spellcheck="false"></textarea>
+    <div class="note" id="mapcertinfo"></div>
+    <button class="go" type="button" id="mapsave">Save and check</button>
+  </form>
+</details>
 
 <details>
   <summary>Shortcut setup</summary>
@@ -184,6 +220,141 @@ $("searchform").onsubmit = function (ev) {
   });
 };
 
+// The mapped area: the coverage polygons, the car and the destination, drawn with an equirectangular projection fitted
+// to the region in use. No tile server: only the polygons the comma already has.
+var coverage = null, coverageVersion = null;
+var SVGNS = "http://www.w3.org/2000/svg";
+
+function svgEl(tag, attrs) {
+  var e = document.createElementNS(SVGNS, tag);
+  for (var k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+function polygonsOf(g) { return g.type === "Polygon" ? [g.coordinates] : g.coordinates; }
+function inRing(x, y, ring) {
+  var inside = false;
+  for (var i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    var xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+    if ((yi > y) !== (yj > y) && x < xi + (y - yi) * (xj - xi) / (yj - yi)) inside = !inside;
+  }
+  return inside;
+}
+function inGeometry(lon, lat, g) {
+  return polygonsOf(g).some(function (rings) {
+    return inRing(lon, lat, rings[0]) && !rings.slice(1).some(function (h) { return inRing(lon, lat, h); });
+  });
+}
+function bboxOf(features, points) {
+  var b = [Infinity, Infinity, -Infinity, -Infinity];
+  function add(p) { b[0] = Math.min(b[0], p[0]); b[1] = Math.min(b[1], p[1]); b[2] = Math.max(b[2], p[0]); b[3] = Math.max(b[3], p[1]); }
+  features.forEach(function (f) { polygonsOf(f.geometry).forEach(function (rings) { rings.forEach(function (r) { r.forEach(add); }); }); });
+  points.forEach(add);
+  return b;
+}
+
+function drawMap(car, dest) {
+  var svg = $("mapview"), W = 320, H = 200, pad = 12;
+  svg.replaceChildren();
+  if (!coverage) return;
+  var features = coverage.features;
+  var points = [car, dest].filter(Boolean).map(function (p) { return [p.longitude, p.latitude]; });
+  // fit to the regions the car or the destination is in; else everything, so a point outside shows where it is
+  var used = features.filter(function (f) { return points.some(function (p) { return inGeometry(p[0], p[1], f.geometry); }); });
+  var b = bboxOf(used.length ? used : features, points);
+  var kx = Math.cos((b[1] + b[3]) / 2 * Math.PI / 180);
+  var w = Math.max((b[2] - b[0]) * kx, 1e-6), h = Math.max(b[3] - b[1], 1e-6);
+  var scale = Math.min((W - 2 * pad) / w, (H - 2 * pad) / h);
+  var ox = (W - w * scale) / 2, oy = (H - h * scale) / 2;
+  function xy(p) { return [ox + (p[0] - b[0]) * kx * scale, oy + (b[3] - p[1]) * scale]; }
+  features.forEach(function (f) {
+    var d = "";
+    polygonsOf(f.geometry).forEach(function (rings) {
+      rings.forEach(function (r) { d += r.map(function (p, i) { var q = xy(p); return (i ? "L" : "M") + q[0].toFixed(1) + " " + q[1].toFixed(1); }).join("") + "Z"; });
+    });
+    svg.appendChild(svgEl("path", { d: d, "class": "area" }));
+    var fb = bboxOf([f], []), c = xy([(fb[0] + fb[2]) / 2, (fb[1] + fb[3]) / 2]);
+    var label = svgEl("text", { x: c[0].toFixed(1), y: c[1].toFixed(1), "class": "label" });
+    label.textContent = f.properties.name || f.properties.id;
+    svg.appendChild(label);
+  });
+  function inside(p) { return features.some(function (f) { return inGeometry(p.longitude, p.latitude, f.geometry); }); }
+  if (dest) {
+    var q = xy([dest.longitude, dest.latitude]);
+    svg.appendChild(svgEl("rect", { x: (q[0] - 6).toFixed(1), y: (q[1] - 6).toFixed(1), width: 12, height: 12,
+      "class": "dest" + (inside(dest) ? "" : " out") }));
+  }
+  if (car) {
+    var c2 = xy([car.longitude, car.latitude]);
+    svg.appendChild(svgEl("circle", { cx: c2[0].toFixed(1), cy: c2[1].toFixed(1), r: 6, "class": "car" + (inside(car) ? "" : " out") }));
+  }
+}
+
+async function loadCoverage() {
+  var d = await api("/api/coverage");
+  coverage = d.coverage;
+  coverageVersion = d.coverage ? d.version : null;
+}
+
+function percent(x) { return Math.round(x * 100) + "%"; }
+
+function renderMap(s) {
+  var m = s.map, err = $("maperror"), state = $("mapstate");
+  var problems = [];
+  if (m.override) {
+    problems = [];
+  } else {
+    if (m.missing.length) problems.push("Map server not set up: no " + m.missing.join(", ") + ". Open Map server below.");
+    if (m.coverage_error) problems.push(m.coverage_error);
+    else if (m.car_outside) problems.push(m.outside_message.replace("Outside", "The car is outside"));
+  }
+  if (m.nav && m.nav.state === "error") problems.unshift("No route: " + m.nav.message);
+  err.hidden = !problems.length;
+  err.textContent = problems.join(" ");
+
+  var text = "", bad = false;
+  if (m.override) text = "Developer override: routing on local tiles (" + m.override + "), no geofence.";
+  else if (m.nav && m.nav.state === "downloading") {
+    text = "Downloading map for this drive…" + (m.nav.progress != null ? " " + percent(m.nav.progress) : "") +
+      (m.nav.bytes ? " (" + (m.nav.bytes / 1e6).toFixed(1) + " MB)" : "");
+  } else if (m.nav && m.nav.state === "checking") text = "Checking the mapped area…";
+  else if (m.nav && m.nav.state === "ready" && s.destination) text = "Ready" + (m.nav.region ? ": map for this drive in the " + m.nav.region : "");
+  else if (m.car_region) text = "Car is in the " + m.car_region + ".";
+  else if (m.coverage && !m.car) text = "Car position unknown.";
+  if (m.nav && m.nav.state === "error") { text = ""; bad = true; }
+  state.textContent = text;
+  state.className = bad ? "bad" : "";
+
+  $("maplegend").textContent = m.coverage ? "Mapped: " + m.coverage.names + ". Circle: car. Square: destination." +
+    (m.coverage.fetched_at ? " Updated " + new Date(m.coverage.fetched_at * 1000).toLocaleDateString() + "." : "") : "";
+  var version = m.coverage ? m.coverage.version : null;
+  if (version !== coverageVersion) {
+    loadCoverage().then(function () { drawMap(m.car, s.destination); }, fail);
+  } else {
+    drawMap(m.car, s.destination);
+  }
+}
+
+async function loadMapSettings() {
+  var d = await api("/api/map");
+  $("maphost").value = d.host;
+  $("mapkey").value = "";
+  $("mapkey").placeholder = d.key_set ? "saved" + (d.key_hint ? ", ends in " + d.key_hint : "") + "; type to replace" : "not set";
+  $("mapcert").value = "";
+  $("mapcert").placeholder = d.cert_set ? "saved; paste to replace" : "-----BEGIN CERTIFICATE-----";
+  $("mapcertinfo").textContent = d.cert_set ? "Saved certificate SHA-256: " + d.cert_fingerprint : "No certificate saved.";
+  return d;
+}
+
+$("mapsave").onclick = function () {
+  act(async function () {
+    var d = await api("/api/map", "POST", { host: $("maphost").value, key: $("mapkey").value, cert: $("mapcert").value });
+    await loadMapSettings();
+    if (!d.coverage_ok) throw new Error("Saved, but the map server check failed: " + d.coverage_error);
+    $("mapcertinfo").textContent += " Map server OK.";
+    await poll();
+  });
+};
+
 function line(dl, label, value) {
   if (!value) return;
   dl.appendChild(el("dt", "", label));
@@ -211,6 +382,7 @@ function render(s) {
     line(dl, "To", "No destination");
   }
   box.appendChild(dl);
+  renderMap(s);
   if (!s.reading) box.appendChild(el("div", "note", "Car data is not available."));
   if (s.destination) {
     var stop = el("button", "stop", "Stop navigation");
@@ -233,6 +405,7 @@ async function start() {
   await poll();  // a 401 here means there is no valid token, so there is nothing else to load
   if (!paired) return;
   act(loadPlaces);
+  act(loadMapSettings);
   act(async function () {
     var p = await api("/api/pairing");
     $("endpoint").textContent = p.endpoint;
