@@ -282,9 +282,9 @@ def oncoming_offsets(rows, road) -> list:
 
 def wrong_side(rows, road) -> tuple[float | None, list[dict]]:
   """m driven in an oncoming lane (WRONG_SIDE_PAST_M past the divider, outside the junction boxes), and each stretch of
-  it; None without positions (a recorded drive) or without a road model."""
-  if road is None or not any(r.get('x') is not None for r in rows):
-    return None, []
+  it; None without positions (a recorded drive) or without a road model (or one with no roads in it)."""
+  if road is None or not road.get('links') or not any(r.get('x') is not None for r in rows):
+    return None, []  # with positions, check() fails the run for it: an empty road model checks nothing
   past = oncoming_offsets(rows, road)
   total, spans, cur = 0., [], None
   for i, r in enumerate(rows):

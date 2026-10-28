@@ -283,6 +283,8 @@ class TestOncomingLane:
     res = score.summarize('lane_change', self.lane_run(-1.75), 'arrived')
     assert res['wrong_side_m'] is None
     assert "no road model: the oncoming lane was not checked" in res['failures']
+    res = score.summarize('lane_change', self.lane_run(-1.75), 'arrived', road={'links': [], 'junctions': []})
+    assert res['wrong_side_m'] is None and "no road model: the oncoming lane was not checked" in res['failures']
 
   def test_a_recorded_drive_without_positions_is_not_judged(self):
     res = score.summarize('route_demo', drive([(2.0, {})]), 'arrived')
