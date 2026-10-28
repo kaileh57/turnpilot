@@ -884,7 +884,8 @@ def test_fault_keeps_a_junction_hold():
     released = sim.step(car(sim) if mode == 'every frame' else (), available=mode == 'every frame', gas=True)
     assert not released.shouldStop and released.accelCap == NO_ACCEL_CAP, mode
     # the turn cap at most; handed back (the gap outlasted the detector's deadline), no faster than the driver takes it
-    assert released.speedCap > 2. or released.handback != Handback.none, mode
+    # (a committed turn faulting, or handed back: held to the speed the driver's gas takes it to)
+    assert released.speedCap > 2. or released.speedCap >= sim.v - 1e-3, mode
 
 
 def test_detector_not_loaded_while_engaged_isnt_a_detector_that_never_started():
@@ -927,3 +928,40 @@ def test_handback_never_speeds_the_car_up():
   assert all(b[1] <= a[1] + 1e-6 for a, b in zip(held, held[1:], strict=False))
   assert sim.step(lat_active=False).speedCap == NO_SPEED_CAP
   assert sim.step().speedCap == NO_SPEED_CAP  # engaged again later (on the small model): no hold left over
+
+
+def test_fault_keeps_the_commitment_to_the_turn_under_way():
+  # past the hold line committed to a left (or released into it by the gas), one frame faults and navd brings the same
+  # left back under a new id. Slow in the junction with an oncoming car in range, the car is never held there again
+  def oncoming(sim):
+    return ({'cls': 'car', 'x': 306. - sim.s, 'y': 5., 'vx': -1.5},)
+  for how in ('committed', 'released'):
+    sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
+    if how == 'committed':
+      while sim.tp.scene.committed_id is None:
+        sim.step()
+        assert sim.s < 300.
+    else:
+      while not (sim.v < 0.05 and sim.s > 250.):
+        sim.step(oncoming(sim))
+        assert sim.t < 120.
+      sim.cruise = 1.
+      sim.step(oncoming(sim), gas=True)
+      assert sim.tp.scene.released_id is not None
+      while sim.s < 300. - HOLD_LINE_M + 1.:
+        sim.step(oncoming(sim))
+    for _ in range(14):  # 20 degrees round the corner
+      sim.step(oncoming(sim), yaw_rate=0.5)
+    pulses, turn = sim.tp.desires.pulses, sim.tp.follower.maneuver_id
+    sim.tp.update = mock.Mock(side_effect=RuntimeError("synthetic failure"))
+    assert sim.step(oncoming(sim)).fault == Fault.error
+    del sim.tp.update
+    sim.cruise = sim.v = 1.
+    start = len(sim.trace)
+    while sim.s < 305.:
+      sim.step(oncoming(sim), yaw_rate=0.05)
+    after = [p for _, _, p in sim.trace[start:]]
+    assert not any(p.shouldStop or p.reason == "waiting for oncoming" for p in after), how
+    # nor is the turn under way dropped: not skipped, its cap kept, its desire not pulsed afresh
+    assert not any(p.tooFastToTurn for p in after) and all(p.speedCap < 5. for p in after), how
+    assert sim.tp.desires.pulses == pulses and sim.tp.follower.maneuver_id == turn, how

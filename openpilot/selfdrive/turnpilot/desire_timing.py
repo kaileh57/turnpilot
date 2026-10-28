@@ -120,6 +120,11 @@ class DesireTiming:
     if self._abandoned and not self.started:
       self.done = self._abandoned = False
 
+  def hold_off(self):
+    """The desire was dropped for a frame (turnpilotd faulted): as while openpilot wasn't steering, it pulses again only
+    if the car hasn't turned TURN_STARTED_DEG."""
+    self.active, self._held, self._gap = False, True, 0
+
   def cancel(self):
     """A turn skipped with its desire out but not yet turned on (turnpilotd: a dropped turn too close to pulse again):
     its desire comes out of the model's queue now, and nothing more goes for it."""

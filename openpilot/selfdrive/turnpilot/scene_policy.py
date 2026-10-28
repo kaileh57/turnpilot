@@ -26,7 +26,8 @@ later in the junction never brings its junction hold back (pedestrians in the pa
 those and the rest of what one frame can't know; scene_policy() is one frame on its own.
 A turnpilotd fault (fault()) loses the route, and with it the maneuver a junction hold is for: the hold in force then
 stays where it was, dead-reckoned like a carried pedestrian stop, until a live scene judges the junction again with the
-route back, the car is committed past it, or a gas press releases it.
+route back, the car is committed past it, or a gas press releases it. A junction the car was committed to or released
+into stays so when the route is back under a new id, the car at it.
 
 Objects are TurnpilotScene.TrackedObject (or anything with the same fields): x m forward, y m LEFT in the
 calibrated frame, vx/vy over-ground velocity in that frame (ego motion removed), cls compared by name, inPath
@@ -278,11 +279,15 @@ class ScenePolicy:
     self.carried_junction: tuple[int | None, str] | None = None  # (maneuver id, reason) of its junction hold
     self.junction: Stop | None = None    # the junction hold in force on the last frame
     self.fault_junction: Stop | None = None  # ...kept through a fault, which lost the route it was for
+    self.fault_open = False  # a fault lost the route with the car committed to (or released into) its junction
 
-  def fault(self) -> None:
-    """turnpilotd faulted and dropped the route: the junction hold in force stays where it was (module docstring)."""
+  def fault(self, maneuver_id: int | None = None) -> None:
+    """turnpilotd faulted and dropped the route (maneuver_id: its maneuver): the junction hold in force stays where it
+    was, and a junction the car was committed to or released into stays open when the route is back under a new id
+    (module docstring)."""
     if self.junction is not None:
       self.fault_junction, self.junction = self.junction, None
+    self.fault_open = self.fault_open or (maneuver_id is not None and maneuver_id in (self.released_id, self.committed_id))
 
   def _fault_hold(self, available: bool, maneuver, distance: float, v_ego: float, gas_pressed: bool, dt: float) -> list[Stop]:
     h = self.fault_junction
@@ -326,6 +331,10 @@ class ScenePolicy:
     if maneuver_id is not None and maneuver is not None and maneuver.kind == TURN and distance < HOLD_LINE_M and \
        v_ego > COMMIT_SPEED:
       self.committed_id = maneuver_id  # never stopped in the junction for it again, however slow the car gets in there
+    if self.fault_open and maneuver_id is not None and maneuver is not None and maneuver.kind == TURN:
+      self.fault_open = False
+      if distance < HOLD_LINE_M + GAS_RELEASE_M:  # the same junction, the car at it
+        self.committed_id = maneuver_id
     if maneuver_id is not None and maneuver_id in (self.released_id, self.committed_id):
       junction = []
     self.junction = junction[0] if junction else None

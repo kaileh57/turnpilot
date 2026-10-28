@@ -35,7 +35,9 @@ was slowing for going away with the maneuver or the route: from the handback unt
 disable's end) the speed cap holds the car at no more than its speed then, and at no more than it has slowed to since
 (hold_v), or than the driver's gas has taken it to.
 A fault (plan()) is a disabled plan; it carries the handback, so a fault never hides one, and the detector's deadlines
-and the scene's stops in force run on through it (only turning TurnPilot off resets them): a faulted plan carries the
+and the scene's stops in force run on through it (only turning TurnPilot off resets them). So does a committed turn:
+its route and desire state are kept (its desire, dropped by the disabled plan, pulses again only as on re-engaging), and
+the car is held to its speed while faulted (hold_v), as on a handback. A faulted plan carries the
 scene's limits (live pedestrians, or those carried through a detector gap, and the junction hold in force where it
 was; scene_policy.py), which plannerd acts on (hooks.limits_plan), so a turnpilotd failing every frame still never
 drives the car on through a pedestrian. Its desire and lane change are never acted on.
@@ -128,28 +130,32 @@ class TurnPilot:
     self.limits = (NO_ACCEL_CAP, NO_SPEED_CAP, False)  # the last plan's (accelCap, speedCap, shouldStop)
     self.reset()
 
-  def reset(self, detector: bool = True):
+  def reset(self, detector: bool = True, keep_turn: bool = False):
     """Back to TurnPilot just turned on. detector False (a fault) keeps what the detector and the scene have shown: the
-    detector's deadlines and the scene's stops in force run on through a fault."""
+    detector's deadlines and the scene's stops in force run on through a fault. keep_turn (a fault with a turn committed)
+    keeps the route, the turn and its desire state: a committed turn is never dropped, nor pulsed afresh in the turn."""
     if detector:
       self.scene = ScenePolicy()
       self.detector_seen = False   # fresh detections since TurnPilot was turned on
       self.stale_s = 0.            # how long the scene has been unavailable
       self.waited_s = 0.           # how long modeld has run since TurnPilot was turned on, before the first detection
       self.disengaged_s = 0.       # ...of it with openpilot disengaged
-    # maneuver ids never repeat: the scene kept through a fault holds ids (its commitment, a gas release, a carried hold)
-    self.follower = RouteFollower(self.follower.maneuver_id + 1 if hasattr(self, 'follower') else 0)
-    self.desires = DesireTiming()
+    if not keep_turn:
+      # maneuver ids never repeat: the scene kept through a fault holds ids (its commitment, a gas release, a carried hold)
+      self.follower = RouteFollower(self.follower.maneuver_id + 1 if hasattr(self, 'follower') else 0)
+      self.desires = DesireTiming()
+      self.skip = TurnSkip()
+      self.dropped_id: int | None = None  # the maneuver in hand at a handback: not taken up again
+      self.turn_cap_id: int | None = None  # ...whose turn speed cap stays, its desire having gone out
+      self.turn_held_id: int | None = None  # ...whose turn desire was out: held to its clear, never cancelled
+      self.skip_cap_id: int | None = None  # a dropped turn skipped on taking it up: its cap stays until it is passed
+    else:
+      self.desires.hold_off()  # the disabled plan dropped the desire: as on re-engaging, a fresh pulse only before the turn
     self.lanes = LanePlanner()
     self.paint_rule_lanes = LanePlanner(paint_rule=True)  # what the lane planner would ask for, while it's turned off
-    self.skip = TurnSkip()
     self.mismatch = LaneMismatch.none
     self._mismatch_candidate, self._mismatch_frames = LaneMismatch.none, 0
     self.acting = False
-    self.dropped_id: int | None = None  # the maneuver in hand at a handback: not taken up again
-    self.turn_cap_id: int | None = None  # ...whose turn speed cap stays, its desire having gone out
-    self.turn_held_id: int | None = None  # ...whose turn desire was out: held to its clear, never cancelled
-    self.skip_cap_id: int | None = None  # a dropped turn skipped on taking it up: its cap stays until it is passed
     self.last_desire = Desire.none
 
   @property
@@ -218,9 +224,10 @@ class TurnPilot:
       self.stop_abort, self._stop_abort_t = reason, ABORT_HOLD_S
     if reason == 'turnedOff':
       self.hold_v = None
+    keep_turn = reason == 'fault' and self.turn_committed
     if reason == 'fault':
-      self.scene.fault()
-    self.reset(detector=reason == 'turnedOff')
+      self.scene.fault(self.follower.maneuver_id)
+    self.reset(detector=reason == 'turnedOff', keep_turn=keep_turn)
 
   def fill_stop_abort(self, plan) -> None:
     if self._stop_abort_t > 0.:
@@ -409,6 +416,12 @@ class TurnPilot:
     except Exception:
       log_error("turnpilotd.plan_failed")
       self.stop('fault')
+      if self.turn_committed and self.hold_v is None:
+        try:  # the turn's cap is gone with the plan: the car is held to its speed (module docstring), not sped up in the turn
+          if sm['carControl'].latActive:
+            self.hold_v = max(sm['carState'].vEgo, 0.)
+        except Exception:
+          log_error("turnpilotd.fault_hold_failed")
       # the detector's deadlines run on: a turnpilotd failing every frame still hands back a stopped detector
       try:
         handback = self.handback(scene.available, sm.updated['modelV2'], sm['carControl'].enabled)
@@ -425,10 +438,13 @@ class TurnPilot:
     made this frame before it failed, if it got that far; the last plan's if the scene fails too."""
     try:
       decision = self.scene_now
+      cs = sm['carState']
       if decision is None:
-        cs = sm['carState']
         decision = self.scene.update(list(scene.objects) if scene.available else [], scene.available, None, float('inf'),
                                      max(cs.vEgo, 0.), gas_pressed=cs.gasPressed)
+      if self.hold_v is not None:
+        self.hold_v = None if not sm['carControl'].latActive else \
+          max(cs.vEgo, 0.) if cs.gasPressed else min(self.hold_v, max(cs.vEgo, 0.))
       speed_cap = decision.speed_cap if self.hold_v is None else min(decision.speed_cap, self.hold_v)
       self.limits = (decision.accel_cap, speed_cap, decision.should_stop)
     except Exception:

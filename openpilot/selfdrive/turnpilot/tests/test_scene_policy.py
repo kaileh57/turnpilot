@@ -381,3 +381,15 @@ def test_crosswalk_hold_needs_a_walker_steadily_leaving():
     walker(sp, k, 10., -9., 0.)
   holds = [walker(sp, warm_up + k, 10., -9., -1.3).holding for k in range(2 * CROSSWALK_LEAVING_FRAMES)]
   assert all(holds[:CROSSWALK_LEAVING_FRAMES - 1]) and not any(holds[CROSSWALK_LEAVING_FRAMES:])
+
+
+def test_fault_keeps_a_junction_open():
+  # committed to a left (id 5) when turnpilotd faults: the route comes back with the same left under a new id (7), the
+  # car slow at it with an oncoming car in range. It isn't held in the junction. The next junction, further on, is
+  for distance, held in ((2., False), (20., True)):
+    sp = ScenePolicy()
+    sp.committed_id = 5
+    sp.fault(5)
+    sp.update([], True, None, float('inf'), 1.)  # the faulted frame: no route
+    d = sp.update(scene([car(distance + 4., 5., vx=-1.5)]).objects, True, LEFT_TURN, distance, 1., maneuver_id=7)
+    assert (d.reason == "waiting for oncoming") == held, distance
