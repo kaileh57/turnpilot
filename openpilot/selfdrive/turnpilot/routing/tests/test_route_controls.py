@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from openpilot.selfdrive.turnpilot.routing.controls import (CONTROL_LINE_M, MAP_MARGIN_M, MARKER, SIDECAR, actor_call, http_call,
-                                                            route_controls)
+from openpilot.selfdrive.turnpilot.routing.controls import (CONTROL_LINE_M, MAP_MARGIN_M, MARKER, SIDECAR, actor_call, controls_ahead,
+                                                            haversine, http_call, route_controls)
 
 M_PER_DEG = 111195.
 LAT0, LON0 = 39.77, -86.16
@@ -60,6 +60,62 @@ class StubValhalla:
       else:
         out.append({'edges': [{'edge_id': {'value': hit[0]['id']}, 'edge': {'stop_sign': hit[1], 'yield_sign': hit[2]}}]})
     return out
+
+
+class StubRoad(StubValhalla):
+  """StubValhalla, and locate by heading (controls_ahead) on its road due north: road edges [(begin m, end m)]. At a
+  point inside an edge, that edge; at a node (radius 1), the edge ending there and the one starting there."""
+  def __init__(self, edges, road, **kw):
+    super().__init__(edges, **kw)
+    self.road = road
+
+  def __call__(self, endpoint, req):
+    if endpoint != 'locate' or 'heading' not in req['locations'][0]:
+      return super().__call__(endpoint, req)
+    self.requests.append((endpoint, req))
+    loc = req['locations'][0]
+    if abs(loc['heading'] % 360) > 45 and abs(loc['heading'] % 360) < 315:
+      return [{'edges': []}]  # nothing heads that way
+    m = (loc['lat'] - LAT0) * M_PER_DEG
+    out = []
+    for b, e in self.road:
+      shape = [{'lat': pt(x)[0], 'lon': pt(x)[1]} for x in (b, (b + e) / 2, e)]
+      if loc['radius'] == 1 and (abs(m - b) < 0.5 or abs(m - e) < 0.5):
+        out.append({'edge_info': {'shape': shape}, 'edge': {'forward': True}, 'percent_along': 0. if abs(m - b) < 0.5 else 1.,
+                    'distance': 0., 'heading': 0.})
+      elif loc['radius'] > 1 and b <= m < e:
+        out.append({'edge_info': {'shape': shape}, 'edge': {'forward': True}, 'percent_along': (m - b) / (e - b), 'distance': 2.,
+                    'heading': 0.})
+    return [{'edges': out}]
+
+
+def test_controls_ahead_follow_the_road_from_the_car_edge_after_edge():
+  """Off the route (navd: offRouteControls): the road the car is on, from where it is, by its heading, then on from each
+  node by the edge carrying on, walked like a route. Its end isn't a destination: a control there counts."""
+  v = StubRoad([(0., 100., {'stop': True}), (100., 250., {'node_signal': True}), (250., 400., {'stop': True})],
+               road=[(0., 100.), (100., 250.), (250., 400.)])
+  controls, status, road = controls_ahead(v, pt(0.), 3.)
+  assert status == 'ok'
+  assert [(c.kind, round(c.route_m, 1)) for c in controls] == \
+    [('stop', 100. - CONTROL_LINE_M - MAP_MARGIN_M), ('signal', 250. - CONTROL_LINE_M - MAP_MARGIN_M),
+     ('stop', 400. - CONTROL_LINE_M - MAP_MARGIN_M)]
+  assert abs(haversine(road[0], road[-1]) - 400.) < 0.5
+  assert all(abs(haversine(c.point, pt(c.route_m))) < 0.5 for c in controls)
+  heads = [r['locations'][0] for e, r in v.requests if e == 'locate' and 'heading' in r['locations'][0]]
+  assert heads[0]['radius'] > 1 and all(h['radius'] == 1 for h in heads[1:]) and len(heads) == 3
+
+
+def test_controls_ahead_unknown_is_failed_never_none():
+  v = StubRoad([(0., 400., {'node_signal': True})], road=[(0., 400.)])
+  assert controls_ahead(v, pt(0.), 180.)[:2] == ([], 'failed')  # no road heading that way
+  assert controls_ahead(v, pt(0.), float('nan'))[:2] == ([], 'failed')  # no heading
+  assert controls_ahead(lambda *_: 1 / 0, pt(0.), 0.)[:2] == ([], 'failed')
+
+
+def test_controls_ahead_unsupported_without_the_marker(tmp_path):
+  v = StubRoad([(0., 400., {'node_signal': True})], road=[(0., 400.)])
+  assert controls_ahead(v, pt(0.), 0., tmp_path)[:2] == ([], 'unsupported')
+  assert controls_ahead(v, pt(0.), 0., marked(tmp_path))[1] == 'ok'
 
 
 def marked(tmp_path, sidecar=None):
@@ -211,3 +267,17 @@ def through(sim_map, instance):
 def test_sim_controls_only_on_their_approach(sim_map, instance, along):
   got = through(sim_map, instance)
   assert (instance in got['along']) == along and (instance in got['against']) == (not along), got
+
+
+@pytest.mark.skipif(not HAVE_TILES, reason="no west_coast_usa_signals tiles (tools/turnpilot/build_sim_tiles.sh)")
+def test_sim_controls_ahead_of_the_car_off_the_route(sim_map):
+  """BeamNG route_demo, 2026-10-28: rerouting at (-332, 495) heading southwest, the car drove through the signal at
+  (-382, 445). The lookup ahead of the car finds it on its mapped line; heading the other way, it isn't ahead."""
+  src = sim_map[0]
+  controls, status, _ = src.controls_ahead((39.7728582, -86.1619751), 225., tiles_dir=src.tiles_dir)
+  assert status == 'ok'
+  first = controls[0]
+  assert (first.kind, first.line_mapped) == ('signal', True) and 60. < first.route_m < 75., controls
+  assert haversine(first.point, (39.7724078, -86.1625586)) < 6.
+  controls, status, _ = src.controls_ahead((39.7724078, -86.1625586), 45., tiles_dir=src.tiles_dir)
+  assert status == 'ok' and all(c.kind != 'signal' or c.route_m > 200. for c in controls), controls

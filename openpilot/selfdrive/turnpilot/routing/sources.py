@@ -92,6 +92,17 @@ class MapRouter:
       return [], 'failed'
     return served[1].controls(steps, tiles_dir=served[2])
 
+  def controls_ahead(self, position, bearing) -> tuple[list, str, list]:
+    """(controls, status, road) on the road ahead of the car off the route (routing/controls.py: controls_ahead), from the source
+    that routed the last route, or the local tiles. position: navd's (longitude, latitude); bearing: deg. ([], 'failed')
+    with neither: nothing is known about the map here, said so."""
+    source = self.served[1:] if self.served is not None else \
+      (self.local[1], getattr(self.local[1], 'tiles_dir', None)) if self.local is not None else None
+    if source is None:
+      cloudlog.warning("turnpilot: controls ahead asked for with no map source yet")
+      return [], 'failed', []
+    return source[0].controls_ahead((position[1], position[0]), bearing, tiles_dir=source[1])
+
   def clear(self):
     """No destination."""
     self.failure = None

@@ -13,6 +13,12 @@ The stop line: a sim sidecar (tiles_dir/controls.json, {"controls": {"<way_id>:<
 tools/sim/bridge/beamng/mapsignals.py) gives it for its controls, projected onto the route within the edge (lineMapped);
 otherwise it is the edge's end less CONTROL_LINE_M. Either way less MAP_MARGIN_M. Controls within MERGE_M merge, the
 signal over the stop over the yield.
+Off the route (controls_ahead): the same, over the road ahead of the car instead of a route's shape. Locate (verbose, by
+the car's heading) gives the edge the car is on and its shape from the car on; from its end node, the edge that carries on
+nearest the bearing it arrives with (within NEXT_HEADING_TOL: the road straight on), and so on to AHEAD_M or AHEAD_EDGES.
+That road is walked as a one-step route. A control at its end counts (the route's end is a destination; this road's isn't).
+Past a junction the car may turn off it: navd looks again every second, and turnpilotd drops what a lookup no longer lists
+(map_controls.py).
 Status: ok; walkOrSnap (edge_walk failed, walk_or_snap matched it, logged); partial (more than PARTIAL_UNMATCHED of the
 edges unmatched by locate); failed (nothing: both matches failed, or any exception); unsupported (tiles_dir given and it
 has no controls_built marker: tiles built from data with no controls, the old sim exports). The route publishes whatever
@@ -37,6 +43,12 @@ KIND_RANK = {'signal': 0, 'stop': 1, 'yield': 2}
 ROAD_CLASS_RANK = {'motorway': 0, 'trunk': 1, 'primary': 2, 'secondary': 3, 'tertiary': 4, 'unclassified': 5, 'residential': 6,
                    'service_other': 7}
 HTTP_TIMEOUT_S = 5.
+AHEAD_M = 250.          # m of road ahead of the car an off-route lookup follows (engage_distance at 25 m/s is 248 m)
+AHEAD_EDGES = 8         # edges at most
+AHEAD_HEADING_TOL = 45  # deg: the car's edge, by the car's heading
+NEXT_HEADING_TOL = 60   # deg: the edge carrying on from a node, by the bearing the road arrives with
+AHEAD_RADIUS_M = 25     # m from the car's position its edge is looked for
+NODE_GAP_M = 3.         # m: a next edge starting further than this from the last one's end isn't its continuation
 EARTH_R = 6371000.
 
 ATTRIBUTES = ['edge.id', 'edge.way_id', 'edge.forward', 'edge.length', 'edge.begin_shape_index', 'edge.end_shape_index',
@@ -55,6 +67,7 @@ class Control:
   junction: bool = True
   cross_suspect: bool = False
   instance: str = ''   # the sim's signal instance its line came from (the sidecar), for logs and tests
+  point: tuple[float, float] | None = None  # (lat, lon) of the stop point: controls_ahead's, which navd measures from
 
 
 def decode6(s: str) -> list[tuple[float, float]]:
@@ -121,6 +134,21 @@ def project(pts, cum, p, lo_m: float, hi_m: float) -> float | None:
     if best is None or d < best[0]:
       best = (d, cum[j] + t * (cum[j + 1] - cum[j]))
   return None if best is None else best[1]
+
+
+def point_at(pts, cum, s: float):
+  """The point s m along pts."""
+  return point_back(pts, cum, len(pts) - 1, cum[-1] - min(max(s, 0.), cum[-1]))
+
+
+def bearing(a, b) -> float:
+  """deg clockwise from north, from (lat, lon) a to b."""
+  x = math.radians(b[1] - a[1]) * math.cos(math.radians((a[0] + b[0]) / 2))
+  return math.degrees(math.atan2(x, math.radians(b[0] - a[0]))) % 360.
+
+
+def angle_diff(a: float, b: float) -> float:
+  return abs((a - b + 180.) % 360. - 180.)
 
 
 def route_shape(steps) -> list[tuple[float, float]]:
@@ -222,7 +250,79 @@ def route_controls(call, steps, tiles_dir=None) -> tuple[list[Control], str]:
     return [], 'failed'
 
 
-def _route_controls(call, steps, tiles_dir) -> tuple[list[Control], str]:
+def _edge_from(call, p, heading: float, tol: float, radius: float, starting: bool):
+  """(locate's candidate, its shape [(lat, lon)] in its own direction) for the edge at p heading that way, or None.
+  starting: only an edge that starts at p (a node), not one that ends there."""
+  resp = call('locate', {'locations': [{'lat': p[0], 'lon': p[1], 'heading': round(heading) % 360, 'heading_tolerance': tol,
+                                        'radius': radius}], 'costing': 'auto', 'verbose': True})
+  cands = [c for c in ((resp or [None])[0] or {}).get('edges') or [] if (c.get('edge_info') or {}).get('shape')]
+  if starting:
+    cands = [c for c in cands if c.get('percent_along', 1.) < 0.5]
+  if not cands:
+    return None
+  near = min(c.get('distance', 0.) for c in cands)
+  # at a node, the edge leaving it rather than the one ending there; then the nearest the heading
+  c = min((c for c in cands if c.get('distance', 0.) < near + 2.),
+          key=lambda c: (c.get('percent_along', 0.) > 0.999, angle_diff(c.get('heading', heading), heading)))
+  shape = c['edge_info']['shape']
+  pts = decode6(shape) if isinstance(shape, str) else [(q['lat'], q['lon']) for q in shape]
+  if not (c.get('edge') or {}).get('forward', True):
+    pts = pts[::-1]  # edge_info's shape runs the way's own direction
+  return c, pts
+
+
+def road_ahead(call, position, heading: float) -> list[tuple[float, float]]:
+  """The road ahead of the car at position (lat, lon) heading that way, [(lat, lon), ...] from where it is on its edge, edge
+  after edge (module docstring); [] when no edge there goes that way."""
+  first = _edge_from(call, position, heading, AHEAD_HEADING_TOL, AHEAD_RADIUS_M, False)
+  if first is None:
+    return []
+  c, pts = first
+  cum = cumulative(pts)
+  s0 = min(max(float(c.get('percent_along', 0.)), 0.), 1.) * cum[-1]
+  shape = [point_at(pts, cum, s0)] + [q for q, m in zip(pts, cum, strict=True) if m > s0 + 0.5]
+  total = cumulative(shape)[-1]
+  for _ in range(AHEAD_EDGES - 1):
+    if total >= AHEAD_M:
+      break
+    # the bearing the road arrives with; the car's own at the very end of its edge
+    arrive = bearing(shape[-2], shape[-1]) if len(shape) >= 2 else heading
+    nxt = _edge_from(call, shape[-1], arrive, NEXT_HEADING_TOL, 1, True)
+    if nxt is None or len(nxt[1]) < 2 or haversine(nxt[1][0], shape[-1]) > NODE_GAP_M:
+      break
+    shape += nxt[1][1:]
+    total = cumulative(shape)[-1]
+  return shape if len(shape) >= 2 else []
+
+
+def controls_ahead(call, position, heading: float, tiles_dir=None) -> tuple[list[Control], str, list]:
+  """(controls on the road ahead of the car, nearest first, status, the road [(lat, lon), ...]), off the route (module
+  docstring). position: (lat, lon); heading: deg; the controls' route_m are m along the road from where the car was on it,
+  their point (lat, lon) set. Statuses as route_controls'; failed also when no road there goes the car's way, or the
+  heading is unknown."""
+  try:
+    if tiles_dir is not None and not (Path(tiles_dir) / MARKER).exists():
+      return [], 'unsupported', []
+    if heading is None or not math.isfinite(heading):
+      cloudlog.warning("turnpilot controls ahead: no heading")
+      return [], 'failed', []
+    shape = road_ahead(call, position, heading)
+    if len(shape) < 2:
+      cloudlog.warning(f"turnpilot controls ahead: no road heading {heading:.0f} at {position}")
+      return [], 'failed', []
+    cum = cumulative(shape)
+    steps = [{'geometry': {'coordinates': [[lo, la] for la, lo in shape]}, 'distance': cum[-1]}]
+    controls, status = _route_controls(call, steps, tiles_dir, ahead=True)
+    for c in controls:
+      c.point = point_at(shape, cum, c.route_m)
+    return controls, status, shape
+  except Exception:
+    cloudlog.exception("turnpilot controls ahead: failed")
+    return [], 'failed', []
+
+
+def _route_controls(call, steps, tiles_dir, ahead: bool = False) -> tuple[list[Control], str]:
+  """ahead: the road ahead of the car (controls_ahead), not a route: its end is no destination."""
   pts = route_shape(steps)
   if len(pts) < 2:
     return [], 'failed'
@@ -260,7 +360,7 @@ def _route_controls(call, steps, tiles_dir) -> tuple[list[Control], str]:
     expect = tcum[end_i] * scale
     end_m = project(pts, cum, tpts[end_i], expect - 30., expect + 30.)
     end_m = expect if end_m is None else end_m
-    if end_m > cum[-1] - END_OF_ROUTE_M:
+    if end_m > cum[-1] - END_OF_ROUTE_M and not ahead:
       continue  # the route ends on this edge (a destination mid-edge snaps onto either direction): no junction ahead
     crossing = [ROAD_CLASS_RANK.get(x.get('road_class'), 8) for x in node.get('intersecting_edges') or []]
     junction = bool(crossing)

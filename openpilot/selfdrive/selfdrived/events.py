@@ -299,7 +299,7 @@ CONTROL_PROMPT_TITLE = {'stopSignGo': "Stop Sign", 'signalGo': "Signal Ahead", '
 CONTROL_ALERT_TITLE = {'cannotStopComfortably': "Take Control", 'stopOverrun': "Stop Line Passed",
                        'proceedingOnYellow': "Proceeding on Yellow", 'goingOnRed': "Going on Red",
                        'mapControlsUnavailable': "Map Stops Unavailable", 'lightSourceRejected': "Light Source Rejected",
-                       'junctionUncertain': "Junction Position Uncertain"}
+                       'junctionUncertain': "Junction Position Uncertain", 'offRouteStopsUnknown': "Off Route"}
 TURNPILOT_CONTROL_ALERT_S = 3.  # an overrun, a yellow or a red go is held up this long
 
 
@@ -326,6 +326,9 @@ def turnpilot_control_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.S
   if kind == 'cannotStopComfortably':
     return Alert(CONTROL_ALERT_TITLE[kind], CONTROL_ALERT_TEXT[kind], AlertStatus.critical, AlertSize.mid, Priority.MID,
                  VisualAlert.steerRequired, AudibleAlert.tpHandback, .1)
+  if kind == 'offRouteStopsUnknown':  # while it lasts: the speed is capped, nothing ahead is known to stop for
+    return Alert(CONTROL_ALERT_TITLE[kind], CONTROL_ALERT_TEXT[kind], AlertStatus.userPrompt, AlertSize.mid, Priority.LOW,
+                 VisualAlert.steerRequired, AudibleAlert.prompt, .1)
   if kind in CONTROL_STATUS_ALERTS:
     return Alert(CONTROL_ALERT_TITLE[kind], plan.reason or CONTROL_ALERT_TEXT[kind], AlertStatus.normal, AlertSize.mid,
                  Priority.LOWER, VisualAlert.none, AudibleAlert.prompt, .2)

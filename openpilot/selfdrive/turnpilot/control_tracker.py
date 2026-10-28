@@ -13,6 +13,16 @@ doesn't list is carried under its old key until passed. A held control is never 
 the latch is the policy's, position-free.
 A gap in the route (an invalid navInstruction, or none for NAV_STALE_S) is dead-reckoned through, for GAP_MAX_M of
 travel; then every control but a held one is dropped, and listed in lost for the policy to say so.
+
+Off the route with a destination (navd rerouting, no route yet, off it for a fix), navd looks up the controls on the road
+ahead of the car itself once a second (navInstruction.offRouteControls, routing/controls.py: controls_ahead). Those are
+the controls then, under (OFF_ROUTE, id), each lookup a fix as above: the stale route's go once one is in, as they're
+nowhere the car is going (BeamNG route_demo, 2026-10-28: the old route's signal dead-reckoned 106 m out while the car drove
+through the one on its road). An engaged one of theirs is taken over by a lookup's same-kind control within ADOPT_M, a held
+one stays. One a lookup no longer lists goes, an engaged one after OFF_ROUTE_MISS lookups in a row (one is a GPS hiccup; two,
+the car turned off that road). A route again takes over the engaged off-route ones the same way.
+Off the route with a destination and nothing known ahead (off_route_unknown), past OFF_ROUTE_GRACE_S: the lookup pending,
+failed, unsupported or partial, or none fresh for OFF_LOOKUP_STALE_S (navd gone quiet). The policy caps the speed and says so.
 """
 from dataclasses import dataclass
 from typing import Any
@@ -26,6 +36,13 @@ JUMP_M = 20.          # a fix this far off re-initialises the distance
 ADOPT_M = 20.         # a new route's control this close to an engaged one of the same kind is that one
 DROP_PAST_M = 15.     # a control this far behind the car is passed
 GAP_MAX_M = 150.      # m dead-reckoned without navd before the controls are dropped
+OFF_ROUTE = -2        # the route key of navd's lookups ahead of the car off the route
+OFF_ROUTE_MISS = 2    # lookups in a row an engaged off-route control is missing from before it goes
+OFF_ROUTE_GRACE_S = 2.5  # s off the route before the stops ahead count as unknown: navd sends one invalid message between
+                         # two routes, and its first lookup comes within its next second
+OFF_LOOKUP_STALE_S = 3.  # s: an older lookup doesn't say what is ahead now
+LOOKUP_KNOWN = ('ok', 'walkOrSnap')  # lookup statuses that say what is ahead (partial may miss stop signs)
+LOOKUP_USED = LOOKUP_KNOWN + ('partial',)  # ...and those whose controls are used, as far as they go
 
 
 @dataclass
@@ -39,12 +56,24 @@ class TrackedControl:
   engaged: bool = False      # the policy is stopping (or deciding) for it: carried through a reroute
   held: bool = False         # the policy's latch holds the car at it: never dropped, its distance frozen
   jumped: bool = False       # re-initialised by a jump this frame
+  misses: int = 0            # off-route lookups in a row it was missing from
   state: Any = None          # the policy's own state for it
 
 
 def from_msg(route_count: int, c) -> TrackedControl:
   return TrackedControl((route_count, int(c.id)), str(c.kind), float(c.distance), bool(c.lineMapped), bool(c.junction),
                         bool(c.crossSuspect))
+
+
+def adopt(o: TrackedControl, candidates) -> bool:
+  """An engaged or held control o handed to the same-kind one of candidates (another route's, or a lookup's) within ADOPT_M
+  that has no state of its own: it is the same control. False when there is none."""
+  same = [n for n in candidates if n.kind == o.kind and n.state is None and not n.engaged and abs(n.d - o.d) < ADOPT_M]
+  if not same:
+    return False
+  n = min(same, key=lambda n: abs(n.d - o.d))
+  n.d, n.engaged, n.held, n.state = o.d, o.engaged, o.held, o.state
+  return True
 
 
 class ControlTracker:
@@ -57,6 +86,9 @@ class ControlTracker:
     self.stale_t = 0.
     self.gap_m = 0.          # m travelled in a gap
     self.lost: list[TrackedControl] = []  # dropped this frame by a gap too long
+    self.off_status = 'none'  # navInstruction.offRouteControlsStatus of the last invalid message; none after a valid one
+    self.gap_t = 0.          # s off the route (invalid or stale)
+    self.lookup_age = float('inf')  # s since the last lookup ahead that said something
 
   def update(self, nav, updated: bool, valid: bool, v_ego: float, dt: float) -> list[TrackedControl]:
     """nav: the latest navInstruction; updated: it arrived this frame; valid: its valid flag. The controls nearest first."""
@@ -66,15 +98,22 @@ class ControlTracker:
       c.jumped = False
       if not c.held:
         c.d -= v * dt
+    self.lookup_age += dt
     if updated and valid:
       self.stale_t, self.gap_m, self.route, self.invalid = 0., 0., True, False
+      self.off_status, self.gap_t = 'none', 0.
       self._fix(nav, v)
     else:
       self.stale_t = 0. if updated else self.stale_t + dt
       self.invalid = self.invalid or updated
+      if updated:
+        self.off_status = str(nav.offRouteControlsStatus)
+        if self.off_status in LOOKUP_USED:
+          self._off_fix(nav, v)
       gap = self.invalid or self.stale_t > NAV_STALE_S
       if gap:
         self.route = False
+        self.gap_t += dt
         self.gap_m += v * dt
         if self.gap_m > GAP_MAX_M:
           self.lost = [c for c in self.controls.values() if not c.held]
@@ -84,6 +123,43 @@ class ControlTracker:
     self.controls = {k: c for k, c in self.controls.items() if c.held or c.d >= -DROP_PAST_M}
     return sorted(self.controls.values(), key=lambda c: c.d)
 
+  @property
+  def off_route_unknown(self) -> bool:
+    """Off the route with a destination, past OFF_ROUTE_GRACE_S, and no fresh lookup that says what is ahead (module
+    docstring). Not with no destination (navd's off-route status none on its fresh invalid messages), nor before any route."""
+    if self.route or self.route_count is None or self.gap_t < OFF_ROUTE_GRACE_S:
+      return False
+    if self.off_status == 'none' and self.invalid and self.stale_t <= NAV_STALE_S:
+      return False  # no destination: navd is on no route, nor trying to be
+    return not (self.off_status in LOOKUP_KNOWN and self.lookup_age <= OFF_LOOKUP_STALE_S)
+
+  def _off_fix(self, nav, v: float) -> None:
+    """A lookup ahead of the car off the route (module docstring)."""
+    self.lookup_age, self.gap_m = 0., 0.
+    measured = {(OFF_ROUTE, int(c.id)): c for c in nav.offRouteControls}
+    new = {k: from_msg(OFF_ROUTE, c) for k, c in measured.items() if k not in self.controls}
+    for k, c in list(self.controls.items()):
+      if k[0] == OFF_ROUTE or c.held:
+        continue
+      # the stale route's: nowhere the car is going. One the car is stopping for goes on as the lookup's same one
+      del self.controls[k]
+      if c.engaged and not adopt(c, new.values()):
+        cloudlog.event("turnpilot.control_stale_dropped", kind=c.kind, key=list(c.key), d=round(c.d, 1))
+    for k, c in list(self.controls.items()):
+      if k[0] != OFF_ROUTE or k in measured:
+        continue
+      c.misses += 1
+      if not c.held and (not c.engaged or c.misses >= OFF_ROUTE_MISS):
+        if c.engaged:
+          cloudlog.event("turnpilot.control_off_route_dropped", kind=c.kind, key=list(c.key), d=round(c.d, 1))
+        del self.controls[k]
+    self.controls.update(new)
+    for key, c in measured.items():
+      t = self.controls[key]
+      t.misses = 0
+      if key not in new and not t.held:
+        self._correct(t, key, float(c.distance), v)
+
   def _fix(self, nav, v: float) -> None:
     route_count = int(nav.routeCount)
     self.status = str(nav.controlsStatus)
@@ -92,14 +168,7 @@ class ControlTracker:
       old, self.controls = self.controls, {k: from_msg(route_count, c) for k, c in measured.items()}
       self.route_count = route_count
       for o in old.values():
-        if not (o.engaged or o.held):
-          continue
-        same = [n for n in self.controls.values() if n.kind == o.kind and n.state is None and not n.engaged and
-                abs(n.d - o.d) < ADOPT_M]
-        if same:
-          n = min(same, key=lambda n: abs(n.d - o.d))
-          n.d, n.engaged, n.held, n.state = o.d, o.engaged, o.held, o.state
-        else:
+        if (o.engaged or o.held) and not adopt(o, self.controls.values()):
           self.controls[o.key] = o
       return
     for key, c in measured.items():
@@ -109,11 +178,20 @@ class ControlTracker:
         continue
       if t.held:
         continue
-      err = float(c.distance) - t.d
-      if abs(err) > JUMP_M:
-        cloudlog.event("turnpilot.control_jump", kind=t.kind, key=list(key), d=round(t.d, 1), measured=round(float(c.distance), 1))
-        t.d, t.jumped = float(c.distance), True
-      elif v >= FREEZE_SPEED:
-        t.d += min(max(err, -CORRECTION_M), CORRECTION_M)
+      self._correct(t, key, float(c.distance), v)
+    # back on the route: its own control takes over an engaged off-route one, the same control
+    for k, o in list(self.controls.items()):
+      if k[0] == OFF_ROUTE and (o.engaged or o.held) and adopt(o, [self.controls[m] for m in measured if m in self.controls]):
+        del self.controls[k]
     # out of navd's window (passed, beyond 400 m, past the 8 nearest): only the ones the car is stopping for stay
     self.controls = {k: c for k, c in self.controls.items() if k in measured or c.engaged or c.held}
+
+  @staticmethod
+  def _correct(t: TrackedControl, key, measured: float, v: float) -> None:
+    """A fix of a dead-reckoned distance: at most CORRECTION_M, none while slow, a jump re-initialises it."""
+    err = measured - t.d
+    if abs(err) > JUMP_M:
+      cloudlog.event("turnpilot.control_jump", kind=t.kind, key=list(key), d=round(t.d, 1), measured=round(measured, 1))
+      t.d, t.jumped = measured, True
+    elif v >= FREEZE_SPEED:
+      t.d += min(max(err, -CORRECTION_M), CORRECTION_M)

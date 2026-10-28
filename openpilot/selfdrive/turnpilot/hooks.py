@@ -51,7 +51,7 @@ def limits_plan(sm, now: float | None = None):
   return plan if plan.state != custom.TurnpilotPlan.State.disabled or plan.fault != custom.TurnpilotPlan.Fault.none else None
 
 
-CONTROL_ALERT_FIRST = ('cannotStopComfortably',)                          # above too fast to turn
+CONTROL_ALERT_FIRST = ('cannotStopComfortably', 'offRouteStopsUnknown')  # above too fast to turn
 CONTROL_ALERT_EVENTS = ('stopOverrun', 'proceedingOnYellow', 'goingOnRed', 'junctionUncertain')  # below the prompt, above a
                                                                                                 # lane change
 CONTROL_STATUS_ALERTS = ('mapControlsUnavailable', 'lightSourceRejected')  # last of all, a status line
@@ -69,7 +69,8 @@ def plan_events(sm, now: float | None = None) -> list[str]:
   TurnPilot's alerts share one slot, at most one of them a frame, by this priority:
   1. a handback (turnpilotDetectorStopped, turnpilotNoDetector, turnpilotModelFellBack; handback.py): nothing here while one is set;
   2. a fault (turnpilotUnavailable);
-  3. a map stop it can't make gently (turnpilotControlAlert, cannotStopComfortably: take control);
+  3. a map stop it can't make gently (turnpilotControlAlert, cannotStopComfortably: take control), or off the route with
+     the map stops ahead unknown (offRouteStopsUnknown: the speed capped, take control or wait for the reroute);
   4. too fast to turn (turnpilotTooFastToTurn);
   5. a map control's prompt to the driver (turnpilotControlPrompt: stop sign, signal or unprotected turn go, yield ahead);
   6. a map control's other alerts (turnpilotControlAlert: a stop line overrun, going on a yellow or a red, an unprotected
@@ -129,6 +130,7 @@ CONTROL_ALERT_TEXT = {
   'mapControlsUnavailable': 'Map stops and signals unavailable',
   'lightSourceRejected': 'Light source not accepted: lights unknown',
   'junctionUncertain': 'GPS unsure where the junction is: slow, may stop short of it',
+  'offRouteStopsUnknown': 'Map stops unknown: take control or wait for reroute',
 }
 
 

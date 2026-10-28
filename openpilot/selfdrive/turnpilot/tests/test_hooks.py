@@ -278,6 +278,9 @@ def test_plan_events_map_controls_by_priority():
   assert events(prompt='unprotectedTurnGo', alert='junctionUncertain') == ['turnpilotControlPrompt']
   assert events(alert='junctionUncertain', offer='left') == ['turnpilotControlAlert']
   assert events(prompt='yieldAhead') == ['turnpilotControlPrompt']
+  # off the route with the stops ahead unknown: over too fast to turn and every prompt, under a fault
+  assert events(too_fast=True, prompt='stopSignGo', alert='offRouteStopsUnknown', offer='left') == ['turnpilotControlAlert']
+  assert events(fault=Fault.error, alert='offRouteStopsUnknown') == ['turnpilotUnavailable']
   # shadow: nothing acts, nothing is said
   msg = messaging.new_message('turnpilotPlan')
   msg.turnpilotPlan.shadow, msg.turnpilotPlan.controlPrompt = True, 'stopSignGo'

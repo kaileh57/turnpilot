@@ -94,6 +94,8 @@ class StubRouter:
     self.status = MagicMock()
     self.gate: threading.Event | None = None
     self.positions = []  # what position() said once the "download" was done
+    self.ahead_result: tuple = ([], 'ok', [])  # what controls_ahead() gives (controls, status, road), or an exception it raises
+    self.ahead_calls: list = []  # (position, bearing, thread name) per call
 
   @property
   def call_count(self):
@@ -116,6 +118,12 @@ class StubRouter:
     if isinstance(self.controls_result, Exception):
       raise self.controls_result
     return self.controls_result
+
+  def controls_ahead(self, position, bearing):
+    self.ahead_calls.append((position, bearing, threading.current_thread().name))
+    if isinstance(self.ahead_result, Exception):
+      raise self.ahead_result
+    return self.ahead_result
 
   def clear(self):
     pass
@@ -395,6 +403,84 @@ class TestRouteEngine(unittest.TestCase):
     self.assertFalse(message.valid)
     self.assertEqual(len(message.navInstruction.controls), 0)
     self.assertEqual(str(message.navInstruction.controlsStatus), 'ok')
+
+  @staticmethod
+  def ahead(controls, status='ok', lat=0.001, lon0=0.0001):
+    """controls_ahead()'s answer for a road east from (lat, lon0): controls [(id, kind, m along)], their stop points on it."""
+    from openpilot.selfdrive.turnpilot.routing.controls import Control
+    road = [(lat, lon0), (lat, lon0 + 0.002)]
+    return [Control(i, kind, m, 0, m, point=(lat, lon0 + m / 111195.)) for i, kind, m in controls], status, road
+
+  def test_off_route_instruction_carries_the_controls_ahead_of_the_car(self):
+    """Off the route, the stop signs and signals on the road the car is on, looked up from where it is and its heading
+    (BeamNG route_demo, 2026-10-28: a signal driven through at speed while rerouting)."""
+    from openpilot.selfdrive.turnpilot.routing.controls import Control
+    self.engine.router.controls_result = ([Control(0, 'stop', 60., 0, 60.)], 'ok')
+    self.load_route()
+    self.engine.router.ahead_result = self.ahead([(0, 'signal', 80.), (1, 'stop', 300.)])
+    self.engine.last_position, self.engine.last_bearing = (0.0001, 0.001), 92.  # 111 m off the route, heading east
+    self.engine.send_instruction()
+    message = self.last_message('navInstruction')
+    self.assertFalse(message.valid)
+    ni = message.navInstruction
+    self.assertEqual(len(ni.controls), 0)  # the route's are nowhere the car is
+    self.assertEqual(str(ni.offRouteControlsStatus), 'ok')
+    self.assertEqual(self.engine.router.ahead_calls[-1][:2], ((0.0001, 0.001), 92.))
+    self.assertEqual([(str(c.kind), round(c.distance, 1)) for c in ni.offRouteControls], [('signal', 80.), ('stop', 300.)])
+    first = [c.id for c in ni.offRouteControls]
+    # 20 m on along that road: the next lookup finds them again from there, their ids kept
+    self.engine.last_position = (0.0001 + 20. / 111195., 0.001)
+    self.engine.router.ahead_result = self.ahead([(5, 'signal', 60.), (6, 'stop', 280.), (7, 'yield', 30.)],
+                                                  lon0=0.0001 + 20. / 111195.)
+    self.engine.send_instruction()
+    ni = self.last_message('navInstruction').navInstruction
+    by_kind = {str(c.kind): c for c in ni.offRouteControls}
+    self.assertEqual([by_kind['signal'].id, by_kind['stop'].id], first)
+    self.assertNotIn(by_kind['yield'].id, first)
+    self.assertAlmostEqual(by_kind['signal'].distance, 60., delta=0.1)
+    # back on the route: none of it
+    self.engine.last_position = (0.0004, 0)
+    self.engine.send_instruction()
+    message = self.last_message('navInstruction')
+    self.assertTrue(message.valid)
+    self.assertEqual((len(message.navInstruction.offRouteControls), str(message.navInstruction.offRouteControlsStatus)), (0, 'none'))
+
+  def test_off_route_controls_measured_from_the_car_between_lookups_and_pending_before_the_first(self):
+    self.load_route()
+    self.engine.background = True
+    self.engine.router.ahead_result = self.ahead([(0, 'signal', 80.)])
+    self.engine.last_position = (0.0001, 0.001)
+    self.engine.send_instruction()
+    ni = self.last_message('navInstruction').navInstruction
+    self.assertEqual((str(ni.offRouteControlsStatus), len(ni.offRouteControls)), ('pending', 0))
+    self.engine.ahead_job.join(5.)
+    self.assertEqual(self.engine.router.ahead_calls[-1][2], 'navd-ahead')  # off navd's loop
+    self.engine.router.ahead_result = RuntimeError("valhalla went away")
+    self.engine.last_position = (0.0001 + 10. / 111195., 0.001)  # 10 m on
+    self.engine.send_instruction()  # the first lookup's, measured from where the car is now; a second lookup starts
+    ni = self.last_message('navInstruction').navInstruction
+    self.assertEqual(str(ni.offRouteControlsStatus), 'ok')
+    self.assertAlmostEqual(ni.offRouteControls[0].distance, 70., delta=0.1)
+    self.engine.ahead_job.join(5.)
+    self.engine.send_instruction()
+    ni = self.last_message('navInstruction').navInstruction
+    self.assertEqual((str(ni.offRouteControlsStatus), len(ni.offRouteControls)), ('failed', 0))  # never "clear"
+
+  def test_rerouting_carries_the_controls_ahead_and_no_destination_none(self):
+    self.load_route()
+    self.engine.router.ahead_result = self.ahead([(0, 'stop', 40.)], lat=0., lon0=0.)  # the car's at (0, 0) heading east
+    self.engine.job = SimpleNamespace(destination=(0.002, 0), cancel=threading.Event(), is_alive=lambda: True)  # a reroute
+    self.engine.send_instruction()
+    ni = self.last_message('navInstruction').navInstruction
+    self.assertEqual((str(ni.offRouteControlsStatus), [str(c.kind) for c in ni.offRouteControls]), ('ok', ['stop']))
+    self.engine.job = None
+    self.engine.clear_route()
+    self.engine.requested_destination = None
+    calls = len(self.engine.router.ahead_calls)
+    self.engine.send_instruction()
+    ni = self.last_message('navInstruction').navInstruction
+    self.assertEqual((str(ni.offRouteControlsStatus), len(ni.offRouteControls)), ('none', 0))
+    self.assertEqual(len(self.engine.router.ahead_calls), calls)  # no destination: nothing looked up
 
   def test_banner_selection(self):
     banners = [{'distanceAlongGeometry': 100, 'primary': {'text': 'Turn right', 'type': 'turn', 'modifier': 'right'}},

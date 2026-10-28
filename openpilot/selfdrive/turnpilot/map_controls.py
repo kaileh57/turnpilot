@@ -53,6 +53,11 @@ The rules (Kellen, 2026-10-27; /private/tmp/claude-501/stop_design.md):
   as an overrun then (crossed blind), but moved up to where the car stops braking at that floor, no harder, said out
   loud (cannotStopComfortably), and held there for the driver's go like any other. After the go, scene_policy.py's oncoming and pedestrian
   holds may still stop the car: they only add holds.
+- Off the route with a destination, the controls are navd's lookup ahead of the car (control_tracker.py), under the same
+  rules. With nothing known ahead past the tracker's grace (off_route_unknown: the lookup pending, failed, unsupported,
+  partial, or stale), the car never drives on silently: a speed cap comes down from its speed at OFF_ROUTE_DECEL to
+  OFF_ROUTE_SPEED, and offRouteStopsUnknown says so ("Off route, map stops unknown"), for as long as it lasts. Never a stop:
+  nothing is known to stop for, and the driver is asked to take control or wait for the reroute.
 - navd's controlsStatus other than ok (navd always sets it; none is a navd from before controls) raises
   mapControlsUnavailable and keeps "Map stops/signals: <status>" in the reason: no controls on tiles without control
   data is never shown as clear.
@@ -88,6 +93,9 @@ DRIVE_OFF_M = 2.              # m a held car moved under the driver's gas: drive
 LIGHT_ASSOC_M = 25.           # a light belongs to the signal control whose stop point is this close to its own
 LIGHT_STALE_S = 0.6           # s: an older light message is stale (unknown)
 STOPPING_NEAR_M = 30.         # a map stop this close that is stopping the car owns the driver's gas (MapDecision.stopping)
+OFF_ROUTE_SPEED = 5.          # m/s: off the route with the stops ahead unknown, the speed is capped to this...
+OFF_ROUTE_DECEL = 1.0         # m/s^2: ...coming down from the car's speed this gently
+OFF_ROUTE_REASON = "Off route, map stops unknown — take control or wait for reroute"
 
 UNPROTECTED = 'unprotectedTurn'  # MapControlStatus.Kind's name for it
 UNPROTECTED_ROUTE = -1        # its key is (UNPROTECTED_ROUTE, maneuver id): a maneuver's, not a route's control
@@ -216,6 +224,7 @@ class MapControlPolicy:
     self._turn_raw = 0.  # m to its stop point as last read, before that floor
     self.turn_name = 'left'
     self._protected_id: int | None = None  # the maneuver a stop sign or signal of its junction protected: it stays so
+    self._off_cap: float | None = None  # m/s: the off-route cap while the stops ahead are unknown (module docstring)
 
   def stop_ahead(self) -> float | None:
     """m to the nearest stop sign or signal the car is going to stop at (not released, not going on a green), or None:
@@ -370,17 +379,32 @@ class MapControlPolicy:
       else:
         infeasible = self._approach(c, controls, v, gas_pressed, gas_edge, gas_lift, out, prompts) or infeasible
 
+    unknown = self.tracker.off_route_unknown
+    if unknown:
+      if self._off_cap is None:
+        self._off_cap = max(v, OFF_ROUTE_SPEED)
+        cloudlog.event("turnpilot.off_route_stops_unknown", error=True, status=self.tracker.off_status, v=round(v, 2))
+      self._off_cap = max(self._off_cap - OFF_ROUTE_DECEL * dt, OFF_ROUTE_SPEED)
+      out.stops.append(Stop(NO_ACCEL_CAP, self._off_cap, False, OFF_ROUTE_REASON, 0.))
+    elif self._off_cap is not None:
+      self._off_cap = None
+      cloudlog.event("turnpilot.off_route_stops_known", route=self.tracker.route, status=self.tracker.off_status)
+
     # what the driver sees and hears
     out.prompt = prompts[0] if prompts else 'none'
     # 'none' is a navd that predates controls: nothing to say about a route it never looked at
     status_bad = self.tracker.route and self.tracker.status not in ('ok', 'none')
     if status_bad:
       out.reason = f"Map stops/signals: {self.tracker.status}"
+    if unknown:
+      out.reason = OFF_ROUTE_REASON
     self._alert_t = max(self._alert_t - dt, 0.)
     if infeasible:
       out.alert = 'cannotStopComfortably'
     elif self._alert_t > 0.:
       out.alert = self._alert
+    elif unknown:
+      out.alert = 'offRouteStopsUnknown'
     elif status_bad:
       out.alert = 'mapControlsUnavailable'
     elif lights.rejected:

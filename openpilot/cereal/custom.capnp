@@ -135,6 +135,7 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
       partial @3;
       failed @4;
       unsupported @5;
+      pending @6;
     }
     id @0 :UInt16;                   # the control's index along its route; (routeCount, id) is its identity
     kind @1 :Kind;
@@ -162,6 +163,8 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
     lightSourceRejected @6;     # a light-state source that isn't accepted here (the sim oracle outside the sim)
     junctionUncertain @7;       # navd's readings of a committed unprotected turn's junction disagree by more than 15 m:
                                 # its hold line is at the nearest of them, so the car may stop early (route_follower.py)
+    offRouteStopsUnknown @8;    # off the route, the map stops ahead of the car couldn't be looked up (navd's
+                                # offRouteControlsStatus not ok): the speed is capped, take control or wait for the reroute
   }
   mapControl @24 :MapControlStatus;
   controlPrompt @25 :ControlPrompt;

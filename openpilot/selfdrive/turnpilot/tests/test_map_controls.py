@@ -6,8 +6,8 @@ import pytest
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot.hooks import SPEED_CAP_ACCEL_MIN, plan_accel
 from openpilot.selfdrive.turnpilot.map_controls import (DWELL_S, GREEN_STEADY_S, LIGHT_STALE_S, MAP_DECEL_MAX, NO_LIGHTS,
-                                                         T_LAT, UNPROTECTED, YIELD_SPEED, Lights, MapControlPolicy, engage_distance,
-                                                         light_input, unprotected_turn)
+                                                         OFF_ROUTE_REASON, OFF_ROUTE_SPEED, T_LAT, UNPROTECTED, YIELD_SPEED, Lights,
+                                                         MapControlPolicy, engage_distance, light_input, unprotected_turn)
 from openpilot.selfdrive.turnpilot.route_follower import make_maneuver
 from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP, ScenePolicy, decide
 from openpilot.selfdrive.turnpilot.tests.synthetic import nav_instruction
@@ -28,13 +28,18 @@ class Car:
     self.nav_valid = True
     self.lead_stop: float | None = None  # a lead stopped here: the car stops 0.5 m short of it
     self.turn: tuple | None = None  # (s of the junction, maneuver id, 'left'): a far-side turn there, unprotected-shaped
+    self.off_route = None  # off the route (nav_valid False): navd's lookup ahead, [(s, kind)], or None for none (no destination)
+    self.off_status = 'ok'
     self.rows = []
 
   def nav(self):
     controls = [(i, c[1], c[0] - self.s + self.gps(self.t)) + tuple(c[2:]) for i, c in enumerate(self.controls)
                 if -15. < c[0] - self.s < 400.][:8]
-    return nav_instruction(500., route_count=self.route_count, controls=controls, controls_status=self.status,
-                           valid=self.nav_valid)
+    off = [] if self.nav_valid or self.off_route is None else \
+      [(i, c[1], c[0] - self.s) for i, c in enumerate(self.off_route) if -15. < c[0] - self.s < 400.]
+    off_status = 'none' if self.nav_valid or self.off_route is None else self.off_status
+    return nav_instruction(500., route_count=self.route_count, controls=controls if self.nav_valid else [],
+                           controls_status=self.status, valid=self.nav_valid, off_route=off, off_route_status=off_status)
 
   def step(self, gas=False, lights=NO_LIGHTS, accel=None):
     """lights: Lights, or a function of the car giving them."""
@@ -599,3 +604,50 @@ def test_unprotected_left_whose_junction_is_read_nearer_than_the_car_can_stop_sh
   alerts = []
   out, dec = car.run_until(lambda out, dec, alerts=alerts: alerts.append(out.alert) or held(out, dec), max_s=20.)
   assert 'cannotStopComfortably' not in alerts and car.v < 0.3
+
+
+def test_off_route_holds_for_the_signal_on_its_own_road_not_the_stale_routes():
+  """BeamNG route_demo, 2026-10-28: rerouting, the car drove through the signal on its road at speed while the tracker
+  dead-reckoned the old route's, 106 m off. navd's lookup ahead of the car (offRouteControls) holds it at its own."""
+  car = Car([(250., 'signal')])
+  car.run(2.)
+  car.nav_valid, car.off_route = False, [(car.s + 90., 'signal')]
+  line = car.off_route[0][0]
+  out, dec = car.run_until(held, max_s=30.)
+  assert line - 3. < car.s < line + 0.5
+  assert out.prompt == 'signalGo' and out.alert == 'none'
+  assert all(r[3] >= MAP_DECEL_MAX - 1e-6 for r in car.rows)
+  car.run(3.)
+  assert car.v == 0.  # held for the driver's go, like any signal
+  car.step(gas=True)
+  car.run(4.)
+  assert car.s > line + 2.
+
+
+def test_off_route_with_the_stops_ahead_unknown_caps_the_speed_and_says_so():
+  car = Car([(400., 'signal')])
+  car.run(2.)
+  car.nav_valid, car.off_route, car.off_status = False, [], 'failed'
+  out, dec, _ = car.run(1.)
+  assert out.alert == 'none'  # the grace: navd's one invalid message between routes
+  out, dec, _ = car.run(2.)
+  assert out.alert == 'offRouteStopsUnknown' and out.reason == OFF_ROUTE_REASON  # from the grace on, at whatever speed
+  out, dec, _ = car.run(10.)
+  assert out.alert == 'offRouteStopsUnknown' and OFF_ROUTE_REASON in [s.reason for s in out.stops]
+  assert car.v <= OFF_ROUTE_SPEED + 0.3 and not dec.should_stop
+  assert all(r[3] >= -1.0 - 1e-6 for r in car.rows)  # never braked harder than a gentle ramp
+  car.off_status = 'ok'  # the lookup works again: nothing ahead
+  out, dec, _ = car.run(2.)
+  assert out.alert == 'none' and not out.stops
+  car.off_status = 'failed'
+  car.run(3.)
+  car.nav_valid = True  # rerouted
+  out, dec, _ = car.run(1.5)
+  assert out.alert == 'none' and not any(s.reason == OFF_ROUTE_REASON for s in out.stops)
+
+
+def test_no_destination_is_not_off_route():
+  car = Car([])
+  car.nav_valid, car.off_route = False, None
+  out, dec, _ = car.run(10.)
+  assert out.alert == 'none' and not out.stops and car.v > 13.

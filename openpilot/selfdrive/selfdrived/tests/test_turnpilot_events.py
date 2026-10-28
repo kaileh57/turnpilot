@@ -8,6 +8,7 @@ from openpilot.selfdrive.selfdrived.events import ET, Events
 
 EventName = log.OnroadEvent.EventName
 AudibleAlert = log.SelfdriveState.AudibleAlert
+VisualAlert = car.CarControl.HUDControl.VisualAlert
 
 
 class FakeSM(dict):
@@ -166,6 +167,10 @@ def test_map_control_alerts():
   for kind in ('mapControlsUnavailable', 'lightSourceRejected'):
     a, = alerts(EventName.turnpilotControlAlert, FakeSM(plan(controlAlert=kind, reason='Map stops/signals: unsupported')))
     assert a.audible_alert == AudibleAlert.prompt, kind
+  # off the route with the map stops ahead unknown: up while it lasts, with a chime and the take-control hint
+  a, = alerts(EventName.turnpilotControlAlert, FakeSM(plan(controlAlert='offRouteStopsUnknown')))
+  assert a.alert_text_1 == 'Off Route' and 'take control or wait for reroute' in a.alert_text_2
+  assert a.audible_alert == AudibleAlert.prompt and a.visual_alert == VisualAlert.steerRequired
   # turnpilotd gone while holding: the hold is lost, said as take control
   a, = alerts(EventName.turnpilotControlAlert, FakeSM(None, alive=False))
   assert a.alert_text_1 == 'TAKE CONTROL' and a.audible_alert == AudibleAlert.tpHandback

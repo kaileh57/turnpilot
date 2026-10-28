@@ -9,7 +9,8 @@ from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.navigation.helpers import latest_gps_source
 from openpilot.selfdrive.navigation.route import along_path, local_meters
-from openpilot.selfdrive.turnpilot.routing.guidance import fill_controls, fill_guidance
+from openpilot.selfdrive.turnpilot.routing.controls import haversine
+from openpilot.selfdrive.turnpilot.routing.guidance import CONTROLS_AHEAD_M, CONTROLS_BEHIND_M, MAX_CONTROLS, fill_controls, fill_guidance
 from openpilot.selfdrive.turnpilot.maps.client import MapError
 from openpilot.selfdrive.turnpilot.routing.sources import MapRouter
 
@@ -21,6 +22,7 @@ REROUTE_COUNTER_MIN = 3
 ROUTE_RESEND_PERIOD = 10  # updates (seconds); a restarted mapsd gets the route within this
 RECOMPUTE_HOLD = 10  # updates (seconds) between route requests
 SKIP_MATCH_M = 50.  # TurnPilot: a skipped turn is this step's maneuver if turnpilotd's distance to it is this close to navd's
+OFF_ROUTE_MATCH_M = 20.  # TurnPilot: a lookup's control this close to one of the last lookup's, of its kind, is that one
 
 
 def set_banner(instruction, banners, distance_to_maneuver):
@@ -74,6 +76,23 @@ class RouteJob(threading.Thread):
         self.controls, self.controls_status = [], 'failed'
 
 
+class AheadJob(threading.Thread):
+  """TurnPilot: one router.controls_ahead() off navd's loop (a few Valhalla calls; a valhalla_service's over HTTP can take
+  seconds): the stop signs, yields and signals on the road ahead of the car, off the route. Any failure is the status
+  'failed', never no controls."""
+
+  def __init__(self, router, position, bearing):
+    super().__init__(name='navd-ahead', daemon=True)
+    self.router, self.position, self.bearing = router, position, bearing
+    self.result: tuple = ([], 'failed', [])
+
+  def run(self):
+    try:
+      self.result = self.router.controls_ahead(self.position, self.bearing)
+    except Exception:
+      cloudlog.exception("navd: controls ahead failed")
+
+
 class RouteEngine:
   def __init__(self, sm, pm, params=None, router=None, background=True):
     self.sm = sm
@@ -90,6 +109,13 @@ class RouteEngine:
     self.route_count = 0  # TurnPilot: routes calculated, so a replaced route is told apart from the one it replaces
     self.controls: list = []  # TurnPilot: the route's stop signs, yields and signals, and Valhalla's status for them
     self.controls_status = 'none'
+    # TurnPilot: off the route with a destination, the controls ahead of the car (AheadJob), [(id, Control)] on the road
+    # looked up (an (n, 2) array of (longitude, latitude)), and the lookup's status: navInstruction.offRouteControls
+    self.off_controls: list = []
+    self.off_road = None
+    self.off_status = 'none'
+    self.off_next_id = 0
+    self.ahead_job: AheadJob | None = None
 
     self.recompute_hold = 0
     self.reroute_counter = 0
@@ -120,6 +146,7 @@ class RouteEngine:
         # a new route that starts with one of the same type
         msg = messaging.new_message('navInstruction', valid=False)
         msg.navInstruction.routeCount = self.route_count
+        self.fill_off_route(msg)
         self.pm.send('navInstruction', msg)
       else:
         self.send_instruction()
@@ -236,6 +263,7 @@ class RouteEngine:
     # mean nothing, and following them would run through its steps to 'Destination reached' and delete the destination.
     if self.step_idx is None or self.job is not None:
       msg.valid = False
+      self.fill_off_route(msg)
       self.pm.send('navInstruction', msg)
       return
 
@@ -253,8 +281,10 @@ class RouteEngine:
     if lateral > OFF_ROUTE_DISTANCE and distance_to_maneuver_along_geometry >= -MANEUVER_TRANSITION_THRESHOLD and \
        self.step_idx < len(self.route) - 1:
       msg.valid = False
+      self.fill_off_route(msg)
       self.pm.send('navInstruction', msg)
       return
+    self.reset_off_route()
 
     # Banner instructions are for the following maneuver step, don't use empty last step
     banner_step = step
@@ -292,6 +322,61 @@ class RouteEngine:
         if np.linalg.norm(local_meters(self.last_position, self.nav_destination)) > REROUTE_DISTANCE:
           self.params.remove("NavDestination")
           self.clear_route()
+
+  def fill_off_route(self, msg):
+    """TurnPilot: an invalid navInstruction's offRouteControls and offRouteControlsStatus. With a destination (rerouting, no
+    route yet, off it for a fix), the last lookup ahead of the car, measured from where the car is now along the road it
+    looked at, and a new lookup started (one at a time, off this loop). pending until the first is in; none with no
+    destination, and nothing looked up."""
+    if self.requested_destination is None and self.nav_destination is None:
+      self.reset_off_route()
+      return
+    if self.off_status == 'none':
+      self.off_status = 'pending'
+    self.collect_ahead()
+    if self.ahead_job is None and self.last_position is not None:
+      self.ahead_job = AheadJob(self.router, self.last_position, self.last_bearing)
+      if self.background:
+        self.ahead_job.start()
+      else:
+        self.ahead_job.run()
+        self.collect_ahead()
+    ni = msg.navInstruction
+    ni.offRouteControlsStatus = self.off_status
+    if self.off_road is None or self.last_position is None or not self.off_controls:
+      return
+    along, _ = along_path(self.off_road, self.last_position)
+    near = sorted(((c.route_m - along, i, c) for i, c in self.off_controls if -CONTROLS_BEHIND_M < c.route_m - along < CONTROLS_AHEAD_M),
+                  key=lambda dic: dic[0])[:MAX_CONTROLS]
+    ni.offRouteControls = [{'id': i, 'kind': c.kind, 'distance': float(d), 'lineMapped': c.line_mapped, 'junction': c.junction,
+                            'crossSuspect': c.cross_suspect} for d, i, c in near]
+
+  def collect_ahead(self):
+    """TurnPilot: a finished lookup ahead becomes the off-route controls; one the last lookup had (its kind, its stop point
+    within OFF_ROUTE_MATCH_M) keeps its id, so turnpilotd tracks it as the same control."""
+    job = self.ahead_job
+    if job is None or job.is_alive():
+      return
+    self.ahead_job = None
+    controls, status, road = job.result
+    if len(road) < 2:
+      self.off_controls, self.off_road, self.off_status = [], None, status
+      return
+    old, out = list(self.off_controls), []
+    for c in controls:
+      same = [(haversine(o.point, c.point), i) for i, o in old if o.kind == c.kind and o.point is not None and c.point is not None and
+              haversine(o.point, c.point) < OFF_ROUTE_MATCH_M and all(i != j for j, _ in out)]
+      if same:
+        i = min(same)[1]
+      else:
+        i, self.off_next_id = self.off_next_id, (self.off_next_id + 1) & 0xFFFF
+      out.append((i, c))
+    self.off_controls, self.off_status = out, status
+    self.off_road = np.array([[lon, lat] for lat, lon in road], dtype=np.float64)
+
+  def reset_off_route(self):
+    """TurnPilot: on a route, or no destination: nothing off it. A lookup under way is left to finish, and dropped."""
+    self.off_controls, self.off_road, self.off_status, self.ahead_job = [], None, 'none', None
 
   def send_route(self):
     coords = np.concatenate(self.route_geometry) if self.route_geometry is not None else np.empty((0, 2))

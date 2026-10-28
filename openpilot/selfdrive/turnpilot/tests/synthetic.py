@@ -13,13 +13,14 @@ def set_lanes(builder, field, lanes):
 
 
 def nav_instruction(distance, mtype="turn", modifier="left", remaining=None, lanes=(), valid=True, junction=None,
-                    through=None, route_count=0, ahead=(), controls=(), controls_status=None):
+                    through=None, route_count=0, ahead=(), controls=(), controls_status=None, off_route=(), off_route_status=None):
   """A navInstruction reader. lanes: ((directions, active), ...) left to right. junction: (bearing_before,
   bearing_after, branches[, opposing]) from Valhalla, or None for a route without intersection data; opposing is
   NavInstruction.Opposing's name, unknown when left out. through: (lanes, distance).
   route_count: navd's routeCount. ahead: the maneuvers after this one for allManeuvers, [(distance, type, modifier[,
   junction]), ...]; allManeuvers starts with this one, as navd's does. controls: map stop controls, [(id, kind, distance[,
-  line_mapped, junction, cross_suspect]), ...]; controls_status: navd's controlsStatus ('ok' when there are controls)."""
+  line_mapped, junction, cross_suspect]), ...]; controls_status: navd's controlsStatus ('ok' when there are controls).
+  off_route, off_route_status: offRouteControls as controls, and offRouteControlsStatus ('ok' when there are controls)."""
   msg = messaging.new_message('navInstruction', valid=valid)
   ni = msg.navInstruction
   ni.routeCount = route_count
@@ -50,6 +51,12 @@ def nav_instruction(distance, mtype="turn", modifier="left", remaining=None, lan
     c.lineMapped, c.junction, c.crossSuspect = (tuple(fields[3:]) + (False, True, False)[len(fields) - 3:])[:3]
   if controls_status is not None or controls:
     ni.controlsStatus = controls_status or 'ok'
+  ni.init('offRouteControls', len(off_route))
+  for c, fields in zip(ni.offRouteControls, off_route, strict=True):
+    c.id, c.kind, c.distance = fields[0], fields[1], float(fields[2])
+    c.lineMapped, c.junction, c.crossSuspect = (tuple(fields[3:]) + (False, True, False)[len(fields) - 3:])[:3]
+  if off_route_status is not None or off_route:
+    ni.offRouteControlsStatus = off_route_status or 'ok'
   return msg.as_reader().navInstruction
 
 

@@ -1,11 +1,13 @@
 """ControlTracker: the route's stop signs, yields and signals between navd's 1 Hz fixes (control_tracker.py)."""
 from openpilot.common.realtime import DT_MDL
-from openpilot.selfdrive.turnpilot.control_tracker import (CORRECTION_M, DROP_PAST_M, GAP_MAX_M, JUMP_M, ControlTracker)
+from openpilot.selfdrive.turnpilot.control_tracker import (CORRECTION_M, DROP_PAST_M, GAP_MAX_M, JUMP_M, OFF_ROUTE, OFF_ROUTE_GRACE_S,
+                                                            ControlTracker)
 from openpilot.selfdrive.turnpilot.tests.synthetic import nav_instruction
 
 
-def nav(controls, route_count=1, status='ok', valid=True):
-  return nav_instruction(500., route_count=route_count, controls=controls, controls_status=status, valid=valid)
+def nav(controls, route_count=1, status='ok', valid=True, off=(), off_status=None):
+  return nav_instruction(500., route_count=route_count, controls=controls, controls_status=status, valid=valid, off_route=off,
+                         off_route_status=off_status)
 
 
 def step(tr, msg=None, v=10., valid=True, n=1):
@@ -114,3 +116,73 @@ def test_status():
   assert tr.status == 'unsupported' and tr.route
   step(tr, nav([], valid=False), v=0., valid=False)
   assert not tr.route  # off the route: no status shown for it
+
+
+def test_off_route_the_lookup_ahead_replaces_the_stale_routes_controls():
+  """BeamNG route_demo, 2026-10-28: off the route the tracker dead-reckoned the old route's signal 106 m out while the car
+  drove through the one on its own road. Once navd's lookup ahead of the car is in, the stale route's controls go (a held
+  one stays: the latch is position-free), and the car's own road's are tracked under the off-route key."""
+  tr = ControlTracker()
+  step(tr, nav([(0, 'signal', 106.), (1, 'stop', 3.)]), v=0.)
+  tr.controls[(1, 1)].held = True
+  step(tr, nav([], valid=False, off_status='pending'), valid=False, v=10.)
+  assert (1, 0) in tr.controls  # nothing better known yet: dead-reckoned as before
+  out = step(tr, nav([], valid=False, off=[(7, 'signal', 60.)]), valid=False, v=10.)
+  assert [c.key for c in out] == [(1, 1), (OFF_ROUTE, 7)]
+  assert out[1].kind == 'signal' and abs(out[1].d - 60.) < 1e-6
+  step(tr, v=10., valid=False, n=10)  # dead-reckoned between lookups
+  assert abs(tr.controls[(OFF_ROUTE, 7)].d - (60. - 10 * 10. * DT_MDL)) < 1e-6
+  step(tr, nav([], valid=False, off=[(7, 'signal', 55.)]), valid=False, v=10.)  # a lookup is a fix like navd's on a route
+  assert abs(tr.controls[(OFF_ROUTE, 7)].d - (60. - 11 * 10. * DT_MDL + CORRECTION_M)) < 1e-6
+
+
+def test_off_route_an_engaged_control_takes_a_miss_then_goes():
+  tr = ControlTracker()
+  step(tr, nav([], valid=False, off=[(2, 'stop', 80.)]), valid=False)
+  tr.controls[(OFF_ROUTE, 2)].engaged = True
+  step(tr, nav([], valid=False, off=[], off_status='ok'), valid=False)  # one lookup misses it: a GPS hiccup
+  assert (OFF_ROUTE, 2) in tr.controls
+  step(tr, nav([], valid=False, off=[], off_status='ok'), valid=False)  # two: the car turned off that road
+  assert (OFF_ROUTE, 2) not in tr.controls
+  step(tr, nav([], valid=False, off=[(3, 'stop', 80.)]), valid=False)
+  step(tr, nav([], valid=False, off=[], off_status='ok'), valid=False)  # not engaged: gone at once
+  assert (OFF_ROUTE, 3) not in tr.controls
+
+
+def test_back_on_a_route_its_control_takes_over_the_engaged_off_route_one():
+  tr = ControlTracker()
+  step(tr, nav([], valid=False, off=[(4, 'signal', 50.)]), valid=False)
+  c = tr.controls[(OFF_ROUTE, 4)]
+  c.engaged, c.state = True, 'state'
+  out = step(tr, nav([(0, 'signal', 52.), (1, 'stop', 200.)], route_count=2))
+  assert [o.key for o in out] == [(2, 0), (2, 1)]
+  assert out[0].engaged and out[0].state == 'state' and abs(out[0].d - (50. - 10. * DT_MDL)) < 1e-6  # its own distance
+
+
+def test_off_route_stops_unknown_only_after_the_grace_and_with_a_destination():
+  tr = ControlTracker()
+  step(tr, nav([(0, 'signal', 300.)]))
+  assert not tr.off_route_unknown
+  step(tr, nav([], valid=False, off_status='pending'), valid=False, n=int(OFF_ROUTE_GRACE_S / DT_MDL) - 2)
+  assert not tr.off_route_unknown  # navd's one invalid message between two routes, a lookup on its way
+  step(tr, valid=False, n=4)
+  assert tr.off_route_unknown
+  step(tr, nav([], valid=False, off_status='failed'), valid=False)
+  assert tr.off_route_unknown
+  step(tr, nav([], valid=False, off=[(0, 'stop', 90.)]), valid=False)
+  assert not tr.off_route_unknown  # looked up: those are the stops ahead
+  step(tr, nav([], valid=False, off=[], off_status='ok'), valid=False)
+  assert not tr.off_route_unknown  # none ahead, and that is known
+  step(tr, nav([(0, 'signal', 300.)]))
+  assert not tr.off_route_unknown
+  no_dest = ControlTracker()
+  step(no_dest, nav([], valid=False, off_status='none'), valid=False, n=100)
+  assert not no_dest.off_route_unknown  # no destination: navd isn't on a route nor trying to be
+
+
+def test_off_route_navd_gone_quiet_is_unknown():
+  tr = ControlTracker()
+  step(tr, nav([(0, 'signal', 300.)]))
+  step(tr, nav([], valid=False, off=[(0, 'stop', 90.)]), valid=False)
+  step(tr, valid=False, n=int((OFF_ROUTE_GRACE_S + 2.) / DT_MDL))
+  assert tr.off_route_unknown  # no lookup for seconds: what is ahead now isn't known

@@ -3,12 +3,13 @@ import importlib
 import math
 import os
 import sys
+import threading
 from pathlib import Path
 
 import requests
 
 from openpilot.common.swaglog import cloudlog
-from openpilot.selfdrive.turnpilot.routing.controls import actor_call, http_call, route_controls
+from openpilot.selfdrive.turnpilot.routing.controls import actor_call, controls_ahead, http_call, route_controls
 
 # tools/turnpilot/install_valhalla_device.sh puts pyvalhalla here, since the system venv is read-only
 DEVICE_PYVALHALLA = '/data/turnpilot/pyvalhalla'
@@ -84,6 +85,8 @@ class ValhallaSource:
     self.tiles_dir = tiles_dir_of(tiles)
     self.url = where.get('url', '')
     self.actor = None
+    # navd's route job and its off-route lookup run in threads of their own: one call into the actor at a time
+    self.lock = threading.Lock()
     if self.url:
       return
     valhalla = import_valhalla()
@@ -116,7 +119,8 @@ class ValhallaSource:
   def route(self, start, destination, bearing, language):
     request = self.request(start, destination, bearing, language)
     if self.actor is not None:
-      r = self.actor.route(request)
+      with self.lock:
+        r = self.actor.route(request)
     else:
       resp = requests.post(self.url + '/route', json=request, timeout=10)
       resp.raise_for_status()
@@ -127,5 +131,18 @@ class ValhallaSource:
     """(controls, status) along the route steps (routing/controls.py). tiles_dir: the tiles' directory when their
     controls must be checked for (local tiles: the controls_built marker and the sim's sidecar), None when the tiles come
     from real OSM."""
-    call = actor_call(self.actor) if self.actor is not None else http_call(self.url, requests.post)
-    return route_controls(call, steps, tiles_dir)
+    return route_controls(self._call(), steps, tiles_dir)
+
+  def controls_ahead(self, position, heading, tiles_dir=None):
+    """(controls, status, road) ahead of the car at position (lat, lon) heading that way (routing/controls.py:
+    controls_ahead), each with its stop point. tiles_dir: as for controls()."""
+    return controls_ahead(self._call(), position, heading, tiles_dir)
+
+  def _call(self):
+    if self.actor is None:
+      return http_call(self.url, requests.post)
+    call = actor_call(self.actor)
+    def locked(endpoint, req):
+      with self.lock:
+        return call(endpoint, req)
+    return locked

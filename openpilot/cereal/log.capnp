@@ -2480,6 +2480,13 @@ struct NavInstruction {
   # TurnPilot: whether a road leaves the maneuver's junction straight ahead, against which a far-side turn (a left on the
   # right) crosses its oncoming traffic (routing/guidance.py). unknown without junction data: never read as none
   maneuverOpposing @22 :Opposing;
+  # TurnPilot: off the route (rerouting, no route yet, or off it for a fix) with a destination set, the stop signs, yields and
+  # signals on the road ahead of the car's own position and heading (the road straight on), looked up as the route's are
+  # (routing/controls.py: controls_ahead): ids kept across navd's 1 Hz lookups for the same control, distances from the car.
+  # Only on invalid messages. offRouteControlsStatus is none on a route or with no destination, pending until the first
+  # lookup of a spell off the route, else the lookup's status: zero controls with a status other than ok is never "clear".
+  offRouteControls @23 :List(MapControl);
+  offRouteControlsStatus @24 :ControlsStatus;
 
   enum Opposing {
     unknown @0;  # no intersection data for the junction (or a navd from before the field)
@@ -2507,6 +2514,7 @@ struct NavInstruction {
     partial @3;      # over 10% of the route's edges unmatched by locate
     failed @4;       # no controls: trace_attributes failed, or an exception (the route still publishes)
     unsupported @5;  # the tiles carry no control data (no controls_built marker)
+    pending @6;      # offRouteControlsStatus only: off the route, the first lookup ahead of the car not back yet
   }
 
   struct Lane {
