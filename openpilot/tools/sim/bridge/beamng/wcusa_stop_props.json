@@ -1,0 +1,1769 @@
+{
+ "_provenance": "west_coast_usa TSStatic props with 'stop' in the shape name, probe_game.py on the BeamNG PC 2026-10-27 18:36 (~/turnpilot-artifacts/phase3/eval/stop_props.json); sign_stop.dae near a stop instance marks it signed (mapsignals.py).",
+ "props": [
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -723.58,
+    -37.08,
+    102.18
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -260.88,
+    499.73,
+    74.98
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9073,
+    0.4204
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    -614.72,
+    -930.37,
+    162.14
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3083,
+    0.9513
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -441.6,
+    472.87,
+    96.55
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -283.88,
+    -866.08,
+    134.69
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.4892,
+    0.8722
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    -807.16,
+    312.67,
+    151.45
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    -0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    422.02,
+    -301.36,
+    152.62
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.3667,
+    0.9303
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    -796.6,
+    -590.8,
+    102.66
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9054,
+    0.4245
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -839.64,
+    863.87,
+    74.93
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.7071,
+    0.7071
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -840.13,
+    763.64,
+    90.0
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.7071,
+    0.7071
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    -4.36,
+    186.26,
+    126.12
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3806,
+    0.9247
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -409.86,
+    248.18,
+    101.31
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9466,
+    -0.3225
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    6.77,
+    181.73,
+    125.74
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9225,
+    -0.386
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    882.09,
+    -960.17,
+    169.98
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9127,
+    -0.4087
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -571.59,
+    601.46,
+    90.51
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -585.98,
+    -522.44,
+    116.45
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.6604,
+    0.7509
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    -819.53,
+    324.51,
+    151.53
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -595.95,
+    653.69,
+    91.53
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    224.93,
+    819.26,
+    102.03
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.7987,
+    0.6017
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -257.71,
+    534.2,
+    74.99
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.3831,
+    0.9237
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    -580.23,
+    -538.56,
+    116.04
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.5901,
+    0.8073
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -914.65,
+    230.68,
+    158.9
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    -0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    -793.24,
+    -613.11,
+    104.09
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.3891,
+    0.9212
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    222.45,
+    835.94,
+    101.6
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.6017,
+    0.7987
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    11.15,
+    458.45,
+    101.68
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.4114,
+    0.9114
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    -552.98,
+    433.55,
+    106.55
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -255.5,
+    608.2,
+    74.9
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.0,
+    1.0
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -853.79,
+    775.1,
+    90.48
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.7071,
+    0.7071
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -35.86,
+    526.4,
+    74.83
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.3192,
+    0.9477
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -480.19,
+    354.77,
+    97.05
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    -0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    -435.19,
+    491.19,
+    96.31
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -466.11,
+    707.45,
+    74.97
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    415.69,
+    -295.01,
+    152.46
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.3667,
+    0.9303
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -343.53,
+    283.08,
+    101.43
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.4275,
+    0.904
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -410.2,
+    687.74,
+    74.92
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.3968,
+    0.9179
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -287.02,
+    -889.5,
+    135.08
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.8673,
+    0.4978
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    544.79,
+    -730.18,
+    199.9
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.477,
+    0.8789
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -871.36,
+    667.4,
+    110.63
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.7071,
+    0.7071
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    1.85,
+    422.2,
+    101.57
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.4153,
+    0.9097
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -276.63,
+    613.4,
+    74.9
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    1.0,
+    0.0
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -872.43,
+    655.84,
+    110.69
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.7071,
+    0.7071
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -876.59,
+    889.33,
+    74.92
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.7071,
+    0.7071
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -898.12,
+    220.63,
+    158.96
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -47.18,
+    512.29,
+    74.86
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.95,
+    0.3121
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_sign_busstop.dae",
+   "pos": [
+    -546.31,
+    421.4,
+    106.91
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    -0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -236.98,
+    -110.97,
+    119.6
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.4486,
+    0.8937
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu.dae",
+   "pos": [
+    -725.27,
+    -17.71,
+    102.28
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    -0.3827
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -983.45,
+    -334.39,
+    104.16
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.5887,
+    0.8083
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -901.68,
+    -406.19,
+    103.54
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9132,
+    0.4076
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -882.16,
+    -389.73,
+    103.33
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9312,
+    -0.3646
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -736.27,
+    -577.94,
+    106.94
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9885,
+    0.1511
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -771.38,
+    -510.21,
+    102.41
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.3096,
+    0.9509
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -56.15,
+    109.47,
+    128.57
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.3485,
+    0.9373
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -169.31,
+    155.5,
+    124.66
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.954,
+    0.2998
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -726.24,
+    572.27,
+    122.5
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.8951,
+    -0.4458
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -712.67,
+    552.9,
+    122.44
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.3099,
+    0.9508
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    534.4,
+    1885.22,
+    76.71
+   ],
+   "rot": [
+    0.0288,
+    -0.0006,
+    0.7339,
+    0.6787
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -964.81,
+    -311.4,
+    103.48
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.6849,
+    0.7286
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    380.18,
+    -322.15,
+    151.32
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.6031,
+    0.7977
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    361.47,
+    -317.93,
+    150.95
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9866,
+    -0.163
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    355.4,
+    -333.73,
+    150.86
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.7928,
+    0.6095
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    373.44,
+    -338.46,
+    150.76
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.234,
+    0.9722
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    265.44,
+    -325.43,
+    147.48
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.0397,
+    0.9992
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -79.12,
+    -285.9,
+    127.4
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.2994,
+    0.9541
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    125.08,
+    24.39,
+    120.47
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.7622,
+    0.6474
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    110.66,
+    38.03,
+    121.37
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.0812,
+    0.9967
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    113.37,
+    14.94,
+    121.07
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9762,
+    0.2169
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    339.37,
+    -192.69,
+    145.89
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.2055,
+    0.9787
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    875.35,
+    -459.03,
+    164.02
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9914,
+    -0.1311
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    939.52,
+    -471.28,
+    163.6
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.935,
+    0.3548
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    946.38,
+    -445.75,
+    163.09
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9911,
+    -0.1329
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    468.06,
+    808.23,
+    126.49
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.0514,
+    0.9987
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -617.27,
+    -517.3,
+    117.39
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9975,
+    -0.071
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -596.39,
+    -458.94,
+    115.56
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.1826,
+    0.9832
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -192.0,
+    -813.16,
+    137.1
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.2427,
+    0.9701
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -300.22,
+    -788.1,
+    139.25
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.2427,
+    0.9701
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    949.08,
+    -958.81,
+    169.07
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.8921,
+    0.4518
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -173.39,
+    -249.77,
+    120.72
+   ],
+   "rot": [
+    0.0027,
+    0.0178,
+    -0.627,
+    0.7788
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -258.26,
+    -4.31,
+    122.29
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.5324,
+    0.8465
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -139.59,
+    145.87,
+    123.86
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.2421,
+    0.9702
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    875.07,
+    -523.14,
+    165.84
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.3566,
+    0.9342
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    928.8,
+    -529.74,
+    165.95
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9272,
+    0.3746
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -807.39,
+    -602.15,
+    104.46
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3441,
+    0.9389
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -891.8,
+    -684.16,
+    107.07
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9431,
+    -0.3325
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -734.34,
+    1935.05,
+    86.5
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.2136,
+    0.9769
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -1112.65,
+    1932.35,
+    95.19
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.0191,
+    0.9998
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -506.82,
+    1938.04,
+    81.04
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.4484,
+    0.8938
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -810.97,
+    1978.31,
+    85.09
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.987,
+    -0.1604
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    -405.41,
+    153.26,
+    102.28
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9947,
+    -0.1033
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    858.75,
+    -525.04,
+    166.9
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.8797,
+    0.4755
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    476.94,
+    1623.06,
+    77.12
+   ],
+   "rot": [
+    -0.014,
+    -0.014,
+    0.707,
+    0.707
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    476.94,
+    1618.07,
+    77.04
+   ],
+   "rot": [
+    0.0183,
+    0.0183,
+    0.7069,
+    0.7069
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    476.94,
+    1613.07,
+    77.12
+   ],
+   "rot": [
+    -0.0032,
+    -0.0032,
+    0.7071,
+    0.7071
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    476.94,
+    1608.08,
+    77.07
+   ],
+   "rot": [
+    -0.0098,
+    -0.0098,
+    0.707,
+    0.707
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    444.64,
+    1654.67,
+    77.09
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9948,
+    -0.1019
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    461.2,
+    1654.34,
+    77.09
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.991,
+    0.134
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    668.57,
+    1636.56,
+    77.09
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.0783,
+    0.9969
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    474.97,
+    1601.98,
+    76.57
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.5065,
+    0.8622
+   ]
+  },
+  {
+   "shape": "/levels/west_coast_usa/art/shapes/objects/sign_stop.dae",
+   "pos": [
+    425.72,
+    1641.93,
+    77.09
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.7454,
+    0.6666
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_03.dae",
+   "pos": [
+    -667.39,
+    167.08,
+    116.46
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    -0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_02.dae",
+   "pos": [
+    -668.67,
+    165.81,
+    116.46
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    -0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_04.dae",
+   "pos": [
+    -669.94,
+    164.53,
+    116.46
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    -0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_04.dae",
+   "pos": [
+    -679.15,
+    128.79,
+    117.99
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_03.dae",
+   "pos": [
+    -676.6,
+    131.33,
+    117.99
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_01.dae",
+   "pos": [
+    -677.87,
+    130.06,
+    117.99
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_04.dae",
+   "pos": [
+    -507.03,
+    300.72,
+    98.87
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_03.dae",
+   "pos": [
+    -504.48,
+    303.27,
+    98.87
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_01.dae",
+   "pos": [
+    -505.75,
+    302.0,
+    98.87
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_04.dae",
+   "pos": [
+    -627.11,
+    447.84,
+    114.6
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_03.dae",
+   "pos": [
+    -624.57,
+    445.3,
+    114.6
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_01.dae",
+   "pos": [
+    -625.84,
+    446.57,
+    114.6
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_03.dae",
+   "pos": [
+    -725.53,
+    261.76,
+    133.42
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    -0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_02.dae",
+   "pos": [
+    -726.81,
+    260.49,
+    133.42
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    -0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_04.dae",
+   "pos": [
+    -728.08,
+    259.22,
+    133.42
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.9239,
+    -0.3827
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_04.dae",
+   "pos": [
+    -800.57,
+    547.67,
+    125.39
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.7071,
+    0.7071
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_03.dae",
+   "pos": [
+    -796.97,
+    547.67,
+    125.39
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.7071,
+    0.7071
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_01.dae",
+   "pos": [
+    -798.77,
+    547.67,
+    125.39
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.7071,
+    0.7071
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_04.dae",
+   "pos": [
+    -758.22,
+    208.33,
+    137.74
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_03.dae",
+   "pos": [
+    -755.67,
+    210.88,
+    137.74
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_01.dae",
+   "pos": [
+    -756.95,
+    209.61,
+    137.74
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_03.dae",
+   "pos": [
+    -584.8,
+    426.42,
+    110.6
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_02.dae",
+   "pos": [
+    -586.07,
+    427.69,
+    110.6
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_04.dae",
+   "pos": [
+    -587.35,
+    428.97,
+    110.6
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.3827,
+    0.9239
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_03.dae",
+   "pos": [
+    -793.26,
+    562.43,
+    125.08
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.7071,
+    0.7071
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_02.dae",
+   "pos": [
+    -795.06,
+    562.43,
+    125.08
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.7071,
+    0.7071
+   ]
+  },
+  {
+   "shape": "/art/shapes/objects/s_busstop_wcu_04.dae",
+   "pos": [
+    -796.86,
+    562.43,
+    125.08
+   ],
+   "rot": [
+    0.0,
+    0.0,
+    -0.7071,
+    0.7071
+   ]
+  }
+ ]
+}

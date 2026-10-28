@@ -1,0 +1,4657 @@
+{
+ "_provenance": "west_coast_usa's core_trafficSignals mapNodeSignals, dumped from the running game on the BeamNG PC 2026-10-27 19:27 for the phase 3 eval (~/turnpilot-artifacts/phase3/eval/map_node_signals.json). Gap: the dump was a one-off Lua call, not a committed tool; probe_signals.py is that call written down, and hasn't been run against the game since. Re-dump with it after a BeamNG or level update. mapNodeSignals[a][b]: the signal instances controlling traffic from map node a to b, each {instance, pos (stop line), state, action}.",
+ "mapNodeSignals": {
+  "Bridge22_3": {
+   "autojunction_1311": [
+    {
+     "action": 3.0,
+     "instance": "stop 70",
+     "pos": {
+      "x": -897.5012207,
+      "y": -402.2258606,
+      "z": 101.1300812
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "Bridge2_A": {
+   "autojunction_249": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 128",
+     "pos": {
+      "x": 992.2046509,
+      "y": -794.0552979,
+      "z": 166.5638733
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "Bridge32_14": {
+   "DR314_2": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 39",
+     "pos": {
+      "x": -460.667511,
+      "y": 522.5723267,
+      "z": 96.37771606
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "Bridge33_7": {
+   "junction1_wp10": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 74",
+     "pos": {
+      "x": -341.7821655,
+      "y": 620.1547241,
+      "z": 74.87812805
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR1002_1": {
+   "DR1003_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 95",
+     "pos": {
+      "x": 308.7952271,
+      "y": 1552.702881,
+      "z": 74.71135712
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1008_7": {
+   "DR1123_2": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 110",
+     "pos": {
+      "x": -486.8294067,
+      "y": 2024.237549,
+      "z": 78.83613586
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1013_2": {
+   "DR1013_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 78",
+     "pos": {
+      "x": 184.3720551,
+      "y": 1733.946045,
+      "z": 100.7687531
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1014_1": {
+   "DR1098_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 92",
+     "pos": {
+      "x": 53.05271912,
+      "y": 1524.972656,
+      "z": 74.86244202
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1017_4": {
+   "DR1102_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 90",
+     "pos": {
+      "x": 29.41983032,
+      "y": 1525.423584,
+      "z": 74.8249588
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1018_2": {
+   "DR1018_3": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 91",
+     "pos": {
+      "x": 28.62527847,
+      "y": 1521.553833,
+      "z": 74.80304718
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1021_12": {
+   "DR1027_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 88",
+     "pos": {
+      "x": -140.9204102,
+      "y": 1623.586914,
+      "z": 74.6989975
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1023_6": {
+   "DR1023_7": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 86",
+     "pos": {
+      "x": -155.3173218,
+      "y": 1636.469482,
+      "z": 74.70213318
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1032_6": {
+   "DR1032_7": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 87",
+     "pos": {
+      "x": -157.9173279,
+      "y": 1634.348389,
+      "z": 74.67893219
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1035_1": {
+   "DR1034_2": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 89",
+     "pos": {
+      "x": -141.346405,
+      "y": 1640.039795,
+      "z": 74.67598724
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR1035_25": {
+   "autojunction_3": [
+    {
+     "action": 3.0,
+     "instance": "stop 76",
+     "pos": {
+      "x": 173.0440826,
+      "y": 1736.856689,
+      "z": 100.8824921
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1042_2": {
+   "DR1069_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 137",
+     "pos": {
+      "x": -508.864563,
+      "y": 1935.258423,
+      "z": 78.7917099
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1047_6": {
+   "DR1048_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 66",
+     "pos": {
+      "x": -1117.923096,
+      "y": 1932.016357,
+      "z": 92.84262848
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1059_2": {
+   "DR1059_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 68",
+     "pos": {
+      "x": -805.2672119,
+      "y": 1974.317627,
+      "z": 82.71183777
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1060_1": {
+   "DR1133_5": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 108",
+     "pos": {
+      "x": -717.4160156,
+      "y": 2063.898193,
+      "z": 78.77783966
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR1064_1": {
+   "DR1113_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 106",
+     "pos": {
+      "x": -699.5819092,
+      "y": 2075.946533,
+      "z": 78.75872803
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1065_2": {
+   "DR1065_3": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 109",
+     "pos": {
+      "x": -513.3111572,
+      "y": 2022.962769,
+      "z": 78.95327759
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1070_1": {
+   "DR1065_3": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 112",
+     "pos": {
+      "x": -500.0083618,
+      "y": 2013.243896,
+      "z": 78.91204834
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR1070_3": {
+   "DR1070_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 180",
+     "pos": {
+      "x": -518.5181885,
+      "y": 1994.886963,
+      "z": 78.81837463
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1071_13": {
+   "autojunction_291": [
+    {
+     "action": 3.0,
+     "instance": "stop 140",
+     "pos": {
+      "x": -732.1640625,
+      "y": 2034.207397,
+      "z": 80.41575623
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1077_8": {
+   "DR1069_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 179",
+     "pos": {
+      "x": -530.2109375,
+      "y": 1938.592529,
+      "z": 78.69033051
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1078_2": {
+   "DR1078_3": [
+    {
+     "action": 3.0,
+     "instance": "stop 143",
+     "pos": {
+      "x": -628.1246338,
+      "y": 1936.482178,
+      "z": 80.3115921
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1079_2": {
+   "autojunction_103": [
+    {
+     "action": 3.0,
+     "instance": "stop 141",
+     "pos": {
+      "x": -784.4430542,
+      "y": 2004.271973,
+      "z": 80.960495
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1080_7": {
+   "DR1080_8": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 103",
+     "pos": {
+      "x": -939.1379395,
+      "y": 2075.150146,
+      "z": 77.7563324
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1081_2": {
+   "DR1059_5": [
+    {
+     "action": 3.0,
+     "instance": "stop 142",
+     "pos": {
+      "x": -788.8366699,
+      "y": 2048.566162,
+      "z": 79.21382904
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1084_3": {
+   "DR1091_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 82",
+     "pos": {
+      "x": -757.2188721,
+      "y": 1796.914307,
+      "z": 86.08932495
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1089_2": {
+   "autojunction_231": [
+    {
+     "action": 3.0,
+     "instance": "stop 135",
+     "pos": {
+      "x": 139.192627,
+      "y": 1736.270508,
+      "z": 101.2649994
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1089_4": {
+   "DR1089_5": [
+    {
+     "action": 3.0,
+     "instance": "stop 136",
+     "pos": {
+      "x": 163.3217316,
+      "y": 1772.792847,
+      "z": 102.0470734
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1089_5": {
+   "DR1012_12": [
+    {
+     "action": 3.0,
+     "instance": "stop 77",
+     "pos": {
+      "x": 174.700592,
+      "y": 1749.731445,
+      "z": 101.0038147
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1092_1": {
+   "DR989_1": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 85",
+     "pos": {
+      "x": -747.1114502,
+      "y": 1809.700317,
+      "z": 85.55136108
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR1095_1": {
+   "DR1094_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 67",
+     "pos": {
+      "x": -737.706543,
+      "y": 1939.130981,
+      "z": 84.22460938
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1096_2": {
+   "DR1101_1": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 93",
+     "pos": {
+      "x": 40.05334473,
+      "y": 1534.620117,
+      "z": 74.73519135
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR1107_2": {
+   "DR1107_3": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 101",
+     "pos": {
+      "x": 32.84576416,
+      "y": 1826.405762,
+      "z": 104.1040497
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR1109_5": {
+   "DR1108_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 99",
+     "pos": {
+      "x": 42.44037628,
+      "y": 1841.614258,
+      "z": 104.0126343
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1113_1": {
+   "DR1113_2": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 149",
+     "pos": {
+      "x": -700.7110596,
+      "y": 2072.583496,
+      "z": 78.75515747
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1114_8": {
+   "DR1046_1": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 104",
+     "pos": {
+      "x": -944.7770996,
+      "y": 2059.739258,
+      "z": 76.97825623
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR1117_1": {
+   "DR1253_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 129",
+     "pos": {
+      "x": 426.6412964,
+      "y": 1637.924316,
+      "z": 74.63681793
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1122_2": {
+   "DR1126_1": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 107",
+     "pos": {
+      "x": -714.6020508,
+      "y": 2083.893555,
+      "z": 78.79382324
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR1123_2": {
+   "DR1128_12": [
+    {
+     "action": 3.0,
+     "instance": "stop 144",
+     "pos": {
+      "x": -469.8928528,
+      "y": 2140.655518,
+      "z": 78.70105743
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1125_4": {
+   "DR1061_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 105",
+     "pos": {
+      "x": -728.6558228,
+      "y": 2074.636719,
+      "z": 78.62341309
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1128_12": {
+   "DR1123_2": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 111",
+     "pos": {
+      "x": -498.7479248,
+      "y": 2033.383057,
+      "z": 78.78225708
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR1130_2": {
+   "DR1130_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 102",
+     "pos": {
+      "x": -962.5780029,
+      "y": 2063.858887,
+      "z": 76.4087677
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1136_6": {
+   "DR264_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 94",
+     "pos": {
+      "x": -164.5541687,
+      "y": 648.1281738,
+      "z": 74.7676239
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1137_1": {
+   "DR264_3": [
+    {
+     "action": 3.0,
+     "instance": "stop 65",
+     "pos": {
+      "x": -168.6735535,
+      "y": 513.5097656,
+      "z": 74.82261658
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1189_1": {
+   "DR1185_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 153",
+     "pos": {
+      "x": 859.5435181,
+      "y": -519.9343872,
+      "z": 164.6471863
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1192_26": {
+   "DR1190_5": [
+    {
+     "action": 3.0,
+     "instance": "stop 178",
+     "pos": {
+      "x": 533.2188721,
+      "y": 1888.157227,
+      "z": 74.7537384
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1212_2": {
+   "DR1230_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 118",
+     "pos": {
+      "x": 475.9008179,
+      "y": 1610.505737,
+      "z": 74.66372681
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1219_24": {
+   "DR1219_25": [
+    {
+     "action": 3.0,
+     "instance": "stop 177",
+     "pos": {
+      "x": 509.3832703,
+      "y": 1919.502197,
+      "z": 74.79517365
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1221_5": {
+   "DR1236_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 120",
+     "pos": {
+      "x": 475.92276,
+      "y": 1620.539429,
+      "z": 74.66373444
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1235_1": {
+   "DR1239_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 119",
+     "pos": {
+      "x": 475.9676819,
+      "y": 1615.514893,
+      "z": 74.66373444
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1237_8": {
+   "DR1237_9": [
+    {
+     "action": 3.0,
+     "instance": "stop 117",
+     "pos": {
+      "x": 474.0600281,
+      "y": 1598.166138,
+      "z": 74.66385651
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1242_17": {
+   "DR1242_18": [
+    {
+     "action": 3.0,
+     "instance": "stop 121",
+     "pos": {
+      "x": 659.140686,
+      "y": 1636.614014,
+      "z": 74.66395569
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1246_6": {
+   "DR1249_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 126",
+     "pos": {
+      "x": 441.3873901,
+      "y": 1654.754272,
+      "z": 74.66240692
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR124_2": {
+   "DR126_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 115",
+     "pos": {
+      "x": -882.0978394,
+      "y": -791.4023438,
+      "z": 114.1103058
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR1251_8": {
+   "DR1254_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 130",
+     "pos": {
+      "x": 426.4180298,
+      "y": 1633.306641,
+      "z": 74.63378906
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1252_8": {
+   "DR1222_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 131",
+     "pos": {
+      "x": 426.8768311,
+      "y": 1628.272339,
+      "z": 74.6439743
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1259_10": {
+   "DR1223_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 125",
+     "pos": {
+      "x": 448.0963745,
+      "y": 1655.158081,
+      "z": 74.66252136
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1260_7": {
+   "DR1224_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 127",
+     "pos": {
+      "x": 453.0712891,
+      "y": 1655.035278,
+      "z": 74.66261292
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1261_7": {
+   "DR1252_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 128",
+     "pos": {
+      "x": 457.962616,
+      "y": 1655.120239,
+      "z": 74.66268921
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1271_1": {
+   "DR1272_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 123",
+     "pos": {
+      "x": 615.5756836,
+      "y": 1678.535156,
+      "z": 74.66474152
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1276_3": {
+   "DR1279_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 124",
+     "pos": {
+      "x": 488.4229126,
+      "y": 1685.526855,
+      "z": 74.66308594
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1295_2": {
+   "DR1009_32": [
+    {
+     "action": 3.0,
+     "instance": "stop 133",
+     "pos": {
+      "x": 393.3378906,
+      "y": 1722.977295,
+      "z": 74.87502289
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1299_2": {
+   "DR1299_3": [
+    {
+     "action": 3.0,
+     "instance": "stop 134",
+     "pos": {
+      "x": 389.8388672,
+      "y": 1794.296265,
+      "z": 74.87509155
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1310_11": {
+   "DR1310_111": [
+    {
+     "action": 3.0,
+     "instance": "stop 122",
+     "pos": {
+      "x": 665.3356934,
+      "y": 1637.718872,
+      "z": 74.66497803
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1322_1": {
+   "DR1117_6": [
+    {
+     "action": 3.0,
+     "instance": "stop 132",
+     "pos": {
+      "x": 398.0778198,
+      "y": 1644.388184,
+      "z": 74.87372589
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1330_7": {
+   "DR725_4": [
+    {
+     "action": 3.0,
+     "instance": "stop 72",
+     "pos": {
+      "x": -278.6661987,
+      "y": -41.5226059,
+      "z": 119.728363
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1332_3": {
+   "DR1333_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 105",
+     "pos": {
+      "x": -321.3168945,
+      "y": -69.42969513,
+      "z": 119.4733047
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1333_2": {
+   "DR1333_4": [
+    {
+     "action": 3.0,
+     "instance": "stop 106",
+     "pos": {
+      "x": -335.2249451,
+      "y": -106.6558533,
+      "z": 119.4027176
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1335_10": {
+   "DR1335_11": [
+    {
+     "action": 3.0,
+     "instance": "stop 107",
+     "pos": {
+      "x": -281.158783,
+      "y": -108.1823578,
+      "z": 119.4076691
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1335_12": {
+   "DR99_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 73",
+     "pos": {
+      "x": -276.3673096,
+      "y": -95.6419754,
+      "z": 119.3900681
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR133_1": {
+   "DR133_2": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 122",
+     "pos": {
+      "x": -90.53257751,
+      "y": -968.3017578,
+      "z": 132.2062378
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR1349_2": {
+   "DR1127_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 138",
+     "pos": {
+      "x": -496.7213745,
+      "y": 1988.948242,
+      "z": 78.95733643
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR1352_8": {
+   "DR25_8": [
+    {
+     "action": 3.0,
+     "instance": "stop 182",
+     "pos": {
+      "x": 127.3614654541,
+      "y": 20.503595352173,
+      "z": 118.67157745361
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR136_1": {
+   "DR142_6": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 116",
+     "pos": {
+      "x": -361.2012939,
+      "y": -828.5843506,
+      "z": 137.2306824
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR140_2": {
+   "DR140_3": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 148",
+     "pos": {
+      "x": -344.9118347,
+      "y": -838.4230347,
+      "z": 136.3604736
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR155_2": {
+   "DR155_3": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 80",
+     "pos": {
+      "x": 170.6768646,
+      "y": 821.4492798,
+      "z": 102.0052948
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR156_2": {
+   "DR156_3": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 146",
+     "pos": {
+      "x": 173.7640381,
+      "y": 825.3049927,
+      "z": 101.9867783
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR163_2": {
+   "DR153_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 147",
+     "pos": {
+      "x": 178.5222626,
+      "y": 800.5036011,
+      "z": 102.0622253
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR168_2": {
+   "DR152_7": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 81",
+     "pos": {
+      "x": 183.4983368,
+      "y": 804.3861694,
+      "z": 102.0526199
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR169_7": {
+   "DR652_12": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 23",
+     "pos": {
+      "x": -302.7647705,
+      "y": 318.5656433,
+      "z": 101.5311737
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR170_1": {
+   "DR170_11": [
+    {
+     "action": 3.0,
+     "instance": "stop 110",
+     "pos": {
+      "x": -687.0548096,
+      "y": -121.1539993,
+      "z": 100.5430298
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR173_12": {
+   "DR753_4": [
+    {
+     "action": 3.0,
+     "instance": "stop 83",
+     "pos": {
+      "x": -611.4819946,
+      "y": 30.0304966,
+      "z": 100.5465469
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR173_7": {
+   "DR173_8": [
+    {
+     "action": 3.0,
+     "instance": "stop 108",
+     "pos": {
+      "x": -606.2458496,
+      "y": 1.308299065,
+      "z": 100.5559921
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR193_1": {
+   "DR286_24": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 22",
+     "pos": {
+      "x": -428.3971558,
+      "y": 143.7163391,
+      "z": 99.93087006
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR195_13": {
+   "DR195_14": [
+    {
+     "action": 3.0,
+     "instance": "stop 109",
+     "pos": {
+      "x": -707.0146484,
+      "y": -101.1441956,
+      "z": 100.5559845
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR199_2": {
+   "DR199_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 74",
+     "pos": {
+      "x": -964.1887207,
+      "y": -316.960083,
+      "z": 101.0122604
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR239_1": {
+   "DR290_1": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 15",
+     "pos": {
+      "x": -400.9477539,
+      "y": 439.5221558,
+      "z": 96.0335083
+     },
+     "state": "greenTrafficLight"
+    }
+   ],
+   "DR314_2": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 41",
+     "pos": {
+      "x": -454.5148621,
+      "y": 504.6835632,
+      "z": 96.4123764
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR240_8": {
+   "DR365_3": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 55",
+     "pos": {
+      "x": -429.6430969,
+      "y": 707.3927002,
+      "z": 74.79948425
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR248_2": {
+   "DR154_2": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 78",
+     "pos": {
+      "x": 166.525116,
+      "y": 808.4675293,
+      "z": 102.1170197
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR24_5": {
+   "DR25_8": [
+    {
+     "action": 3.0,
+     "instance": "stop 181",
+     "pos": {
+      "x": 115.4156647,
+      "y": 18.08069038,
+      "z": 119.0102081
+     },
+     "state": "basicStop"
+    }
+   ],
+   "DR26_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 156",
+     "pos": {
+      "x": 108.3976746,
+      "y": 35.33078766,
+      "z": 119.2735138
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR255_6": {
+   "DR255_5": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 27",
+     "pos": {
+      "x": -24.366436,
+      "y": 416.809906,
+      "z": 101.533371
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR256_2": {
+   "DR437_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 64",
+     "pos": {
+      "x": -780.1502686,
+      "y": 659.5403442,
+      "z": 106.3855133
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR258_2": {
+   "DR435_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 61",
+     "pos": {
+      "x": -755.5079346,
+      "y": 558.0817261,
+      "z": 123.2109299
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR259_5": {
+   "DR259_4": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 140",
+     "pos": {
+      "x": 940.7045288,
+      "y": 875.5181885,
+      "z": 131.9501038
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR25_7": {
+   "DR25_8": [
+    {
+     "action": 3.0,
+     "instance": "stop 158",
+     "pos": {
+      "x": 127.9257355,
+      "y": 8.623289108,
+      "z": 119.2597046
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR265_3": {
+   "DR265_4": [
+    {
+     "action": 3.0,
+     "instance": "stop 79",
+     "pos": {
+      "x": -31.16851997,
+      "y": 499.2777405,
+      "z": 74.5791626
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR266_3": {
+   "DR266_4": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 141",
+     "pos": {
+      "x": 937.6121216,
+      "y": 863.616272,
+      "z": 131.8534393
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR268_3": {
+   "autojunction_101": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 131",
+     "pos": {
+      "x": 976.3428345,
+      "y": -735.7327881,
+      "z": 166.448822
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR270_3": {
+   "wpTown_10": [
+    {
+     "action": 3.0,
+     "instance": "stop 50",
+     "pos": {
+      "x": -715.2366943,
+      "y": 551.1323242,
+      "z": 120.0319748
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR272_7": {
+   "DR186_4": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 21",
+     "pos": {
+      "x": -462.6358032,
+      "y": 149.0648956,
+      "z": 100.1865311
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR277_18": {
+   "DR277_17": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 142",
+     "pos": {
+      "x": 890.763855,
+      "y": 965.6506348,
+      "z": 126.2015686
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR280_1": {
+   "DR280_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 90",
+     "pos": {
+      "x": 4.574840546,
+      "y": 552.3994141,
+      "z": 74.57917786
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR280_2": {
+   "DR280_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 91",
+     "pos": {
+      "x": -43.82278442,
+      "y": 558.4138184,
+      "z": 74.5791626
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR284_12": {
+   "DR221_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 1",
+     "pos": {
+      "x": 953.0935669,
+      "y": -446.8690186,
+      "z": 160.9272003
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR285_2": {
+   "DR90_2": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 37",
+     "pos": {
+      "x": -563.2646484,
+      "y": 398.717926,
+      "z": 108.7427368
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR285_3": {
+   "DR316_4": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 11",
+     "pos": {
+      "x": -506.2526245,
+      "y": 333.2476807,
+      "z": 96.91126251
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR286_2": {
+   "DR286_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 28",
+     "pos": {
+      "x": -164.7263031,
+      "y": 157.2251282,
+      "z": 121.3714142
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR287_12": {
+   "DR287_13": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 129",
+     "pos": {
+      "x": 1004.606323,
+      "y": -815.3781128,
+      "z": 166.6476746
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR287_15": {
+   "DR236_11": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 132",
+     "pos": {
+      "x": 990.3851318,
+      "y": -750.8532104,
+      "z": 166.4845123
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR290_1": {
+   "DR316_4": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 10",
+     "pos": {
+      "x": -490.4729004,
+      "y": 336.683136,
+      "z": 96.91001892
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR295_16": {
+   "DR548_1": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 52",
+     "pos": {
+      "x": -555.6383667,
+      "y": 594.1397705,
+      "z": 89.95127106
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR295_3": {
+   "DR295_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 49",
+     "pos": {
+      "x": -719.8430786,
+      "y": 571.4017334,
+      "z": 119.9493713
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR297_2": {
+   "DR307_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 46",
+     "pos": {
+      "x": -655.7023315,
+      "y": 470.6046143,
+      "z": 117.1143646
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR297_3": {
+   "DR308_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 43",
+     "pos": {
+      "x": -750.6314697,
+      "y": 386.6893005,
+      "z": 143.2070313
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR299_2": {
+   "DR288_1": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 33",
+     "pos": {
+      "x": -669.2733765,
+      "y": 293.1741943,
+      "z": 129.2163086
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR299_3": {
+   "wpTown_5": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 7",
+     "pos": {
+      "x": -611.916687,
+      "y": 227.8621216,
+      "z": 112.3865814
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR2_9": {
+   "DR2_10": [
+    {
+     "action": 3.0,
+     "instance": "stop 157",
+     "pos": {
+      "x": -169.943924,
+      "y": -251.189209,
+      "z": 118.7845306
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR302_10": {
+   "DR302_11": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 77",
+     "pos": {
+      "x": 183.1667023,
+      "y": 630.2188721,
+      "z": 100.3376465
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR306_2": {
+   "DR441_121": [
+    {
+     "action": 3.0,
+     "instance": "stop 51",
+     "pos": {
+      "x": -918.0385132,
+      "y": 431.6062927,
+      "z": 153.2237854
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR306_6": {
+   "DR607_4": [
+    {
+     "action": 3.0,
+     "instance": "stop 56",
+     "pos": {
+      "x": -872.5941162,
+      "y": 278.7111206,
+      "z": 159.3891754
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR307_2": {
+   "DR307_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 47",
+     "pos": {
+      "x": -644.4472046,
+      "y": 492.7225037,
+      "z": 116.6044083
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR307_3": {
+   "DR548_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 50",
+     "pos": {
+      "x": -549.9156494,
+      "y": 576.4788818,
+      "z": 90.01853943
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR311_2": {
+   "wpTown_6": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 2",
+     "pos": {
+      "x": -701.586853,
+      "y": 125.7940521,
+      "z": 118.3676224
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR313_3": {
+   "DR484_5": [
+    {
+     "action": 3.0,
+     "instance": "stop 59",
+     "pos": {
+      "x": -778.0122681,
+      "y": 202.2620239,
+      "z": 138.6791534
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR314_2": {
+   "DR548_1": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 53",
+     "pos": {
+      "x": -532.6793213,
+      "y": 581.7477417,
+      "z": 89.97186279
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR315_2": {
+   "DR160_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 76",
+     "pos": {
+      "x": 180.4995728,
+      "y": 653.546936,
+      "z": 100.3559418
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR316_2": {
+   "wpTown_5": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 6",
+     "pos": {
+      "x": -595.8532715,
+      "y": 231.3179016,
+      "z": 112.318161
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR316_3": {
+   "DR316_4": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 9",
+     "pos": {
+      "x": -499.9314575,
+      "y": 315.9978638,
+      "z": 96.95038605
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR316_4": {
+   "DR290_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 13",
+     "pos": {
+      "x": -394.8427734,
+      "y": 421.0202942,
+      "z": 96.03289795
+     },
+     "state": "redTrafficLight"
+    }
+   ],
+   "DR685_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 60",
+     "pos": {
+      "x": -456.5316162,
+      "y": 283.8708191,
+      "z": 98.20560455
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR317_1": {
+   "DR127_1": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 114",
+     "pos": {
+      "x": -888.4518433,
+      "y": -780.5862427,
+      "z": 113.5853806
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR320_3": {
+   "DR320_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 55",
+     "pos": {
+      "x": -851.8433228,
+      "y": 264.2846069,
+      "z": 159.3810272
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR320_8": {
+   "DR320_9": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 3",
+     "pos": {
+      "x": -716.6714478,
+      "y": 122.6875916,
+      "z": 118.3746948
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR321_2": {
+   "DR321_3": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 143",
+     "pos": {
+      "x": 893.9741821,
+      "y": 968.3268433,
+      "z": 126.553421
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR323_2": {
+   "junction1_wp10": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 69",
+     "pos": {
+      "x": -347.9612122,
+      "y": 632.7389526,
+      "z": 74.81253052
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR324_2": {
+   "DR441_121": [
+    {
+     "action": 3.0,
+     "instance": "stop 53",
+     "pos": {
+      "x": -910.0211792,
+      "y": 442.0752563,
+      "z": 153.1800232
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR324_3": {
+   "DR446_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 54",
+     "pos": {
+      "x": -779.343689,
+      "y": 438.8905334,
+      "z": 139.8434753
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR325_2": {
+   "DR449_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 5",
+     "pos": {
+      "x": 950.56353759766,
+      "y": -955.27520751953,
+      "z": 167.05212402344
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR336_3": {
+   "DR746_141": [
+    {
+     "action": 3.0,
+     "instance": "stop 92",
+     "pos": {
+      "x": -51.4291153,
+      "y": 652.2162476,
+      "z": 74.5791626
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR339_6": {
+   "DR339_7": [
+    {
+     "action": 3.0,
+     "instance": "stop 2",
+     "pos": {
+      "x": 954.977356,
+      "y": -471.6586304,
+      "z": 161.9187622
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR346_7": {
+   "DR345_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 6",
+     "pos": {
+      "x": 207.9793396,
+      "y": -717.9771118,
+      "z": 142.9206848
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR349_2": {
+   "DR349_3": [
+    {
+     "action": 3.0,
+     "instance": "stop 7",
+     "pos": {
+      "x": 191.3824768,
+      "y": -668.6583862,
+      "z": 137.5162506
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR352_1": {
+   "autojunction_68": [
+    {
+     "action": 3.0,
+     "instance": "stop 164",
+     "pos": {
+      "x": 367.54986572266,
+      "y": -337.7600402832,
+      "z": 148.72676086426
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR363_3": {
+   "DR358_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 64",
+     "pos": {
+      "x": -275.885498,
+      "y": 550.3800659,
+      "z": 74.79357147
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR364_3": {
+   "DR364_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 63",
+     "pos": {
+      "x": -290.4614258,
+      "y": 527.0740356,
+      "z": 74.95132446
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR36_2": {
+   "DR695_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 175",
+     "pos": {
+      "x": 451.70373535156,
+      "y": -333.27703857422,
+      "z": 151.75140380859
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR371_1": {
+   "DR367_2": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 58",
+     "pos": {
+      "x": -450.6281433,
+      "y": 699.2363892,
+      "z": 74.87187195
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR371_2": {
+   "DR371_3": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 56",
+     "pos": {
+      "x": -445.9378052,
+      "y": 703.7196655,
+      "z": 74.88497925
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR379_4": {
+   "DR377_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 186",
+     "pos": {
+      "x": -526.6162109375,
+      "y": 760.06311035156,
+      "z": 74.666229248047
+     },
+     "state": "basicStop"
+    }
+   ],
+   "DR380_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 45",
+     "pos": {
+      "x": -525.0958862,
+      "y": 757.1152344,
+      "z": 74.68481445
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR384_2": {
+   "DR440_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 48",
+     "pos": {
+      "x": -909.2304688,
+      "y": 557.8213501,
+      "z": 131.9127808
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR384_3": {
+   "DR435_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 60",
+     "pos": {
+      "x": -781.1828613,
+      "y": 552.3319702,
+      "z": 123.7356567
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR389_1": {
+   "DR393_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 28",
+     "pos": {
+      "x": -41.19043732,
+      "y": 411.453186,
+      "z": 101.6204987
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR397_1": {
+   "DR394_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 123",
+     "pos": {
+      "x": -100.0033798,
+      "y": -953.9447021,
+      "z": 132.2875214
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR398_1": {
+   "DR398_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 12",
+     "pos": {
+      "x": -776.0409546,
+      "y": -515.0581665,
+      "z": 99.9598999
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR404_8": {
+   "DR403_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 88",
+     "pos": {
+      "x": 26.48484039,
+      "y": 599.1942749,
+      "z": 74.57917023
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR413_1": {
+   "DR413_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 36",
+     "pos": {
+      "x": -909.512207,
+      "y": 771.3201294,
+      "z": 92.12322998
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR413_2": {
+   "DR413_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 39",
+     "pos": {
+      "x": -780.4030151,
+      "y": 767.7592773,
+      "z": 87.68515778
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR423_2": {
+   "DR291_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 38",
+     "pos": {
+      "x": -772.0529175,
+      "y": 779.8262329,
+      "z": 87.5133667
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR430_2": {
+   "DR422_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 33",
+     "pos": {
+      "x": -766.1188354,
+      "y": 862.4354248,
+      "z": 75.11371613
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR434_2": {
+   "DR414_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 40",
+     "pos": {
+      "x": -757.1825562,
+      "y": 771.2738037,
+      "z": 87.43455505
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR435_2": {
+   "DR435_1": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 62",
+     "pos": {
+      "x": -771.7466431,
+      "y": 567.0811768,
+      "z": 123.4360428
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR435_3": {
+   "DR435_4": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 67",
+     "pos": {
+      "x": -765.9688721,
+      "y": 651.7684326,
+      "z": 106.4750824
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR437_1": {
+   "DR256_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 44",
+     "pos": {
+      "x": -909.7849121,
+      "y": 663.119873,
+      "z": 112.0158844
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR439_2": {
+   "DR435_5": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 66",
+     "pos": {
+      "x": -772.050293,
+      "y": 670.8556519,
+      "z": 106.2735748
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR439_3": {
+   "DR439_4": [
+    {
+     "action": 3.0,
+     "instance": "stop 37",
+     "pos": {
+      "x": -767.0038452,
+      "y": 759.3148804,
+      "z": 87.74236298
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR43_3": {
+   "DR44_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 162",
+     "pos": {
+      "x": -70.16640472,
+      "y": -103.4274521,
+      "z": 119.3900528
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR441_11": {
+   "DR440_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 46",
+     "pos": {
+      "x": -917.7241821,
+      "y": 544.2848511,
+      "z": 132.1500092
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR441_12": {
+   "DR441_121": [
+    {
+     "action": 3.0,
+     "instance": "stop 52",
+     "pos": {
+      "x": -922.484436,
+      "y": 449.9183655,
+      "z": 153.1751709
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR441_2": {
+   "DR552_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 145",
+     "pos": {
+      "x": -917.3340454,
+      "y": 861.4970093,
+      "z": 74.76637268
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR441_3": {
+   "DR416_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 34",
+     "pos": {
+      "x": -922.4196167,
+      "y": 778.7053833,
+      "z": 92.08049011
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR441_5": {
+   "DR416_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 35",
+     "pos": {
+      "x": -917.4404297,
+      "y": 760.0723267,
+      "z": 92.22593689
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR441_6": {
+   "DR855_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 43",
+     "pos": {
+      "x": -921.8375854,
+      "y": 671.4765625,
+      "z": 111.934021
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR441_8": {
+   "DR441_7": [
+    {
+     "action": 3.0,
+     "instance": "stop 42",
+     "pos": {
+      "x": -917.9299316,
+      "y": 651.3985596,
+      "z": 112.2363281
+     },
+     "state": "basicStop"
+    }
+   ],
+   "DR441_9": [
+    {
+     "action": 3.0,
+     "instance": "stop 47",
+     "pos": {
+      "x": -921.9738159,
+      "y": 566.776001,
+      "z": 131.7800293
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR445_2": {
+   "DR443_1": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 63",
+     "pos": {
+      "x": -766.0786133,
+      "y": 543.3897095,
+      "z": 123.8381424
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR446_2": {
+   "DR95_1": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 44",
+     "pos": {
+      "x": -772.3907471,
+      "y": 393.6138916,
+      "z": 142.9635315
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR44_1": {
+   "DR43_3": [
+    {
+     "action": 3.0,
+     "instance": "stop 161",
+     "pos": {
+      "x": -63.56169128,
+      "y": -120.0164032,
+      "z": 119.3959351
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR45_3": {
+   "DR45_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 163",
+     "pos": {
+      "x": -152.5847473,
+      "y": -226.4125061,
+      "z": 118.7778397
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR461_7": {
+   "DR461_8": [
+    {
+     "action": 3.0,
+     "instance": "stop 25",
+     "pos": {
+      "x": -257.36663818359,
+      "y": -9.3109951019287,
+      "z": 120.40570068359
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR464_2": {
+   "DR464_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 23",
+     "pos": {
+      "x": -152.5638428,
+      "y": -24.666955950000002,
+      "z": 120.0138702
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR46_10": {
+   "DR46_11": [
+    {
+     "action": 3.0,
+     "instance": "stop 160",
+     "pos": {
+      "x": 52.06446075,
+      "y": -6.30969429,
+      "z": 119.3900681
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR472_3": {
+   "DR465_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 24",
+     "pos": {
+      "x": -167.0700989,
+      "y": 1.3319969180000002,
+      "z": 121.8679276
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR481_1": {
+   "tennis_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 21",
+     "pos": {
+      "x": -18.53061485,
+      "y": 260.0503235,
+      "z": 121.3680573
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR490_7": {
+   "DR613_8": [
+    {
+     "action": 3.0,
+     "instance": "stop 112",
+     "pos": {
+      "x": -888.7677612,
+      "y": -687.8355103,
+      "z": 105.2591934
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR491_4": {
+   "DR196_11": [
+    {
+     "action": 3.0,
+     "instance": "stop 113",
+     "pos": {
+      "x": -851.2009888,
+      "y": -661.2576904,
+      "z": 104.4899597
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR4_12": {
+   "DR4_13": [
+    {
+     "action": 3.0,
+     "instance": "stop 168",
+     "pos": {
+      "x": 515.7785645,
+      "y": -113.6715775,
+      "z": 146.4436035
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR4_2": {
+   "DR4_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 167",
+     "pos": {
+      "x": 643.0291138,
+      "y": -106.5542679,
+      "z": 146.628479
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR501_2": {
+   "DR501_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 18",
+     "pos": {
+      "x": 592.1304932,
+      "y": 984.4137573,
+      "z": 121.3493347
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR501_34": {
+   "countryside_road_9": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 75",
+     "pos": {
+      "x": 194.3632813,
+      "y": 640.8793945,
+      "z": 100.437355
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR504_2": {
+   "DR504_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 124",
+     "pos": {
+      "x": 57.85053253,
+      "y": -773.0470581,
+      "z": 133.1707916
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR508_7": {
+   "DR53_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 137",
+     "pos": {
+      "x": 481.3893433,
+      "y": -440.4040222,
+      "z": 151.3358459
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR511_4": {
+   "DR511_3": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 135",
+     "pos": {
+      "x": 485.6374512,
+      "y": -370.1498108,
+      "z": 151.3610077
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR515_1": {
+   "DR216_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 3",
+     "pos": {
+      "x": 940.8804321,
+      "y": -459.9784546,
+      "z": 161.3765411
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR529_13": {
+   "autojunction_68": [
+    {
+     "action": 3.0,
+     "instance": "stop 165",
+     "pos": {
+      "x": 364.74884033203,
+      "y": -318.47445678711,
+      "z": 148.94131469727
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR536_1": {
+   "DR148_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 8",
+     "pos": {
+      "x": -195.7383881,
+      "y": -816.241333,
+      "z": 135.2335205
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR541_2": {
+   "DR51_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 159",
+     "pos": {
+      "x": -83.2897644,
+      "y": -286.3033447,
+      "z": 125.2130356
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR543_2": {
+   "DR543_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 172",
+     "pos": {
+      "x": -220.6292725,
+      "y": -264.6507568,
+      "z": 118.7796631
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR546_11": {
+   "DR613_11": [
+    {
+     "action": 3.0,
+     "instance": "stop 16",
+     "pos": {
+      "x": -828.6055908,
+      "y": -571.0084229,
+      "z": 100.1087799
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR548_1": {
+   "DR314_2": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 40",
+     "pos": {
+      "x": -477.8853455,
+      "y": 516.6757813,
+      "z": 96.33618164
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR548_2": {
+   "DR548_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 51",
+     "pos": {
+      "x": -537.3182983,
+      "y": 599.4876709,
+      "z": 89.89465332
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR549_7": {
+   "DR277_14": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 144",
+     "pos": {
+      "x": 870.1859131,
+      "y": 975.9911499,
+      "z": 124.7324677
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR54_3": {
+   "DR54_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 166",
+     "pos": {
+      "x": 334.4510498,
+      "y": -189.371048,
+      "z": 143.535553
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR558_7": {
+   "DR687_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 31",
+     "pos": {
+      "x": -799.7785034,
+      "y": 3.873301744,
+      "z": 117.3072357
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR566_11": {
+   "DR582_5": [
+    {
+     "action": 3.0,
+     "instance": "stop 20",
+     "pos": {
+      "x": 462.9563599,
+      "y": 806.3242798,
+      "z": 124.7180939
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR568_1": {
+   "DR568_2": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 54",
+     "pos": {
+      "x": -445.9953308,
+      "y": 681.8005981,
+      "z": 75.01265717
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR576_1": {
+   "DR571_5": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 25",
+     "pos": {
+      "x": -302.968811,
+      "y": 335.0088501,
+      "z": 101.8029022
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR579_4": {
+   "DR350_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 154",
+     "pos": {
+      "x": 195.3243256,
+      "y": -643.4705811,
+      "z": 137.660202
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR57_2": {
+   "DR511_3": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 134",
+     "pos": {
+      "x": 479.0424194,
+      "y": -383.1137085,
+      "z": 151.2341461
+     },
+     "state": "redTrafficLight"
+    }
+   ],
+   "DR53_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 136",
+     "pos": {
+      "x": 476.0068665,
+      "y": -417.9205017,
+      "z": 151.3071289
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR581_1": {
+   "DR571_5": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 24",
+     "pos": {
+      "x": -286.4265747,
+      "y": 335.4569702,
+      "z": 101.744812
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR581_7": {
+   "DR290_1": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 16",
+     "pos": {
+      "x": -375.1478271,
+      "y": 425.0361023,
+      "z": 96.13047028
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR583_13": {
+   "DR583_14": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 138",
+     "pos": {
+      "x": 469.4179993,
+      "y": -431.555603,
+      "z": 151.2329254
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR585_1": {
+   "DR589_11_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 118",
+     "pos": {
+      "x": -343.104187,
+      "y": -821.1602783,
+      "z": 137.0748901
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR585_4": {
+   "DR123_1": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 117",
+     "pos": {
+      "x": -341.2037964,
+      "y": -834.1616211,
+      "z": 136.3559723
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR589_2": {
+   "DR589_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 119",
+     "pos": {
+      "x": -358.0178223,
+      "y": -842.1373291,
+      "z": 136.3934326
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR589_85": {
+   "DR589_86": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 113",
+     "pos": {
+      "x": -894.4476318,
+      "y": -797.7057495,
+      "z": 113.9844742
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR591_3": {
+   "DR591_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 69",
+     "pos": {
+      "x": -873.010376,
+      "y": -414.6291199,
+      "z": 99.41932678
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR591_7": {
+   "DR398_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 13",
+     "pos": {
+      "x": -793.8140259,
+      "y": -503.4096069,
+      "z": 98.90840912
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR605_2": {
+   "DR685_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 62",
+     "pos": {
+      "x": -443.6943359,
+      "y": 288.917511,
+      "z": 98.53482056
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR606_3": {
+   "DR122_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 17",
+     "pos": {
+      "x": -448.055481,
+      "y": 136.4721375,
+      "z": 99.93682861
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR607_3": {
+   "DR607_4": [
+    {
+     "action": 3.0,
+     "instance": "stop 57",
+     "pos": {
+      "x": -866.8261108,
+      "y": 260.2317505,
+      "z": 159.4199982
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR608_2": {
+   "DR373_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 57",
+     "pos": {
+      "x": -428.5574036,
+      "y": 685.5603027,
+      "z": 74.84465027
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR613_9": {
+   "DR613_10": [
+    {
+     "action": 3.0,
+     "instance": "stop 17",
+     "pos": {
+      "x": -857.5305176,
+      "y": -725.0982666,
+      "z": 111.2629547
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR615_4": {
+   "DR190_2": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 18",
+     "pos": {
+      "x": -441.9995422,
+      "y": 157.7163849,
+      "z": 100.1256866
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR617_2": {
+   "DR656_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 87",
+     "pos": {
+      "x": -352.5723572,
+      "y": 306.6932678,
+      "z": 101.6616516
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR621_2": {
+   "DR621_3": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 19",
+     "pos": {
+      "x": -442.0567322,
+      "y": 134.7097931,
+      "z": 99.84308624
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR622_1": {
+   "DR402_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 89",
+     "pos": {
+      "x": 14.0936203,
+      "y": 532.2841187,
+      "z": 74.57917023
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR633_10": {
+   "DR633_11": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 126",
+     "pos": {
+      "x": 46.80538559,
+      "y": -755.9438477,
+      "z": 133.1368866
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR636_3": {
+   "DR636_4": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 121",
+     "pos": {
+      "x": -116.6116943,
+      "y": -968.7334595,
+      "z": 132.3944397
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR636_4": {
+   "DR590_2": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 120",
+     "pos": {
+      "x": -115.2847519,
+      "y": -964.996521,
+      "z": 132.3943176
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR644_29": {
+   "Bridge7_A": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 139",
+     "pos": {
+      "x": 957.1601563,
+      "y": 860.1915894,
+      "z": 133.4083862
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR645_2": {
+   "DR685_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 61",
+     "pos": {
+      "x": -456.0892639,
+      "y": 272.449585,
+      "z": 98.55214691
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR647_2": {
+   "DR647_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 10",
+     "pos": {
+      "x": -602.4811401,
+      "y": -459.7843323,
+      "z": 113.3173981
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR651_8": {
+   "DR154_1": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 79",
+     "pos": {
+      "x": 189.4985352,
+      "y": 818.8751831,
+      "z": 101.9434662
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR665_3": {
+   "DR665_4": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 125",
+     "pos": {
+      "x": 50.63532639,
+      "y": -760.2650146,
+      "z": 133.2097778
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR666_10": {
+   "DR666_11": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 20",
+     "pos": {
+      "x": -448.7626343,
+      "y": 160.1424866,
+      "z": 100.2070541
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR667_4": {
+   "DR715_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 11",
+     "pos": {
+      "x": -612.2064819,
+      "y": -517.3983154,
+      "z": 115.2824402
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR671_11": {
+   "DR671_12": [
+    {
+     "action": 3.0,
+     "instance": "stop 99",
+     "pos": {
+      "x": -401.4219666,
+      "y": 156.2983093,
+      "z": 100.2778015
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR677_2": {
+   "DR677_3": [
+    {
+     "action": 3.0,
+     "instance": "stop 41",
+     "pos": {
+      "x": -633.9113159,
+      "y": 780.1287231,
+      "z": 74.66375732
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR681_2": {
+   "DR681_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 14",
+     "pos": {
+      "x": -730.6258545,
+      "y": -573.6852417,
+      "z": 104.5198364
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR684_1": {
+   "DR233_7": [
+    {
+     "action": 3.0,
+     "instance": "stop 4",
+     "pos": {
+      "x": 882.5108643,
+      "y": -456.1517944,
+      "z": 161.9287262
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR685_2": {
+   "DR316_4": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 12",
+     "pos": {
+      "x": -483.8753662,
+      "y": 319.384552,
+      "z": 96.88913727
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR686_2": {
+   "DR719_9": [
+    {
+     "action": 3.0,
+     "instance": "stop 15",
+     "pos": {
+      "x": -773.0521851,
+      "y": -623.560791,
+      "z": 105.3503418
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR687_1": {
+   "wpTown_6": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 1",
+     "pos": {
+      "x": -710.4320068,
+      "y": 105.6923981,
+      "z": 118.3527527
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR695_1": {
+   "DR36_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 183",
+     "pos": {
+      "x": 457.84982299805,
+      "y": -326.28884887695,
+      "z": 152.27029418945
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR700_36": {
+   "autojunction_1311": [
+    {
+     "action": 3.0,
+     "instance": "stop 71",
+     "pos": {
+      "x": -878.164978,
+      "y": -397.3480835,
+      "z": 100.4088287
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR701_21": {
+   "DR507_7": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 127",
+     "pos": {
+      "x": 36.91984558,
+      "y": -782.4663086,
+      "z": 132.8626099
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR704_8": {
+   "autojunction_249": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 130",
+     "pos": {
+      "x": 987.1062622,
+      "y": -804.9649048,
+      "z": 166.5561371
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR705_54": {
+   "DR503_3": [
+    {
+     "action": 3.0,
+     "instance": "stop 9",
+     "pos": {
+      "x": -303.6397095,
+      "y": -791.9561157,
+      "z": 137.1079712
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR725_2": {
+   "autojunction_134": [
+    {
+     "action": 3.0,
+     "instance": "stop 104",
+     "pos": {
+      "x": -261.5304565,
+      "y": -35.13069916,
+      "z": 120.1530609
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR729_1": {
+   "DR469_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 26",
+     "pos": {
+      "x": -100.6202316,
+      "y": 94.98292542,
+      "z": 124.9811554
+     },
+     "state": "basicStop"
+    }
+   ],
+   "DR688_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 27",
+     "pos": {
+      "x": -142.8429108,
+      "y": 142.5696259,
+      "z": 121.7654953
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR730_1": {
+   "DR477_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 22",
+     "pos": {
+      "x": -62.38498306,
+      "y": 104.4505997,
+      "z": 125.8311768
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR731_2": {
+   "DR459_7": [
+    {
+     "action": 3.0,
+     "instance": "stop 100",
+     "pos": {
+      "x": -141.7867737,
+      "y": 30.40115738,
+      "z": 122.704689
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR731_5": {
+   "DR731_6": [
+    {
+     "action": 3.0,
+     "instance": "stop 101",
+     "pos": {
+      "x": -121.2724304,
+      "y": -4.161581039,
+      "z": 119.9209747
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR735_2": {
+   "DR466_3": [
+    {
+     "action": 3.0,
+     "instance": "stop 155",
+     "pos": {
+      "x": -5.700922966,
+      "y": 73.47781372,
+      "z": 119.5923538
+     },
+     "state": "basicStop"
+    }
+   ],
+   "DR478_4": [
+    {
+     "action": 3.0,
+     "instance": "stop 185",
+     "pos": {
+      "x": -30.0,
+      "y": 80.0,
+      "z": 121.484
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR736_3": {
+   "DR736_2": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 133",
+     "pos": {
+      "x": 471.1439819,
+      "y": -360.6018677,
+      "z": 151.247757
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR736_8": {
+   "autojunction_68": [
+    {
+     "action": 3.0,
+     "instance": "stop 174",
+     "pos": {
+      "x": 381.4649658,
+      "y": -326.9232483,
+      "z": 149.5230408
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR738_7": {
+   "DR738_8": [
+    {
+     "action": 3.0,
+     "instance": "stop 150",
+     "pos": {
+      "x": -456.9199219,
+      "y": 185.9330444,
+      "z": 100.4884338
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR743_1": {
+   "autojunction_30": [
+    {
+     "action": 3.0,
+     "instance": "stop 95",
+     "pos": {
+      "x": -261.5939941,
+      "y": 652.3319702,
+      "z": 74.76708984
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR746_14": {
+   "DR301_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 93",
+     "pos": {
+      "x": 6.488911152,
+      "y": 658.8430786,
+      "z": 74.57917023
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR753_16": {
+   "DR753_17": [
+    {
+     "action": 3.0,
+     "instance": "stop 86",
+     "pos": {
+      "x": -488.8837585,
+      "y": 78.83203888,
+      "z": 99.84582520000001
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR753_3": {
+   "DR753_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 85",
+     "pos": {
+      "x": -625.9227905,
+      "y": 55.05434418,
+      "z": 102.7545319
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR753_7": {
+   "DR181_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 84",
+     "pos": {
+      "x": -578.8154907,
+      "y": 4.853023052,
+      "z": 100.5559921
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR755_2": {
+   "DR755_3": [
+    {
+     "action": 3.0,
+     "instance": "stop 146",
+     "pos": {
+      "x": -664.1480713,
+      "y": 139.8039246,
+      "z": 116.7414398
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR756_11": {
+   "DR756_10": [
+    {
+     "action": 3.0,
+     "instance": "stop 147",
+     "pos": {
+      "x": -681.1610107,
+      "y": 119.5170898,
+      "z": 116.7414398
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR756_8": {
+   "DR756_7": [
+    {
+     "action": 3.0,
+     "instance": "stop 148",
+     "pos": {
+      "x": -669.1719971,
+      "y": 97.88362122,
+      "z": 116.7414398
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR75_1": {
+   "DR7_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 169",
+     "pos": {
+      "x": -185.9084015,
+      "y": -179.5872498,
+      "z": 119.133461
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR765_5": {
+   "DR765_4": [
+    {
+     "action": 3.0,
+     "instance": "stop 19",
+     "pos": {
+      "x": 605.8391724,
+      "y": 981.6531372,
+      "z": 122.0586319
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR766_3": {
+   "DR766_4": [
+    {
+     "action": 3.0,
+     "instance": "stop 97",
+     "pos": {
+      "x": -532.0343018,
+      "y": 171.4780121,
+      "z": 100.4200439
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR768_9": {
+   "DR602_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 98",
+     "pos": {
+      "x": -432.5915527,
+      "y": 217.5678864,
+      "z": 100.8743896
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR770_1": {
+   "DR738_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 149",
+     "pos": {
+      "x": -478.7831726,
+      "y": 172.6850739,
+      "z": 100.477478
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR773_4": {
+   "DR463_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 102",
+     "pos": {
+      "x": -183.121521,
+      "y": -11.64194489,
+      "z": 121.4523239
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR778_1": {
+   "DR726_6": [
+    {
+     "action": 3.0,
+     "instance": "stop 103",
+     "pos": {
+      "x": -191.8508606,
+      "y": -55.7789917,
+      "z": 119.7541046
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR795_2": {
+   "DR795_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 81",
+     "pos": {
+      "x": 928.9281616,
+      "y": -525.7628174,
+      "z": 163.6244202
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR797_2": {
+   "DR797_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 82",
+     "pos": {
+      "x": 874.7346802,
+      "y": -526.02771,
+      "z": 163.7742462
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR7_5": {
+   "DR78_4": [
+    {
+     "action": 3.0,
+     "instance": "stop 170",
+     "pos": {
+      "x": -194.2750854,
+      "y": -245.4848328,
+      "z": 118.7738037
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR811_5": {
+   "DR232_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 152",
+     "pos": {
+      "x": 875.013855,
+      "y": -594.6741333,
+      "z": 166.5601196
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR835_7": {
+   "DR835_8": [
+    {
+     "action": 3.0,
+     "instance": "stop 151",
+     "pos": {
+      "x": 548.6225586,
+      "y": -892.1397705,
+      "z": 152.9967651
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR868_2": {
+   "DR199_1": [
+    {
+     "action": 3.0,
+     "instance": "stop 75",
+     "pos": {
+      "x": -984.2016602,
+      "y": -328.5787354,
+      "z": 101.7631226
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR868_27": {
+   "DR868_28": [
+    {
+     "action": 3.0,
+     "instance": "stop 116",
+     "pos": {
+      "x": -1210.230469,
+      "y": -672.7220459,
+      "z": 104.3589935
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR869_9": {
+   "DR869_10": [
+    {
+     "action": 3.0,
+     "instance": "stop 115",
+     "pos": {
+      "x": -1117.454102,
+      "y": -540.1702271,
+      "z": 104.3589935
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR93_3": {
+   "DR93_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 32",
+     "pos": {
+      "x": -820.4212036,
+      "y": 18.88533974,
+      "z": 117.5322647
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR94_2": {
+   "wpTown_6": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 4",
+     "pos": {
+      "x": -695.5675049,
+      "y": 109.4028244,
+      "z": 118.3132553
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "DR94_4": {
+   "DR94_5": [
+    {
+     "action": 3.0,
+     "instance": "stop 30",
+     "pos": {
+      "x": -650.3137207,
+      "y": 56.75954056,
+      "z": 103.204071
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR983_3": {
+   "DR983_4": [
+    {
+     "action": 3.0,
+     "instance": "stop 139",
+     "pos": {
+      "x": -540.6546631,
+      "y": 1963.237305,
+      "z": 79.02431488
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "DR985_28": {
+   "DR985_29": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 84",
+     "pos": {
+      "x": -723.5419312,
+      "y": 1801.724609,
+      "z": 85.65356445
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR986_30": {
+   "DR1105_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 98",
+     "pos": {
+      "x": 14.43136692,
+      "y": 1830.562012,
+      "z": 104.2485199
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR988_23": {
+   "DR988_24": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 100",
+     "pos": {
+      "x": 41.29194641,
+      "y": 1847.206055,
+      "z": 103.9201508
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR990_40": {
+   "DR990_41": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 83",
+     "pos": {
+      "x": -757.1196289,
+      "y": 1791.832031,
+      "z": 86.1917572
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR991_1": {
+   "autojunction_219": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 96",
+     "pos": {
+      "x": 321.6612854,
+      "y": 1569.264038,
+      "z": 74.79797363
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "DR994_4": {
+   "DR1004_1": [
+    {
+     "action": 1.0,
+     "instance": "trafficLight 97",
+     "pos": {
+      "x": 309.3042908,
+      "y": 1569.191284,
+      "z": 74.75175476
+     },
+     "state": "yellowTrafficLight"
+    }
+   ]
+  },
+  "DR997_3": {
+   "DR1000_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 94",
+     "pos": {
+      "x": 306.9696655,
+      "y": 1556.823975,
+      "z": 74.73033905
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "autojunction_10": {
+   "autojunction_138": [
+    {
+     "action": 3.0,
+     "instance": "stop 111",
+     "pos": {
+      "x": -803.6343994,
+      "y": -605.0098877,
+      "z": 103.1099854
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "autojunction_11": {
+   "DR493_7": [
+    {
+     "action": 3.0,
+     "instance": "stop 114",
+     "pos": {
+      "x": -829.1068115,
+      "y": -653.4509888,
+      "z": 104.0458069
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "autojunction_159": {
+   "autojunction_106": [
+    {
+     "action": 3.0,
+     "instance": "stop 171",
+     "pos": {
+      "x": -237.6976929,
+      "y": -274.6861572,
+      "z": 118.7855377
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "autojunction_2281": {
+   "DR1136_5": [
+    {
+     "action": 3.0,
+     "instance": "stop 96",
+     "pos": {
+      "x": -177.874649,
+      "y": 533.5214233,
+      "z": 74.84604645
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "autojunction_60": {
+   "DR1319_2": [
+    {
+     "action": 3.0,
+     "instance": "stop 176",
+     "pos": {
+      "x": 406.0689392,
+      "y": 1893.514038,
+      "z": 74.78644562
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "junction1_wp18": {
+   "junction1_wp12": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 72",
+     "pos": {
+      "x": -371.5031433,
+      "y": 620.177002,
+      "z": 74.89024353
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "junction1_wp27": {
+   "junction1_wp24": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 59",
+     "pos": {
+      "x": -424.3705444,
+      "y": 689.5581665,
+      "z": 74.81242371
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "junction1_wp31": {
+   "junction1_wp30": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 70",
+     "pos": {
+      "x": -367.2963867,
+      "y": 624.2970581,
+      "z": 74.87492371
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "junction1_wp32": {
+   "junction1_wp33": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 71",
+     "pos": {
+      "x": -352.37677,
+      "y": 609.689209,
+      "z": 74.89610291
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "junction1_wp4": {
+   "junction1_wp29": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 73",
+     "pos": {
+      "x": -348.2228394,
+      "y": 613.8499146,
+      "z": 74.89610291
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "parking_lot_RT": {
+   "autojunction_68": [
+    {
+     "action": 3.0,
+     "instance": "stop 173",
+     "pos": {
+      "x": 355.1679993,
+      "y": -327.9897766,
+      "z": 148.4471436
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "tunnel_city_A_63": {
+   "junction1_wp12": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 68",
+     "pos": {
+      "x": -368.5014343,
+      "y": 604.6550903,
+      "z": 74.90240479
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "tunnel_city_B_58": {
+   "DR265_41": [
+    {
+     "action": 3.0,
+     "instance": "stop 80",
+     "pos": {
+      "x": -10.03098774,
+      "y": 487.0087585,
+      "z": 74.58505249
+     },
+     "state": "basicStop"
+    }
+   ]
+  },
+  "tunnel_city_D_0": {
+   "DR387_5": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 145",
+     "pos": {
+      "x": -39.96316528,
+      "y": 397.4368896,
+      "z": 101.3964539
+     },
+     "state": "greenTrafficLight"
+    }
+   ],
+   "tunnel_city_D_1": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 26",
+     "pos": {
+      "x": -37.03811264,
+      "y": 394.1802063,
+      "z": 101.339653
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "tunnel_city_E_70": {
+   "tunnel_city_E_71": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 29",
+     "pos": {
+      "x": -20.03678894,
+      "y": 398.9621277,
+      "z": 101.2047348
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "wpTown_1": {
+   "DR308_1": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 45",
+     "pos": {
+      "x": -745.263855,
+      "y": 368.5221863,
+      "z": 143.0229034
+     },
+     "state": "greenTrafficLight"
+    }
+   ],
+   "wpTown_2": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 32",
+     "pos": {
+      "x": -688.3829956,
+      "y": 303.4154968,
+      "z": 129.3614502
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "wpTown_11": {
+   "DR307_1": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 49",
+     "pos": {
+      "x": -638.9917603,
+      "y": 473.9296265,
+      "z": 116.7906036
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "wpTown_12": {
+   "DR90_2": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 36",
+     "pos": {
+      "x": -581.9846802,
+      "y": 409.380249,
+      "z": 108.8613815
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "wpTown_13": {
+   "DR90_2": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 34",
+     "pos": {
+      "x": -578.1229858,
+      "y": 394.3751526,
+      "z": 108.9223557
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "wpTown_14": {
+   "DR288_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 31",
+     "pos": {
+      "x": -673.4188843,
+      "y": 307.0422058,
+      "z": 129.2443542
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "wpTown_15": {
+   "DR288_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 30",
+     "pos": {
+      "x": -684.3527222,
+      "y": 288.9411926,
+      "z": 129.2750702
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "wpTown_18": {
+   "DR290_1": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 14",
+     "pos": {
+      "x": -382.0559692,
+      "y": 445.3878784,
+      "z": 95.79423523
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "wpTown_19": {
+   "wpTown_5": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 5",
+     "pos": {
+      "x": -605.2513428,
+      "y": 210.6830292,
+      "z": 112.3001328
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "wpTown_4": {
+   "wpTown_3": [
+    {
+     "action": 3.0,
+     "instance": "stop 29",
+     "pos": {
+      "x": -547.9481812,
+      "y": 164.9468079,
+      "z": 101.2526855
+     },
+     "state": "basicStop"
+    }
+   ],
+   "wpTown_5": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 8",
+     "pos": {
+      "x": -589.5992432,
+      "y": 213.812439,
+      "z": 112.1915131
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "wpTown_7": {
+   "DR314_2": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 38",
+     "pos": {
+      "x": -473.0675964,
+      "y": 499.5723572,
+      "z": 96.50320435
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "wpTown_8": {
+   "DR90_2": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 35",
+     "pos": {
+      "x": -567.5933838,
+      "y": 413.4050293,
+      "z": 108.7724457
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "wpTown_9": {
+   "DR307_1": [
+    {
+     "action": 0.0,
+     "instance": "trafficLight 48",
+     "pos": {
+      "x": -661.2141113,
+      "y": 489.7011108,
+      "z": 116.9132843
+     },
+     "state": "greenTrafficLight"
+    }
+   ]
+  },
+  "wp_town11": {
+   "DR607_4": [
+    {
+     "action": 3.0,
+     "instance": "stop 58",
+     "pos": {
+      "x": -855.5067139,
+      "y": 281.418457,
+      "z": 159.3418732
+     },
+     "state": "basicStop"
+    }
+   ],
+   "DR95_3": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 42",
+     "pos": {
+      "x": -768.6051636,
+      "y": 357.7893677,
+      "z": 143.2379303
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  },
+  "wp_town12": {
+   "DR435_5": [
+    {
+     "action": 2.0,
+     "instance": "trafficLight 65",
+     "pos": {
+      "x": -757.3095093,
+      "y": 663.5828857,
+      "z": 106.2225952
+     },
+     "state": "redTrafficLight"
+    }
+   ]
+  }
+ }
+}
