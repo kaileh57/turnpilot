@@ -32,7 +32,8 @@ into stays so when the route is back under a new id, the car at it.
 Objects are TurnpilotScene.TrackedObject (or anything with the same fields): x m forward, y m LEFT in the
 calibrated frame, vx/vy over-ground velocity in that frame (ego motion removed), cls compared by name, inPath
 set by the tracker, age its hits. If a tracker publishes velocity relative to the car instead, a parked car ahead
-reads as oncoming and the junction hold is conservative, not missed.
+reads as oncoming and the junction hold is conservative, not missed. Nor is a new track's vx trusted for the oncoming
+hold: until VEL_TRUST_HITS a vehicle in the oncoming lanes is taken as coming at ONCOMING_ASSUMED_SPEED.
 """
 import math
 from collections import deque
@@ -103,6 +104,12 @@ ONCOMING_MIN_SPEED = 1.     # m/s toward the car
 ONCOMING_Y_NEAR_M = 1.5     # oncoming lanes, to the turn side
 ONCOMING_Y_FAR_M = 20.
 ONCOMING_PAST_M = 5.        # a vehicle this far short of the maneuver point has cleared it
+# A new track's velocity isn't trusted: BeamNG unprotected_left_visible (2026-10-27), the wide camera's new track of a car
+# closing at about 11 m/s read vx +3.6, +6.1, +5.5, +1.5 (moving away) for its first 2-2.5 s, and the hold came after it
+# had crossed. Until a track has this many hits (2.5 s of the detector's 10 Hz) a vehicle in the oncoming lanes is taken
+# as coming at ONCOMING_ASSUMED_SPEED, whatever its vx says
+VEL_TRUST_HITS = 25
+ONCOMING_ASSUMED_SPEED = 15.  # m/s, 54 km/h: within 75 m of the junction an untrusted track holds
 
 
 @dataclass
@@ -142,6 +149,11 @@ def stop(v_ego: float, d_stop: float, reason: str, confirmed: bool = True, v_lea
   if not confirmed and accel_cap < NO_ACCEL_CAP:
     accel_cap, speed_cap = NO_ACCEL_CAP, max(speed_cap, v_ego - STOP_DECEL * SPEED_CAP_TAU)
   return Stop(accel_cap, speed_cap, should_stop and v_lead <= 0., reason, d_stop, v_lead, confirmed)
+
+
+def velocity_trusted(obj) -> bool:
+  """Its velocity is the tracker's, not range noise: VEL_TRUST_HITS hits."""
+  return obj.age >= VEL_TRUST_HITS
 
 
 def confirmed_track(obj) -> bool:
@@ -227,7 +239,8 @@ def junction_stops(objects, maneuver, distance, v_ego, right_hand_traffic, is_wa
                not (may_leave(obj) and leaving_crosswalk(obj, distance, side))]
     return hold_line_stop(maneuver, distance, v_ego, "pedestrian in crosswalk") if walkers else []
   for obj in objects:
-    toward = -obj.vx
+    # a new track's vx is range noise, its sign included (VEL_TRUST_HITS): taken as coming, never as going away
+    toward = -obj.vx if velocity_trusted(obj) else max(-obj.vx, ONCOMING_ASSUMED_SPEED)
     if str(obj.cls) in VEHICLES and ONCOMING_Y_NEAR_M < obj.y * side < ONCOMING_Y_FAR_M and \
        obj.x > distance - ONCOMING_PAST_M and toward > ONCOMING_MIN_SPEED and \
        max(obj.x - distance, 0.) / toward < ONCOMING_TTA_S:

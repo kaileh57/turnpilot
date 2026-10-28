@@ -2,7 +2,8 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot.hooks import plan_accel
 from openpilot.selfdrive.turnpilot.route_follower import NOMINAL_ANGLE_DEG, Maneuver, classify
 from openpilot.selfdrive.turnpilot.scene_policy import (ACCEL_CAP_JERK, CROSSWALK_LEAVING_FRAMES, GAS_RELEASE_M, HOLD_LINE_M, NO_ACCEL_CAP, NO_SPEED_CAP,
-                                                        PED_STOP_GAP_M, STOP_DECEL, ScenePolicy, scene_policy)
+                                                        ONCOMING_ASSUMED_SPEED, ONCOMING_TTA_S, PED_STOP_GAP_M, STOP_DECEL,
+                                                        VEL_TRUST_HITS, ScenePolicy, scene_policy)
 from openpilot.selfdrive.turnpilot.tests.synthetic import scene
 
 LEFT_TURN = Maneuver(*classify("turn", "left"), "turn", "left", NOMINAL_ANGLE_DEG["left"])
@@ -14,8 +15,9 @@ def ped(x, y, vx=0., vy=0., in_path=False, **fields):
   return {'cls': 'pedestrian', 'x': x, 'y': y, 'vx': vx, 'vy': vy, 'inPath': in_path, **fields}
 
 
-def car(x, y, vx=0., vy=0.):
-  return {'cls': 'car', 'x': x, 'y': y, 'vx': vx, 'vy': vy, 'inPath': False}
+def car(x, y, vx=0., vy=0., **fields):
+  """fields: more TrackedObject fields, e.g. age (hits); scene() gives 10 otherwise."""
+  return {'cls': 'car', 'x': x, 'y': y, 'vx': vx, 'vy': vy, 'inPath': False, **fields}
 
 
 def policy(objects=(), available=True, maneuver=None, distance=1000., v_ego=10.):
@@ -73,8 +75,8 @@ def test_oncoming_car_holds_unprotected_left():
   d = policy([car(60., 5., vx=-12.)], maneuver=LEFT_TURN, distance=15., v_ego=4.)
   assert d.holding and d.reason == "waiting for oncoming"
   # a gap of more than 5 s, a receding car, a car in the cross street, or one already through: go
-  assert not policy([car(60., 5., vx=-5.)], maneuver=LEFT_TURN, distance=15., v_ego=4.).holding
-  assert not policy([car(60., 5., vx=8.)], maneuver=LEFT_TURN, distance=15., v_ego=4.).holding
+  assert not policy([car(60., 5., vx=-5., age=VEL_TRUST_HITS)], maneuver=LEFT_TURN, distance=15., v_ego=4.).holding
+  assert not policy([car(60., 5., vx=8., age=VEL_TRUST_HITS)], maneuver=LEFT_TURN, distance=15., v_ego=4.).holding
   assert not policy([car(60., -5., vx=-12.)], maneuver=LEFT_TURN, distance=15., v_ego=4.).holding
   assert not policy([car(5., 5., vx=-12.)], maneuver=LEFT_TURN, distance=15., v_ego=4.).holding
   # far from the junction the hold isn't engaged yet
@@ -84,6 +86,25 @@ def test_oncoming_car_holds_unprotected_left():
   assert d.should_stop
   # committed to the turn
   assert not policy([car(40., 5., vx=-12.)], maneuver=LEFT_TURN, distance=HOLD_LINE_M - 3., v_ego=4.).holding
+
+
+def test_new_tracks_velocity_is_taken_as_approaching():
+  # BeamNG unprotected_left_visible run 4: the wide camera's new track of a car closing at about 11 m/s read vx +3.6,
+  # +6.1, +5.5, +1.5 for 2 s (as receding), and the hold came only after it had crossed. Until the track's velocity is
+  # trusted, a vehicle in the oncoming lanes is taken as coming at ONCOMING_ASSUMED_SPEED
+  for vx in (3.6, 6.1, 0., -2.):
+    d = policy([car(30., 5., vx=vx, age=10)], maneuver=LEFT_TURN, distance=HOLD_LINE_M + 0.5, v_ego=0.)
+    assert d.should_stop and d.reason == "waiting for oncoming", vx
+  # trusted, a receding or standing car is let go, as before
+  for vx in (6.1, 0.):
+    assert not policy([car(30., 5., vx=vx, age=VEL_TRUST_HITS)], maneuver=LEFT_TURN, distance=HOLD_LINE_M + 0.5, v_ego=0.).holding
+  # beyond the assumed speed's reach within ONCOMING_TTA_S: not yet
+  far = HOLD_LINE_M + 0.5 + ONCOMING_ASSUMED_SPEED * ONCOMING_TTA_S + 5.
+  assert not policy([car(far, 5., vx=3., age=3)], maneuver=LEFT_TURN, distance=HOLD_LINE_M + 0.5, v_ego=0.).holding
+  # ScenePolicy takes the same rule
+  sp = ScenePolicy()
+  d = sp.update(scene([car(30., 5., vx=5.5, age=12)]).objects, True, LEFT_TURN, HOLD_LINE_M + 0.5, 0., maneuver_id=1)
+  assert d.should_stop and d.reason == "waiting for oncoming"
 
 
 def test_detector_unavailable_is_no_evidence():
