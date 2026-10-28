@@ -42,6 +42,15 @@ def active_plan(sm, now: float | None = None):
   return None if plan is None or plan.shadow or plan.state == custom.TurnpilotPlan.State.disabled else plan
 
 
+def limits_plan(sm, now: float | None = None):
+  """The turnpilotPlan whose accelCap, speedCap and shouldStop plannerd acts on: active_plan's, or a faulted one, which
+  carries the scene's stops in force (turnpilotd.py), or None. Every other disabled plan has no limits."""
+  plan = fresh_plan(sm, now)
+  if plan is None or plan.shadow:
+    return None
+  return plan if plan.state != custom.TurnpilotPlan.State.disabled or plan.fault != custom.TurnpilotPlan.Fault.none else None
+
+
 def plan_events(sm, now: float | None = None) -> list[str]:
   """selfdrived's onroad event names from a fresh, valid turnpilotPlan (none while it is stale: a dead turnpilotd is
   processNotRunning already). sm is a SubMaster subscribed to turnpilotPlan.

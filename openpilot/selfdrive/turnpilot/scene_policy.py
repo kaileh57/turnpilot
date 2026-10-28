@@ -24,6 +24,9 @@ for that maneuver, not just while it's held: otherwise lifting off brings the ho
 crept past the line. Passing the hold line faster than COMMIT_SPEED commits the car to that maneuver for good: slowing
 later in the junction never brings its junction hold back (pedestrians in the path still stop it). ScenePolicy keeps
 those and the rest of what one frame can't know; scene_policy() is one frame on its own.
+A turnpilotd fault (fault()) loses the route, and with it the maneuver a junction hold is for: the hold in force then
+stays where it was, dead-reckoned like a carried pedestrian stop, until a live scene judges the junction again with the
+route back, the car is committed past it, or a gas press releases it.
 
 Objects are TurnpilotScene.TrackedObject (or anything with the same fields): x m forward, y m LEFT in the
 calibrated frame, vx/vy over-ground velocity in that frame (ego motion removed), cls compared by name, inPath
@@ -273,6 +276,26 @@ class ScenePolicy:
     self.committed_id: int | None = None  # the maneuver the car passed the hold line for faster than COMMIT_SPEED
     self.carried: list[Stop] = []        # the last available frame's pedestrian stops, moved with the car since
     self.carried_junction: tuple[int | None, str] | None = None  # (maneuver id, reason) of its junction hold
+    self.junction: Stop | None = None    # the junction hold in force on the last frame
+    self.fault_junction: Stop | None = None  # ...kept through a fault, which lost the route it was for
+
+  def fault(self) -> None:
+    """turnpilotd faulted and dropped the route: the junction hold in force stays where it was (module docstring)."""
+    if self.junction is not None:
+      self.fault_junction, self.junction = self.junction, None
+
+  def _fault_hold(self, available: bool, maneuver, distance: float, v_ego: float, gas_pressed: bool, dt: float) -> list[Stop]:
+    h = self.fault_junction
+    if h is None:
+      return []
+    d_stop = h.d_stop - v_ego * dt
+    route_back = available and maneuver is not None and distance < float('inf')
+    committed = d_stop < 0. and v_ego > COMMIT_SPEED
+    if route_back or committed or d_stop < -(HOLD_LINE_M + TURN_ZONE_PAST_M) or (gas_pressed and d_stop < GAS_RELEASE_M):
+      self.fault_junction = None
+      return []
+    self.fault_junction = stop(v_ego, d_stop, h.reason, h.confirmed)
+    return [self.fault_junction]
 
   def update(self, objects, available: bool, maneuver, distance: float, v_ego: float, right_hand_traffic: bool = True,
              maneuver_id: int | None = None, gas_pressed: bool = False, dt: float = DT_MDL) -> SceneDecision:
@@ -305,7 +328,8 @@ class ScenePolicy:
       self.committed_id = maneuver_id  # never stopped in the junction for it again, however slow the car gets in there
     if maneuver_id is not None and maneuver_id in (self.released_id, self.committed_id):
       junction = []
-    decision = decide(peds + junction, v_ego)
+    self.junction = junction[0] if junction else None
+    decision = decide(peds + junction + self._fault_hold(available, maneuver, distance, v_ego, gas_pressed, dt), v_ego)
     decision.accel_cap = self.ramp(decision.accel_cap, dt)
     return decision
 

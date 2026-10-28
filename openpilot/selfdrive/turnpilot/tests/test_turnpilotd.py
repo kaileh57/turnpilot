@@ -50,14 +50,15 @@ class Sim:
     self.nav_filter = None  # (sim, instruction) -> (instruction, valid): what navd sends instead
     self.trace = []
 
-  def step(self, objects=(), available=True, steer=0., blinker=False, lat_active=True, yaw_rate=0.):
+  def step(self, objects=(), available=True, steer=0., blinker=False, lat_active=True, yaw_rate=0., gas=False,
+           engaged=False):
     self.sm.updated = dict.fromkeys(self.sm.data, False)
     instr = self.navd.update(self.s)
     if instr is not None:
       instr, valid = self.nav_filter(self, instr) if self.nav_filter is not None else (instr, True)
       self.sm.put('navInstruction', instr, valid)
-    self.sm.put('carState', car_state(self.v, steer, left_blinker=blinker, yaw_rate=yaw_rate))
-    self.sm.put('carControl', car_control(lat_active))
+    self.sm.put('carState', car_state(self.v, steer, left_blinker=blinker, yaw_rate=yaw_rate, gas_pressed=gas))
+    self.sm.put('carControl', car_control(lat_active, engaged))
     if self.model_running:
       self.sm.put('modelV2', model_v2(*self.model_lanes, big=self.big))
     plan = self.tp.plan(self.sm, scene(objects, available), True, self.shadow, self.driver_signals, paint=self.paint,
@@ -727,3 +728,112 @@ def test_model_fallback_outlives_turnpilotd():
   sim.run(2.)
   sim.tp.big_model_failed(enabled=True)
   assert sim.step().handback == Handback.modelFellBack and sim.tp.cancel_route
+
+
+def oncoming_at(junction_s: float, after_s: float):
+  """An oncoming car that reaches the left at junction_s 8 s after the car is 40 m from it (none before after_s)."""
+  spawn = {}
+  def objects(sim):
+    if sim.s < after_s:
+      return ()
+    if 'x' not in spawn and junction_s - sim.s < 40.:
+      spawn['x'], spawn['t'] = junction_s + 72., sim.t
+    if 'x' not in spawn:
+      return ()
+    return ({'cls': 'car', 'x': spawn['x'] - 9. * (sim.t - spawn['t']) - sim.s, 'y': 5., 'vx': -9.},)
+  return objects
+
+
+def test_fault_keeps_the_next_turns_junction_hold():
+  # a left is committed (the car passed its hold line faster than COMMIT_SPEED), then one frame faults. The next left,
+  # with an oncoming car, still holds for it: maneuver ids never repeat within a drive, so the first left's commitment
+  # (or a gas release) can't be read as the next one's
+  for fault in (False, True):
+    sim = Sim([(300., "turn", "left"), (700., "turn", "left"), (2500., "turn", "right")])
+    oncoming = oncoming_at(700., 400.)
+    for _ in range(int(100. / DT_MDL)):
+      if fault and 500. < sim.s and not getattr(sim, 'faulted', False):
+        sim.faulted = True
+        sim.tp.update = mock.Mock(side_effect=RuntimeError("synthetic failure"))
+        assert sim.step().fault == Fault.error
+        del sim.tp.update
+      near = any(abs(sim.s - m) < 8. for m in (300., 700.))
+      sim.step(oncoming(sim), steer=90. if near else 0.)
+      if sim.s > 730.:
+        break
+    assert sim.tp.scene.committed_id is not None, fault
+    assert any(p.reason == "waiting for oncoming" for s, _, p in sim.trace if s > 400.), fault
+    assert any(p.shouldStop for s, v, p in sim.trace if 400. < s < 700. and v < 0.1), fault
+
+
+def held_for_pedestrian(x_ped=200.):
+  sim = Sim([(1500., "turn", "right")])
+  def pedestrian(sim):
+    return ({'cls': 'pedestrian', 'x': x_ped - sim.s, 'y': 0.1, 'vx': 0., 'vy': 0., 'inPath': True},)
+  for _ in range(int(40. / DT_MDL)):
+    sim.step(pedestrian(sim))
+  assert sim.trace[-1][2].shouldStop and sim.v == 0.
+  return sim, pedestrian
+
+
+def test_persistent_fault_keeps_the_scenes_stops():
+  # turnpilotd failing on every frame: the faulted plans still carry the pedestrian stop (live, or carried through a
+  # detector gap, which then hands back). The car never drives on through the pedestrian
+  for gap in (False, True):
+    sim, pedestrian = held_for_pedestrian()
+    sim.tp.update = mock.Mock(side_effect=RuntimeError("synthetic failure"))
+    plans = [sim.step(() if gap else pedestrian(sim), available=not gap) for _ in range(int(12. / DT_MDL))]
+    assert all(p.fault == Fault.error and p.state == State.disabled for p in plans), gap
+    assert all(p.shouldStop and p.speedCap < 1. for p in plans), gap
+    assert sim.s < 200. - PED_STOP_GAP_M + 1. and sim.v < 0.1, gap
+    assert (plans[-1].handback == Handback.detectorStopped) == gap
+
+
+def test_fault_keeps_a_junction_hold():
+  # waiting at the hold line for an oncoming car, turnpilotd faults (once in a detector gap, or on every frame): the
+  # route is gone with the fault, but the hold in force stays where it was until the scene says otherwise or the
+  # driver presses the gas
+  for mode in ('every frame', 'in a gap'):
+    sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
+    def car(sim):  # an oncoming car edging up to it
+      return ({'cls': 'car', 'x': 305. - sim.s, 'y': 5., 'vx': -1.5},)
+    while not (sim.v < 0.05 and sim.s > 250.):
+      sim.step(car(sim))
+      assert sim.t < 120.
+    assert sim.trace[-1][2].reason == "waiting for oncoming" and sim.trace[-1][2].shouldStop
+    stopped = sim.s
+    if mode == 'every frame':
+      sim.tp.update = mock.Mock(side_effect=RuntimeError("synthetic failure"))
+      plans = [sim.step(car(sim)) for _ in range(int(5. / DT_MDL))]
+    else:
+      plans = [sim.step(available=False) for _ in range(4)]
+      sim.tp.update = mock.Mock(side_effect=RuntimeError("synthetic failure"))
+      plans.append(sim.step(available=False))
+      del sim.tp.update
+      plans += [sim.step(available=False) for _ in range(int(5. / DT_MDL))]
+    assert all(p.shouldStop for p in plans), mode
+    assert sim.s < stopped + 0.5, mode
+    # the driver looks and goes: the gas releases it
+    released = sim.step(car(sim) if mode == 'every frame' else (), available=mode == 'every frame', gas=True)
+    assert not released.shouldStop and released.speedCap > 2. and released.accelCap == NO_ACCEL_CAP, mode  # the turn cap at most
+
+
+def test_detector_not_loaded_while_engaged_isnt_a_detector_that_never_started():
+  # TurnPilot turned on while disengaged, and openpilot engaged before modeld read TurnPilotEnabled: modeld loads the
+  # detector only while disengaged, so it hasn't tried yet. Engaged frames don't count against its start deadline until
+  # modeld had its chance; TurnPilot waits (not acting), and the deadline runs once openpilot is disengaged
+  sim = Sim([(4000., "turn", "left"), (5000., "turn", "right")])
+  for _ in range(int(0.5 / DT_MDL)):
+    sim.step(available=False)
+  plans = [sim.step(available=False, engaged=True) for _ in range(int(2 * DETECTOR_START_DEADLINE_S / DT_MDL))]
+  assert all(p.handback == Handback.none and p.state == State.unavailable and p.reason == WAITING_REASON for p in plans)
+  plans = [sim.step(available=False) for _ in range(int(DETECTOR_START_DEADLINE_S / DT_MDL))]
+  first = next(i for i, p in enumerate(plans) if p.handback == Handback.noDetector)
+  assert abs((first + 1) * DT_MDL - (DETECTOR_START_DEADLINE_S - 0.5)) <= 1.5 * DT_MDL
+  # disengaged long enough for modeld to have tried: engaged frames count from then on
+  sim = Sim([(4000., "turn", "left"), (5000., "turn", "right")])
+  for _ in range(int(3. / DT_MDL)):
+    sim.step(available=False)
+  plans = [sim.step(available=False, engaged=True) for _ in range(int(DETECTOR_START_DEADLINE_S / DT_MDL))]
+  first = next(i for i, p in enumerate(plans) if p.handback == Handback.noDetector)
+  assert abs((first + 1) * DT_MDL - (DETECTOR_START_DEADLINE_S - 3.)) <= 1.5 * DT_MDL

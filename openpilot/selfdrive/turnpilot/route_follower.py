@@ -138,8 +138,10 @@ def make_maneuver(mtype: str, modifier: str, lanes: tuple, geometry_valid: bool,
 
 
 class RouteFollower:
-  def __init__(self):
-    self.maneuver_id = 0
+  def __init__(self, maneuver_id: int = 0):
+    """maneuver_id: where the ids start. A follower that replaces another one (turnpilotd after a fault) starts past the
+    old one's, so no id repeats: what was latched for an old maneuver (ScenePolicy's commitment) can't match a new one."""
+    self.maneuver_id = maneuver_id
     self.route_count = 0  # navInstruction.routeCount of the last valid update
     self.reset()
 

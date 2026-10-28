@@ -15,7 +15,9 @@ TurnPilot acts only while it can do its job (Kellen, 2026-10-27: no degraded mod
   detector"): modeld loads it only while disengaged, so a mid-drive enable can't be handed back before it ever ran.
   A detector with no results DETECTOR_START_DEADLINE_S of modelV2 frames after that (no pkl, a failed load, none for the
   driving model) never started: handback noDetector. modeld publishes no modelV2 while it loads the detector, so the
-  load itself doesn't count against it.
+  load itself doesn't count against it. Nor do frames with openpilot engaged (carControl.enabled) before modeld had
+  its chance to load it, LOAD_CHANCE_S disengaged with TurnPilot on: turned on and engaged within modeld's param check,
+  it waits for a disengage, and TurnPilot waits with it.
 - Once it has run, DETECTOR_DEADLINE_S without fresh results is a stopped detector. modeld's own skips stay inside it: a
   slow spell forces a run after 1 s, a failed run retries after 1 s. A second forced wait (2 s) or failure in a row is
   past it.
@@ -30,7 +32,10 @@ cancels navd's route, once such a turn is over. The scene's stops in force stay,
 whose desire already went out: a handback must not speed the car up. Nor does the route going away under a committed
 turn cancel it (route_follower.py: gaps, navd going quiet, reroutes are dead-reckoned through).
 A fault (plan()) is a disabled plan; it carries the handback, so a fault never hides one, and the detector's deadlines
-and the scene's stops in force run on through it (only turning TurnPilot off resets them).
+and the scene's stops in force run on through it (only turning TurnPilot off resets them): a faulted plan carries the
+scene's limits (live pedestrians, or those carried through a detector gap, and the junction hold in force where it
+was; scene_policy.py), which plannerd acts on (hooks.limits_plan), so a turnpilotd failing every frame still never
+drives the car on through a pedestrian. Its desire and lane change are never acted on.
 Once the detector is back and TurnPilot acts again, the dropped maneuver is taken up or skipped out loud, never left
 half driven (_take_up_dropped).
 A handback or a fault cancels a lane change that is offered and not yet started, with laneChangeAbort handedBack or
@@ -84,6 +89,9 @@ DETECTOR_DEADLINE_S = 1.5
 # no fresh detections this long (in modelV2 frames) after TurnPilot is turned on: the detector never started. modeld
 # loads it at startup, or within a second of a mid-drive enable, and runs it from the next frame
 DETECTOR_START_DEADLINE_S = 15.
+# modeld reads TurnPilotEnabled once a second, as turnpilotd does, and loads the detector only while disengaged: this long
+# disengaged with TurnPilot on, it has tried
+LOAD_CHANCE_S = 1.5
 HANDBACK_REASON = {Handback.detectorStopped: "detector stopped: take control",
                    Handback.noDetector: "detector not running: take control",
                    Handback.modelFellBack: "driving model fell back: take control"}
@@ -112,6 +120,8 @@ class TurnPilot:
     self.cancel_route = False  # set once on a fallback: main() removes NavDestination, once no turn is committed
     self.stop_abort, self._stop_abort_t = 'none', 0.  # a lane change cancelled by a disabled plan: reset() can't hold it
     self.handback_now: int | None = None  # this frame's handback, once handback() has run for it
+    self.scene_now = None  # this frame's scene decision, once update() has made it
+    self.limits = (NO_ACCEL_CAP, NO_SPEED_CAP, False)  # the last plan's (accelCap, speedCap, shouldStop)
     self.reset()
 
   def reset(self, detector: bool = True):
@@ -122,7 +132,9 @@ class TurnPilot:
       self.detector_seen = False   # fresh detections since TurnPilot was turned on
       self.stale_s = 0.            # how long the scene has been unavailable
       self.waited_s = 0.           # how long modeld has run since TurnPilot was turned on, before the first detection
-    self.follower = RouteFollower()
+      self.disengaged_s = 0.       # ...of it with openpilot disengaged
+    # maneuver ids never repeat: the scene kept through a fault holds ids (its commitment, a gas release, a carried hold)
+    self.follower = RouteFollower(self.follower.maneuver_id + 1 if hasattr(self, 'follower') else 0)
     self.desires = DesireTiming()
     self.lanes = LanePlanner()
     self.paint_rule_lanes = LanePlanner(paint_rule=True)  # what the lane planner would ask for, while it's turned off
@@ -158,16 +170,19 @@ class TurnPilot:
       self.fell_back = True
       self.cancel_route = enabled and self.big_seen
 
-  def handback(self, available: bool, model_running: bool = True) -> int:
+  def handback(self, available: bool, model_running: bool = True, engaged: bool = False) -> int:
     """Why TurnPilot can't act now, as a Handback: none while it can, and while the detector hasn't started yet, short of
-    DETECTOR_START_DEADLINE_S of modeld running (model_running: a modelV2 this frame). Once a frame: a fault after
-    update() already ran it takes this frame's."""
+    DETECTOR_START_DEADLINE_S of modeld running (model_running: a modelV2 this frame) once it could load the detector
+    (engaged: carControl.enabled; module docstring). Once a frame: a fault after update() already ran it takes this frame's."""
     if self.handback_now is not None:
       return self.handback_now
     self.detector_seen = self.detector_seen or available
     self.stale_s = 0. if available else self.stale_s + DT_MDL
     if not self.detector_seen and model_running:
-      self.waited_s += DT_MDL
+      if not engaged:
+        self.disengaged_s += DT_MDL
+      if not engaged or self.disengaged_s >= LOAD_CHANCE_S - DT_MDL / 2:
+        self.waited_s += DT_MDL
     if self.fell_back:
       self.handback_now = Handback.modelFellBack
     elif self.detector_seen and self.stale_s > DETECTOR_DEADLINE_S - STALE_S:
@@ -196,6 +211,8 @@ class TurnPilot:
     the detector's and the scene's state (reset())."""
     if self.lanes.cancel(reason):
       self.stop_abort, self._stop_abort_t = reason, ABORT_HOLD_S
+    if reason == 'fault':
+      self.scene.fault()
     self.reset(detector=reason == 'turnedOff')
 
   def fill_stop_abort(self, plan) -> None:
@@ -208,7 +225,7 @@ class TurnPilot:
     """A turnpilotPlan message from sm's carState, navInstruction and modelV2, a TurnpilotScene, and the lane paint of
     modelV2's four lane lines (empty when unknown). paint_rule: TurnPilotLanePaintActive; inputs_valid: carState and
     modelV2 pass their checks."""
-    self.handback_now = None
+    self.handback_now = self.scene_now = None
     msg = messaging.new_message('turnpilotPlan')
     plan = msg.turnpilotPlan
     plan.shadow = shadow
@@ -232,7 +249,7 @@ class TurnPilot:
     available = scene.available
     objects = list(scene.objects) if available else []
 
-    handback = self.handback(available, sm.updated['modelV2'])
+    handback = self.handback(available, sm.updated['modelV2'], sm['carControl'].enabled)
     plan.handback = handback
     acting = self.detector_seen and handback == Handback.none
     if self.acting and not acting:
@@ -288,7 +305,8 @@ class TurnPilot:
       if acting else LaneMismatch.none  # handback outranks it, and with the maneuver dropped it would misread the lane
     plan.laneMismatch = self._lane_mismatch(found)
     # the scene's holds only ever brake, so they keep the real maneuver through a handback
-    decision = self.scene.update(objects, available, maneuver, rf.distance, v_ego, right_hand_traffic, rf.maneuver_id, cs.gasPressed)
+    decision = self.scene_now = self.scene.update(objects, available, maneuver, rf.distance, v_ego, right_hand_traffic, rf.maneuver_id,
+                                                 cs.gasPressed)
     plan.accelCap = decision.accel_cap
     # past a bend or a straight-on step, the turn after it is slowed for already (route_follower.py: ahead), and still
     # once the step is dead-reckoned past, until navd moves on to the turn
@@ -296,6 +314,7 @@ class TurnPilot:
     ahead_cap = turn_speed_cap(rf.ahead, rf.ahead_distance, v_ego, right_hand_traffic) if ahead_on else NO_SPEED_CAP
     plan.speedCap = min(decision.speed_cap, turn_speed_cap(cap_on, rf.distance, v_ego, right_hand_traffic), ahead_cap)
     plan.shouldStop = decision.should_stop
+    self.limits = (plan.accelCap, plan.speedCap, plan.shouldStop)
     no_junction_data = maneuver is not None and maneuver.kind in (TURN, KEEP) and not maneuver.geometry
     plan.reason = decision.reason or lane_reason or (NO_JUNCTION_DATA_REASON if no_junction_data else "")
 
@@ -352,7 +371,7 @@ class TurnPilot:
     carries its fault, which selfdrived shows (turnpilotUnavailable): TurnPilot never stops working unannounced.
     It also carries a model fallback's handback, which outranks the fault (see the module docstring): a fallback lasts
     the drive, so it is noted here too, where update() isn't reached."""
-    self.handback_now = None
+    self.handback_now = self.scene_now = None
     if enabled and not long_control:
       self.stop('fault')
       self.watch_model(sm['modelV2'], enabled)
@@ -368,13 +387,28 @@ class TurnPilot:
       self.stop('fault')
       # the detector's deadlines run on: a turnpilotd failing every frame still hands back a stopped detector
       try:
-        handback = self.handback(scene.available, sm.updated['modelV2'])
+        handback = self.handback(scene.available, sm.updated['modelV2'], sm['carControl'].enabled)
       except Exception:
         log_error("turnpilotd.fault_handback_failed")
         handback = Handback.modelFellBack if self.fell_back else Handback.none
       msg = disabled_plan(shadow, ERROR_REASON, Fault.error, handback)
       self.fill_stop_abort(msg.turnpilotPlan)
+      self.fault_limits(msg.turnpilotPlan, sm, scene)
       return msg
+
+  def fault_limits(self, plan, sm, scene) -> None:
+    """A faulted plan's limits: the scene's, with no route (scene_policy.py: ScenePolicy.fault). The ones update()
+    made this frame before it failed, if it got that far; the last plan's if the scene fails too."""
+    try:
+      decision = self.scene_now
+      if decision is None:
+        cs = sm['carState']
+        decision = self.scene.update(list(scene.objects) if scene.available else [], scene.available, None, float('inf'),
+                                     max(cs.vEgo, 0.), gas_pressed=cs.gasPressed)
+      self.limits = (decision.accel_cap, decision.speed_cap, decision.should_stop)
+    except Exception:
+      log_error("turnpilotd.fault_limits_failed")
+    plan.accelCap, plan.speedCap, plan.shouldStop = self.limits
 
 
 def disabled_plan(shadow: bool, reason: str, fault=Fault.none, handback=Handback.none):

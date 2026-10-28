@@ -28,9 +28,10 @@ class FakeSM(dict):
 
 
 def turnpilot_plan(shadow, desire=log.Desire.turnLeft, lane_change='left', accel_cap=-3., speed_cap=2., should_stop=True,
-                   state=State.turning):
+                   state=State.turning, fault=custom.TurnpilotPlan.Fault.none):
   msg = messaging.new_message('turnpilotPlan')
   p = msg.turnpilotPlan
+  p.fault = fault
   p.desire, p.laneChange, p.accelCap, p.speedCap, p.shouldStop, p.shadow = desire, lane_change, accel_cap, speed_cap, should_stop, shadow
   p.state = state
   return msg.as_reader().turnpilotPlan
@@ -181,6 +182,17 @@ def test_stale_or_disabled_plan_never_changes_planner_output():
   baseline = run_planner(None)
   assert run_planner(turnpilot_plan(shadow=False), age=PLAN_MAX_AGE_S + 0.1) == baseline
   assert run_planner(turnpilot_plan(shadow=False, state=State.disabled)) == baseline
+
+
+def test_faulted_plan_keeps_its_stops():
+  # a fault (turnpilotd failing a frame, or every frame) still carries the scene's stops in force: a car held for a
+  # pedestrian stays held. Its desire and lane change are never acted on (modeld takes active_plan's)
+  baseline = run_planner(None)
+  faulted = turnpilot_plan(shadow=False, state=State.disabled, fault=custom.TurnpilotPlan.Fault.error)
+  out = run_planner(faulted)
+  assert all(a < b for (a, _), (b, _) in zip(out, baseline, strict=True)) and all(stop for _, stop in out)
+  assert active_plan(FakeSM({'turnpilotPlan': faulted})) is None
+  assert run_planner(turnpilot_plan(shadow=True, state=State.disabled, fault=custom.TurnpilotPlan.Fault.error)) == baseline
 
 
 def test_plan_events_one_slot_by_priority():

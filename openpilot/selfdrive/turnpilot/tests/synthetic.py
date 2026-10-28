@@ -125,9 +125,10 @@ def car_state(v_ego=10., steering_angle_deg=0., left_blinker=False, right_blinke
   return msg.as_reader().carState
 
 
-def car_control(lat_active=True):
+def car_control(lat_active=True, enabled=False):
   msg = messaging.new_message('carControl')
   msg.carControl.latActive = lat_active
+  msg.carControl.enabled = enabled
   return msg.as_reader().carControl
 
 
