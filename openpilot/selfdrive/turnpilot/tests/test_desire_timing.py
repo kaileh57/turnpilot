@@ -410,3 +410,24 @@ def test_committed_turn_rides_out_route_glitches():
     first = next(mid for d, desire, mid, _ in out if desire == Desire.turnRight)
     before = [(d, desire, mid, skipped) for d, desire, mid, skipped in out if d > -PASSED_M]
     assert all(mid == first and not skipped and desire != CLEAR_DESIRE for d, desire, mid, skipped in before if d < 40.), mode
+
+
+def test_go_at_standstill_pulses_now():
+  # held at the line past the model's queue (a walker, a stop sign), and the hold lets go: the turn pulses at once, still
+  # standing, not once the car moves (the model won't pull away from a standstill with its pulse forgotten)
+  dt_ = DesireTiming()
+  step_through(dt_, [(5., 1, RIGHT_TURN, 40., 5., 0., False), (STANDSTILL_REARM_S + 3., 1, RIGHT_TURN, 15., 0., 0., False)])
+  assert dt_.update(RIGHT_TURN, 15., 1, False, 0., 0., True, True, DT_MDL, 0., go=True) == Desire.turnRight
+  # and the car gets STANDSTILL_REARM_S to move off on it before it re-arms
+  out = [dt_.update(RIGHT_TURN, 15., 1, False, 0., 0., True, True, DT_MDL, 0.) for _ in range(int(1.5 / DT_MDL))]
+  assert set(out) == {Desire.turnRight}
+  # a go soon after a pulse (stopped under STANDSTILL_REARM_S): a repeat pulse, through a short gap
+  dt_ = DesireTiming()
+  step_through(dt_, [(5., 1, RIGHT_TURN, 40., 5., 0., False), (1., 1, RIGHT_TURN, 15., 0., 0., False)])
+  out = [dt_.update(RIGHT_TURN, 15., 1, False, 0., 0., True, True, DT_MDL, 0., go=k == 0) for k in range(10)]
+  assert out[:PULSE_GAP_FRAMES] == [Desire.none] * PULSE_GAP_FRAMES and out[PULSE_GAP_FRAMES] == Desire.turnRight
+  # 40 degrees into the turn: no pulse on a go either (it turns the car on past the exit road)
+  dt_ = DesireTiming()
+  step_through(dt_, [(9., 1, LEFT_TURN, 45., 5., 0., False), (40. / 28.65, 1, LEFT_TURN, 0., 4., 0.5, False),
+                     (STANDSTILL_REARM_S + 1., 1, LEFT_TURN, -2., 0., 0., False)])
+  assert dt_.update(LEFT_TURN, -2., 1, False, 0., 0., True, True, DT_MDL, 0., go=True) == Desire.none
