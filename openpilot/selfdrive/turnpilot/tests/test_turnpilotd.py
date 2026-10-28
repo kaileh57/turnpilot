@@ -1522,3 +1522,21 @@ def test_an_unprotected_left_taken_up_too_close_to_stop_for_is_skipped_out_loud(
   assert any(p.tooFastToTurn for p in plans)
   assert any(p.desire == CLEAR_DESIRE for p in plans) or not sim.tp.desires.side
   assert not any(p.desire == Desire.turnLeft for p in plans[3:])
+
+
+def test_a_slow_approach_never_times_the_turn_out_before_the_go():
+  # creeping to an unprotected left at 2 m/s (a queue): far more than 15 s of moving time on the turn's desire before
+  # the car stands at the line. The turn is still on at the driver's go: its pulse goes in the go frame, and it stays out
+  # to the junction. A turn desire is over when the turn is (turned, or passed), never on a clock
+  for cruise in (2., 1.5):
+    sim = Sim(TURNS_AHEAD, cruise=cruise)
+    sim.go_taps = False
+    sim.v = cruise
+    stop_at(sim, 300., limit=400.)
+    sim.run(1.)
+    plan = sim.step(gas=True)
+    assert plan.desire == Desire.turnLeft, cruise
+    while sim.s < 300.:
+      plan = sim.step()
+      assert plan.desire in (Desire.turnLeft, Desire.none), cruise
+    assert sim.tp.turn_committed, cruise

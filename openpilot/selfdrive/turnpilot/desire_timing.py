@@ -3,8 +3,10 @@
 modeld feeds the model only the rising edge of a desire, so the desire is held through the maneuver and the
 lead distance is the timing lever. Gate 1 (big model, 25 km/h, 2026-10-27) took 90-degree turns from a pulse
 40 m before the junction and not from 10-20 m; a keep desire goes within max(2.5 s * v, 20 m). Once a desire
-starts it is latched until the maneuver is passed or the timeout: navd's 1 Hz distance carries a few meters of
-noise, and dropping the desire whenever it read past the lead again sent the model a new rising edge each time.
+starts it is latched until the maneuver is passed (a keep: or the timeout; a turn is over only when the car has turned it
+or is past it, never on a clock: a slow approach in a queue to a hold took longer, and the go then had no turn to pulse,
+silently): navd's 1 Hz distance carries a few meters of noise, and dropping the desire whenever it read past the lead
+again sent the model a new rising edge each time.
 A keep toward a side where the model sees no lane line drove the car off the road there, so it is dropped.
 The model forgets a pulse 132 frames after it (6.6 s at 20 Hz, its desire history; see below): where the slow
 approach took longer than that, it planned the turn and then dropped it 10 m out, and a late retry pulse brought
@@ -52,7 +54,7 @@ TURN_DESIRE_LEAD_M = 40.      # gate 1's best lead on the big model
 KEEP_DESIRE_LEAD_S = 2.5
 KEEP_DESIRE_LEAD_MIN_M = 20.
 KEEP_DESIRE_PAST_M = 5.       # a keep desire lasts this far past the maneuver point
-DESIRE_TIMEOUT_S = 15.        # moving time a desire may be held before it is dropped for good
+DESIRE_TIMEOUT_S = 15.        # moving time a keep desire may be held before it is dropped for good
 REPULSE_S = 3.5               # a turn desire pulses again this often on the approach...
 ENTRY_M = 10.                 # ...and once more this far before the junction (not within ENTRY_GAP_S of the last)...
 ENTRY_GAP_S = 1.5
@@ -242,7 +244,7 @@ class DesireTiming:
     else:
       self._stopped_t = 0.
       self._moving_t += dt
-      if self._moving_t > DESIRE_TIMEOUT_S:
+      if self._moving_t > DESIRE_TIMEOUT_S and not turn:
         self.done, self.active = True, False
         return Desire.none
 
