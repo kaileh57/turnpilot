@@ -248,6 +248,65 @@ class TestGasTaps:
     res = score.summarize('unprotected_left', self.left_run(stop=False), 'arrived')
     assert "never stopped at the unprotected left's hold line for the driver's go" in res['failures']
 
+  SIGNAL = 'Stopped at signal — tap gas to go'
+
+  def signal_run(self, prompt='signalGo', reason=SIGNAL):
+    rows = self.left_run()
+    for r in rows:
+      if r['control_prompt'] == 'unprotectedTurnGo':
+        r['control_prompt'], r['reason'] = prompt, reason
+    return rows
+
+  def test_a_left_at_a_mapped_signal_takes_the_signals_go(self):
+    # BeamNG smoke 2026-10-28: the signal tiles map a signal at both left scenarios' junction, which protects the left
+    # (map_controls.protected): one stop, its go signalGo, never unprotectedTurnGo. A green is still permissive: the oncoming
+    # hold after that go is checked as before
+    for name in ('unprotected_left', 'unprotected_left_visible'):
+      res = score.summarize(name, self.signal_run(), 'arrived', junction_control='signal')
+      assert res['passed'], (name, res['failures'])
+      assert res['junction_go'] == 'signalGo'
+      res = score.summarize(name, self.signal_run(), 'arrived')  # no signal mapped there: it had to be unprotectedTurnGo
+      assert "the driver never gave the go at the unprotected left's hold line" in res['failures'], name
+      res = score.summarize(name, self.left_run(), 'arrived', junction_control='signal')  # a second, unprotected stop
+      assert "the driver never gave the go (signalGo) at the junction's signal" in res['failures'], name
+      assert "never stopped at the junction's signal for the driver's go (signalGo)" in res['failures'], name
+
+  def test_a_go_at_a_signal_before_the_junction_is_not_the_junctions(self):
+    rows = self.signal_run()
+    for r in rows:
+      r['j_dist'] = 120. if r['control_prompt'] == 'signalGo' or r['gas'] else 20.
+    res = score.summarize('unprotected_left', rows, 'arrived', junction_control='signal')
+    assert "the driver never gave the go (signalGo) at the junction's signal" in res['failures']
+
+
+class TestOncomingPresented:
+  """The left scenarios require the oncoming hold only where an oncoming car came to the junction while the car was at
+  it, before it: one that came after the car had turned tested nothing, and fails the run as untested."""
+
+  def run_with(self, car_at, waited=True):
+    rows = TestGasTaps().signal_run()
+    for i, r in enumerate(rows):
+      t = i * DT
+      r['j_dist'], r['j_ahead'] = (20., 20.) if t < 18. else (5., -5.)
+      r['car_j_dist'] = 60. - 10. * max(t - car_at, 0.)
+      if not waited and r['reason'] == 'waiting for oncoming':
+        r['reason'] = 'Stopped at signal'
+    return rows
+
+  def test_a_car_presented_and_waited_for_passes(self):
+    res = score.summarize('unprotected_left', self.run_with(car_at=12.), 'arrived', junction_control='signal')
+    assert res['passed'], res['failures']
+    assert res['oncoming_presented'] is True
+
+  def test_a_car_presented_and_not_waited_for_fails(self):
+    res = score.summarize('unprotected_left', self.run_with(car_at=12., waited=False), 'arrived', junction_control='signal')
+    assert "never waited for oncoming traffic" in res['failures']
+
+  def test_a_car_that_came_after_the_turn_fails_as_untested(self):
+    res = score.summarize('unprotected_left', self.run_with(car_at=30.), 'arrived', junction_control='signal')
+    assert res['oncoming_presented'] is False
+    assert any("the wait went untested" in f for f in res['failures']), res['failures']
+
 
 class TestOncomingLane:
   """A two-way road east-west along y = 0, two 3.5 m lanes ('-+' for eastbound travel: the westbound lane on the left,
@@ -289,6 +348,17 @@ class TestOncomingLane:
   def test_inside_the_junction_box_a_turn_may_cross(self):
     rows = self.lane_run(1.75, x0=-11.0, metres=22.0)
     assert score.summarize('lane_change', rows, 'arrived', road=self.ROAD)['wrong_side_m'] == 0.0
+
+  def test_the_box_starts_at_the_junctions_mapped_stop_line(self):
+    # BeamNG smoke 2026-10-28: the car pulled away from a signal line out past the box (hold line plus the widest road)
+    # and its first metres across counted as the oncoming lane. With a mapped stop line 20 m out the box starts there for
+    # a car heading into the junction, and not on the way out of it
+    lined = {**self.ROAD, 'junctions': [[0.0, 0.0, 11.5, 20.0]]}
+    approach = self.lane_run(1.75, x0=-19.0, metres=8.0)
+    assert score.summarize('lane_change', approach, 'arrived', road=self.ROAD)['wrong_side_m'] == pytest.approx(8.0, abs=1.0)
+    assert score.summarize('lane_change', approach, 'arrived', road=lined)['wrong_side_m'] == 0.0
+    leaving = self.lane_run(1.75, x0=11.5, metres=8.0)
+    assert score.summarize('lane_change', leaving, 'arrived', road=lined)['wrong_side_m'] == pytest.approx(8.0, abs=1.0)
 
   def test_a_one_way_road_has_no_oncoming_lane_but_against_it_all_of_it_is(self):
     ours = {'links': [[-500.0, 0.0, 500.0, 0.0, 3.5, 3.5, '++']], 'junctions': []}

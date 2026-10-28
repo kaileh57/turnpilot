@@ -45,6 +45,8 @@ SPAWN_PAST_M = DROP_PAST_M  # a spawn more than spawn_clear_m before a control, 
 MIN_APPROACH_M = 60.     # a turn scenario's spawn no closer to its junction than this
 LINE_LATERAL_M = 8.      # a control's stop line within this of the approach's centreline is on it (lanes either side)
 LINE_ALIGNED_DEG = 40.   # ...if it controls traffic within this of the approach's direction
+LINE_ASSOC_M = 40.       # a stop line this close to the junction nearest it is that junction's...
+INTO_DEG = 60.           # ...if it controls traffic heading into it, within this of the bearing to it
 
 
 @dataclass(frozen=True)
@@ -502,8 +504,8 @@ def _data_plan(name: str, e: Entry, graph: RoadGraph, data: dict) -> Plan:
 def road_model(graph: RoadGraph, points, margin: float = ROAD_MARGIN_M) -> dict:
   """The roads in the box around points, grown by margin, for score.oncoming_offsets: each link as
   [ax, ay, bx, by, ra, rb, lanes] (lanes for travel a -> b, left to right, as RoadGraph.lanes_toward reads them), and each
-  junction as [x, y, box]: within box m of its node a turn may cross the road's divider (the hold line, plus the widest
-  road at it)."""
+  junction as [x, y, box, line]: within box m of its node a turn may cross the road's divider (the hold line, plus the
+  widest road at it), and heading into it, within its farthest mapped stop line, line m out (stop_lines; 0 without one)."""
   pts = np.array([p[:2] for p in points if p is not None], dtype=float)
   lo, hi = pts.min(axis=0) - margin, pts.max(axis=0) + margin
   def inside(n):
@@ -516,9 +518,29 @@ def road_model(graph: RoadGraph, points, margin: float = ROAD_MARGIN_M) -> dict:
     seen.add((a, b))
     links.append([*(round(float(v), 2) for v in graph.pos[a][:2]), *(round(float(v), 2) for v in graph.pos[b][:2]),
                   round(graph.radius[a], 2), round(graph.radius[b], 2), graph.lanes_toward(b, a)])
+  lines = stop_lines(graph, mapped_controls(graph))
   junctions = [[round(float(graph.pos[j][0]), 2), round(float(graph.pos[j][1]), 2),
-                round(HOLD_LINE_M + max(graph.radius[n] for n in (j, *graph.adj[j])), 2)] for j in graph.junctions() if inside(j)]
+                round(HOLD_LINE_M + max(graph.radius[n] for n in (j, *graph.adj[j])), 2), round(lines.get(j, 0.), 2)]
+               for j in graph.junctions() if inside(j)]
   return {'links': links, 'junctions': junctions}
+
+
+def stop_lines(graph: RoadGraph, controls) -> dict[str, float]:
+  """m from each junction node to its farthest mapped stop line: a control within LINE_ASSOC_M of the junction nearest it,
+  for traffic heading into it (within INTO_DEG of the bearing from the line to the node)."""
+  junctions = graph.junctions()
+  xy = np.array([graph.pos[j][:2] for j in junctions])
+  out: dict[str, float] = {}
+  for c in controls:
+    d = np.hypot(xy[:, 0] - c.x, xy[:, 1] - c.y)
+    k = int(np.argmin(d))
+    if d[k] > LINE_ASSOC_M:
+      continue
+    bearing = math.atan2(xy[k, 1] - c.y, xy[k, 0] - c.x)
+    if d[k] > 1. and abs(math.degrees(wrap(bearing - c.heading))) > INTO_DEG:
+      continue
+    out[junctions[k]] = max(out.get(junctions[k], 0.), float(d[k]))
+  return out
 
 
 def build(name: str, graph: RoadGraph | None = None, data_path: str = DATA_JSON, entry: str = '') -> Plan:

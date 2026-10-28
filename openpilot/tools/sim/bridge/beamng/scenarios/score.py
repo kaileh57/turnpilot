@@ -15,6 +15,7 @@ A row is a dict:
   ped_gap, car_gap   m from the camera mount to the nearest mannequin / scenario car (None when there is none)
   pacer_dx           m the pacer car is ahead of the ego along its heading (None without one)
   j_dist, car_j_dist m from the ego, and from the nearest oncoming car, to the scenario's junction (None without one)
+  j_ahead            m the junction is ahead of the ego along its heading (negative: behind it; None without one)
   blinker            the driver's stalk: '', 'left' or 'right'
 
 Rescore a saved result: python -m openpilot.tools.sim.bridge.beamng.scenarios.score result.json
@@ -49,6 +50,10 @@ WRONG_SIDE_PAST_M = -0.5
 WRONG_SIDE_MIN_M = 3.  # driving this far in the oncoming lane, outside every junction box, fails the run
 ON_ROAD_M = 1.5        # within the road's half width plus this of a link's centreline: on that road
 ALIGNED_DEG = 35.      # the car's heading within this of a link's direction (either way): driving along it
+LINE_BOX_MARGIN_M = 2. # a junction's box reaches this far past its mapped stop line, for a car heading into the junction
+INTO_JUNCTION_DEG = 60.  # ...within this of the bearing to it
+NEAR_JUNCTION_M = 35.  # timing.GO_NEAR_M: a stop and the go within this of the junction are its own
+PRESENT_CAR_M = 30.    # an oncoming car this close to the junction while the car is before it, at it: the conflict is presented
 
 
 def msg_fields(ss, cs, tp, nav, model) -> dict:
@@ -150,14 +155,30 @@ def holds(rows) -> list[dict]:
 
 def gas_taps(rows) -> list[dict]:
   """Each press of the gas while engaged (an override: the driver's go at a hold), with the go TurnPilot asked for and
-  the hold's reason just before it, and how long the car had stood. Pressing it to engage is not one."""
+  the hold's reason just before it, how long the car had stood, and how far it was from the scenario's junction. Pressing
+  it to engage is not one."""
   out, stopped_t = [], None
   for a, b in zip(rows, rows[1:], strict=False):
     stopped_t = (a['t'] if stopped_t is None else stopped_t) if a['v'] < STOPPED_V else None
     if b['enabled'] and b.get('gas') and not (a['enabled'] and a.get('gas')):
       out.append({'t': b['t'], 'prompt': a.get('control_prompt', ''), 'reason': a.get('reason', ''),
-                  'stopped_s': 0. if stopped_t is None else round(b['t'] - stopped_t, 2)})
+                  'stopped_s': 0. if stopped_t is None else round(b['t'] - stopped_t, 2), 'j_dist': a.get('j_dist')})
   return out
+
+
+def near_junction(r) -> bool:
+  """The row is at the scenario's junction (within NEAR_JUNCTION_M), or doesn't say (no junction, a recorded drive)."""
+  return r.get('j_dist') is None or r['j_dist'] <= NEAR_JUNCTION_M
+
+
+def oncoming_presented(rows) -> bool | None:
+  """An oncoming car came within PRESENT_CAR_M of the junction while the car was at it (NEAR_JUNCTION_M), still before
+  it (the junction ahead along its heading): the conflict the left scenarios exist for. None when the rows don't say
+  (no oncoming car, or rows from before they recorded it)."""
+  if not any(r.get('car_j_dist') is not None for r in rows):
+    return None
+  return any(r.get('car_j_dist') is not None and r['car_j_dist'] <= PRESENT_CAR_M and r.get('j_dist') is not None and
+             r['j_dist'] <= NEAR_JUNCTION_M and (r.get('j_ahead') or 0.) > 0. for r in rows)
 
 
 def _after_advance(rows, i: int) -> tuple[bool, int]:
@@ -240,9 +261,12 @@ def min_gap(rows, key):
 def oncoming_offsets(rows, road) -> list:
   """For each row, m the car's centreline is left of the divider between the two directions of the road it drives along
   (negative: on its own side); None inside a junction box (a turn crosses there), off the roads, across a road, or with
-  no position. road: catalog.road_model's {'links': [[ax, ay, bx, by, ra, rb, lanes], ...], 'junctions': [[x, y, box], ...]},
-  lanes as BeamNG's lane string for travel a -> b, left to right ('+' that way, '-' the other). A road with no '-' lane
-  our way has no oncoming lane; one with only '-' lanes is all oncoming (the wrong way down a one-way road)."""
+  no position. road: catalog.road_model's {'links': [[ax, ay, bx, by, ra, rb, lanes], ...], 'junctions': [[x, y, box, line],
+  ...]}, lanes as BeamNG's lane string for travel a -> b, left to right ('+' that way, '-' the other). A road with no '-'
+  lane our way has no oncoming lane; one with only '-' lanes is all oncoming (the wrong way down a one-way road). A
+  junction's box reaches box m from its node, and for a car heading into it (within INTO_JUNCTION_DEG of the bearing to
+  it) its farthest mapped stop line (line m from the node, 0 without one or in an older result's [x, y, box]) plus
+  LINE_BOX_MARGIN_M: a car pulls away from the line toward its turn."""
   links = road['links']
   if not links:
     return [None] * len(rows)
@@ -251,7 +275,8 @@ def oncoming_offsets(rows, road) -> list:
   a, d = L[:, 0:2], L[:, 2:4] - L[:, 0:2]
   length = np.maximum(np.linalg.norm(d, axis=1), 1e-6)
   u = d / length[:, None]
-  J = np.array([j[:3] for j in road['junctions']], dtype=float).reshape(-1, 3)
+  J = np.array([list(j[:4]) + [0.] * (4 - len(j[:4])) for j in road['junctions']], dtype=float).reshape(-1, 4)
+  cos_into = np.cos(np.radians(INTO_JUNCTION_DEG))
   cos_aligned = np.cos(np.radians(ALIGNED_DEG))
   out = []
   for r in rows:
@@ -259,10 +284,13 @@ def oncoming_offsets(rows, road) -> list:
       out.append(None)
       continue
     p = np.array([r['x'], r['y']])
-    if len(J) and (np.hypot(J[:, 0] - p[0], J[:, 1] - p[1]) < J[:, 2]).any():
-      out.append(None)
-      continue
     h = np.array([np.cos(r['heading']), np.sin(r['heading'])])
+    if len(J):
+      dj = np.hypot(J[:, 0] - p[0], J[:, 1] - p[1])
+      into = ((J[:, 0] - p[0]) * h[0] + (J[:, 1] - p[1]) * h[1]) >= cos_into * dj
+      if (dj < J[:, 2]).any() or ((dj < J[:, 3] + LINE_BOX_MARGIN_M) & (J[:, 3] > 0.) & into).any():
+        out.append(None)
+        continue
     f = np.clip(((p - a) * u).sum(axis=1) / length, 0., 1.)
     radius = L[:, 4] + f * (L[:, 5] - L[:, 4])
     rel = p - (a + f[:, None] * d)
@@ -361,6 +389,9 @@ def _hold_with(hs, word):
 
 
 GO_PROMPTS = ('stopSignGo', 'signalGo', 'unprotectedTurnGo')  # turnpilotPlan.controlPrompt values that ask for the driver's go
+# the go a turn takes at its junction, by the junction's own mapped control (catalog.junction_control): its signal or stop
+# sign protects the turn (map_controls.protected), and only an unsignalized one is an unprotectedTurn stop
+JUNCTION_GO = {'signal': 'signalGo', 'stop': 'stopSignGo'}
 
 
 def check(name: str, res: dict) -> list[str]:
@@ -388,17 +419,23 @@ def check(name: str, res: dict) -> list[str]:
     elif not any(x['resumed'] for x in h if x['stopped']):
       fails.append("did not move on after the crosswalk cleared")
   elif name.startswith('unprotected_left'):  # and its variants at other approaches
+    # a left on a green is still permissive: the oncoming hold is required wherever an oncoming car was presented
     h = _hold_with(hs, 'oncoming')
-    if not h:
+    if res.get('oncoming_presented') is False:
+      fails.append(f"no oncoming car came within {PRESENT_CAR_M:.0f} m of the junction while the car was at it: the wait went untested")
+    elif not h:
       fails.append("never waited for oncoming traffic")
     elif not any(x['resumed'] for x in h):
       fails.append("did not go after the oncoming cars passed")
     if res['min_gap_car_m'] is not None and res['min_gap_car_m'] < CAR_MIN_GAP_M:
       fails.append(f"came within {res['min_gap_car_m']} m of an oncoming car")
-    if 'unprotectedTurnGo' not in res['stopped_for_go']:
-      fails.append("never stopped at the unprotected left's hold line for the driver's go")
-    if not any(x['prompt'] == 'unprotectedTurnGo' for x in res['gas_taps']):
-      fails.append("the driver never gave the go at the unprotected left's hold line")
+    go = res.get('junction_go', 'unprotectedTurnGo')
+    at = "the unprotected left's hold line" if go == 'unprotectedTurnGo' else f"the junction's {res['junction_control']}"
+    if go not in res['stopped_for_go']:
+      fails.append(f"never stopped at {at} for the driver's go" + ('' if go == 'unprotectedTurnGo' else f" ({go})"))
+    if not any(x['prompt'] == go and (x.get('j_dist') is None or x['j_dist'] <= NEAR_JUNCTION_M) for x in res['gas_taps']):
+      fails.append("the driver never gave the go at the unprotected left's hold line" if go == 'unprotectedTurnGo' else
+                   f"the driver never gave the go ({go}) at {at}")
   elif name == 'ped_in_path':
     g = res['stop_gap_m']
     if res['outcome'] != 'stopped' or g is None:
@@ -425,8 +462,10 @@ def check(name: str, res: dict) -> list[str]:
   return fails
 
 
-def summarize(name: str, rows, outcome: str, road: dict | None = None) -> dict:
-  """road: catalog.road_model's roads around the run, for the oncoming-lane check (rows with positions need one)."""
+def summarize(name: str, rows, outcome: str, road: dict | None = None, junction_control: str | None = None) -> dict:
+  """road: catalog.road_model's roads around the run, for the oncoming-lane check (rows with positions need one);
+  junction_control: the scenario junction's own mapped control (catalog.junction_control's kind: 'signal', 'stop',
+  'none'; None: not known), which decides the go its turn takes there (JUNCTION_GO)."""
   ms = maneuvers(rows)
   wrong_m, wrong_spans = wrong_side(rows, road)
   res = {
@@ -445,8 +484,12 @@ def summarize(name: str, rows, outcome: str, road: dict | None = None) -> dict:
     'positions': any(r.get('x') is not None for r in rows),
     'wrong_side_m': wrong_m,
     'wrong_side': wrong_spans,
-    # the gos TurnPilot asked for with the car standing (stopSignGo, unprotectedTurnGo, signalGo)
-    'stopped_for_go': sorted({r['control_prompt'] for r in rows if r.get('control_prompt', 'none') not in ('', 'none') and r['v'] < STOPPED_V}),
+    # the gos TurnPilot asked for with the car standing at the junction (stopSignGo, unprotectedTurnGo, signalGo)
+    'stopped_for_go': sorted({r['control_prompt'] for r in rows if r.get('control_prompt', 'none') not in ('', 'none') and
+                              r['v'] < STOPPED_V and near_junction(r)}),
+    'junction_control': junction_control,
+    'junction_go': JUNCTION_GO.get(junction_control or 'none', 'unprotectedTurnGo'),
+    'oncoming_presented': oncoming_presented(rows),
     'lane_blocked': any(r.get('reason') == 'car in target lane' for r in rows),
     'signal_prompts': sum(1 for a, b in zip(rows, rows[1:], strict=False) if b.get('blinker') and b['blinker'] != a.get('blinker')),
   }
@@ -479,7 +522,8 @@ def main():
     with open(path) as f:
       result = json.load(f)
     for run in result['runs']:
-      print(report(f"{result['scenario']} run {run['run']}", summarize(result['scenario'], run['rows'], run['outcome'], road=result.get('road'))))
+      print(report(f"{result['scenario']} run {run['run']}", summarize(result['scenario'], run['rows'], run['outcome'], road=result.get('road'),
+                                                                     junction_control=(result.get('notes') or {}).get('junction_control'))))
 
 
 if __name__ == "__main__":

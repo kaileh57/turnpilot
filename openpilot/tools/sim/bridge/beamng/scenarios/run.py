@@ -226,8 +226,10 @@ class Runner:
       if a.trigger == 'oncoming':  # where the oncoming traffic is, for the score's "presented" (score.oncoming_presented)
         dj = junction_distance(self.plan, pose[0], pose[1])
         r['car_j_dist'] = round(dj if r['car_j_dist'] is None else min(r['car_j_dist'], dj), 2)
+    r['j_ahead'] = None
     if r['j_dist'] is not None:
       r['j_dist'] = round(r['j_dist'], 2)
+      r['j_ahead'] = round((self.plan.junction[0] - x) * math.cos(h) + (self.plan.junction[1] - y) * math.sin(h), 2)
       if a.trigger == 'pace':
         r['pacer_dx'] = round((pose[0] - x) * math.cos(h) + (pose[1] - y) * math.sin(h), 2)
     return r
@@ -295,7 +297,7 @@ class Runner:
     end_wall = wall()
     failed = [f"{name}: {f.exception()!r}" for name, f in getattr(self, 'jobs', []) if f.done() and f.exception() is not None]
     detail = '; '.join([detail] * bool(detail) + failed)
-    res = score.summarize(self.plan.name, self.rows, outcome, road=self.plan.road)
+    res = score.summarize(self.plan.name, self.rows, outcome, road=self.plan.road, junction_control=self.plan.notes.get('junction_control'))
     # every go the sim driver gave, with its reason (the score's gas_taps are the presses openpilot saw, from the rows)
     res['driver_taps'] = getattr(self, 'taps', GasTaps()).log
     res.update(run=self.run_idx + 1, detail=detail, t_start_wall=self.t0_wall, t_engaged_wall=self.t_engaged_wall, t_end_wall=end_wall,

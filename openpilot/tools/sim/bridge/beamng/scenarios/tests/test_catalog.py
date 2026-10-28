@@ -199,3 +199,11 @@ def test_the_spawn_clearance_rolls_as_the_bridge_does():
   pytest.importorskip("beamngpy")
   from openpilot.tools.sim.bridge.beamng.bridge import ROLLING_START_ACCEL
   assert catalog.ROLL_ACCEL == ROLLING_START_ACCEL
+
+
+def test_the_road_models_junctions_carry_their_farthest_mapped_stop_line(graph):
+  # the score's junction box starts at the mapped stop line for a car heading in (score.oncoming_offsets)
+  plan = catalog.build('unprotected_left', graph)
+  j = min(plan.road['junctions'], key=lambda j: math.hypot(j[0] - plan.junction[0], j[1] - plan.junction[1]))
+  assert len(j) == 4 and 12.0 < j[3] < 16.0  # trafficLight 46 at 12.5 m, 49 at 13.0 m, and the junction's others
+  assert all(len(k) == 4 and k[3] >= 0. for k in plan.road['junctions'])

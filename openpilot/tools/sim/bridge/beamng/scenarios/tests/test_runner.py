@@ -183,7 +183,7 @@ def bridge():
 # the fake world plays no turnpilotd and no detector, so each scenario fails on what only they would do
 CASES = [
   ('ped_crosswalk_right', 2, 'walk', "never held to a stop for the pedestrian in the crosswalk"),
-  ('unprotected_left', 1, 'release', "never waited for oncoming traffic"),
+  ('unprotected_left', 1, 'release', "no oncoming car came within 30 m of the junction while the car was at it: the wait went untested"),
   ('occupied_lane', 1, 'release_pacer', "the planner never saw the target lane as occupied"),
 ]
 
@@ -230,6 +230,8 @@ def test_runs_end_to_end(tmp_path, monkeypatch, name, runs, trigger, failure):
     assert r['maneuvers_attempted'] == 1 and not r['disengagements']
     assert r['wrong_side_m'] == 0.0  # checked against the plan's road model, saved beside the runs for a rescore
     assert r['failures'][0] == failure
+    if name == 'unprotected_left':  # its junction's mapped signal decides the go it takes there
+      assert r['junction_go'] == 'signalGo' and "the driver never gave the go (signalGo) at the junction's signal" in r['failures']
     gap = 'ped_gap' if name.startswith('ped') else 'car_gap'
     assert any(row[gap] is not None for row in r['rows'])
     assert r['pose_fields'] == run.POSE_FIELDS and len(r['poses']) > 20 * 10
