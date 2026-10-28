@@ -8,7 +8,7 @@ sim drive.
 import math
 import time
 
-from openpilot.cereal import custom
+from openpilot.cereal import custom, log
 
 SPEED_CAP_TAU = 1.0           # s, from a speed cap to an accel
 SPEED_CAP_ACCEL_MIN = -2.0    # m/s^2: a speed cap alone brakes no harder than this; accelCap carries hard stops
@@ -49,14 +49,17 @@ def plan_events(sm, now: float | None = None) -> list[str]:
   1. a handback (turnpilotDetectorStopped, turnpilotNoDetector, turnpilotModelFellBack; handback.py): nothing here while one is set;
   2. a fault (turnpilotUnavailable);
   3. too fast to turn (turnpilotTooFastToTurn);
-  4. a planned lane change (turnpilotLaneChangeLeft/Right, LaneChangeEvents);
+  4. a planned lane change, offered or just aborted (turnpilotLaneChangeLeft/Right/Aborted, LaneChangeEvents);
   5. the wrong lane (turnpilotWrongLane).
-  turnpilotd keeps the lower ones unset while it isn't acting or is faulted (turnpilotd.py): no skip, no wrong lane and
-  no lane change offer then, so this order holds without filtering. A handback or a fault cancels an offered lane change
-  with its abort (turnpilotLaneChangeAborted, reason handedBack or fault), which is raised with them. On screen the
-  engaged handback's soft disable (Priority.MID) outranks the abort (LOW); a fault's turnpilotUnavailable and a
-  disengaged handback's alert are PERMANENT at Priority.LOWER, so there the abort shows its ABORT_HOLD_S first and the
-  status line returns after it."""
+  The alerts of 3 to 5 are all Priority.LOW, where AlertManager shows the newest, so the order is kept by not raising the
+  lower ones: the wrong lane isn't raised while a lane change is offered or its abort holds (the car is in a turn-only
+  lane at an intersection before the turn the change is for), and lane_change_events raises nothing while the plan is
+  too fast to turn or faulted (the skip drops the maneuver, so its offer aborts that same frame, and the skip says why).
+  turnpilotd keeps the lower ones unset while it isn't acting or is faulted (turnpilotd.py). A handback cancels an
+  offered lane change with its abort (turnpilotLaneChangeAborted, reason handedBack), raised with it: on screen the
+  engaged handback's soft disable (Priority.MID) outranks it, and while disengaged the abort (a WARNING) isn't shown.
+  A fault is a WARNING with a chime while engaged, held TURNPILOT_FAULT_ALERT_S so a one-frame fault is heard and read
+  (selfdrived/events.py), and PERMANENT at Priority.LOWER while not."""
   if not getattr(sm, 'recv_time', {}).get('turnpilotPlan'):
     return []
   plan = fresh_plan(sm, now)
@@ -68,6 +71,8 @@ def plan_events(sm, now: float | None = None) -> list[str]:
     return []
   if plan.tooFastToTurn:
     return ['turnpilotTooFastToTurn']
+  if lane_change_events(plan):
+    return []  # the lane change outranks the wrong lane
   if plan.laneMismatch != custom.TurnpilotPlan.LaneMismatch.none:
     return ['turnpilotWrongLane']
   return []
@@ -87,8 +92,9 @@ ABORT_TEXT = {
 
 def lane_change_events(plan) -> tuple[str, ...]:
   """The onroad event names (log.OnroadEvent.EventName) a turnpilotPlan raises: the coming lane change, left or right,
-  from its warning until it starts, and an abort while laneChangeAbort holds its reason. plan: shown_plan's, or None."""
-  if plan is None:
+  from its warning until it starts, and an abort while laneChangeAbort holds its reason. Nothing while the plan is too
+  fast to turn or faulted: those outrank it (plan_events). plan: shown_plan's, or None."""
+  if plan is None or plan.tooFastToTurn or plan.fault != custom.TurnpilotPlan.Fault.none:
     return ()
   offer = str(plan.laneChangeOffer)
   events = ('turnpilotLaneChangeLeft',) if offer == 'left' else ('turnpilotLaneChangeRight',) if offer == 'right' else ()
@@ -114,6 +120,14 @@ class LaneChangeEvents:
     self._stale_t = 0.
     self.offered = str(plan.laneChangeOffer) != 'none'
     return lane_change_events(plan)
+
+
+def hides_stock_lane_change(names, direction) -> bool:
+  """Whether TurnPilot's lane change events (LaneChangeEvents.update's names) stand in for stock's preLaneChange alert
+  for DesireHelper's direction (modelV2.meta.laneChangeDirection): only when the change offered is to that side. The
+  driver signalling the other way is their own change, and gets stock's prompt."""
+  side = {'turnpilotLaneChangeLeft': log.LaneChangeDirection.left, 'turnpilotLaneChangeRight': log.LaneChangeDirection.right}
+  return any(name in side and direction == side[name] for name in names)
 
 
 def lane_change_text(plan, side: str) -> str:

@@ -475,8 +475,12 @@ def test_fault_or_turning_off_cancels_an_offered_lane_change_out_loud():
     assert all(p.state == State.disabled and p.laneChangeOffer == LaneChange.none for p in plans), stop
     held = [p for p in plans if p.laneChangeAbort == reason]
     assert plans[0].laneChangeAbort == reason and abs(len(held) * DT_MDL - ABORT_HOLD_S) < 2 * DT_MDL, stop
-    # selfdrived raises the abort from the disabled plan
-    assert lane_change_events(plans[0]) == ('turnpilotLaneChangeAborted',), stop
+    # selfdrived raises the abort from a disabled plan turned off; a fault's own alert (turnpilotUnavailable, with its
+    # chime) outranks it and says what happened, so the abort isn't raised under it (hooks.plan_events)
+    if stop == 'off':
+      assert lane_change_events(plans[0]) == ('turnpilotLaneChangeAborted',), stop
+    else:
+      assert plans[0].fault != Fault.none and lane_change_events(plans[0]) == (), stop
 
 
 def invalid_nav(sim):

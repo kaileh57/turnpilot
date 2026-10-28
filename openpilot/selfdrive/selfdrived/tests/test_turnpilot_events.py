@@ -59,3 +59,76 @@ def test_turnpilot_chimes_on_skip_and_handback():
     events.add(name)
     a, = events.create_alerts([ET.SOFT_DISABLE], [car.CarParams.new_message(), car.CarState.new_message(), FakeSM(plan()), False, 300, 0])
     assert a.alert_text_1 == 'TAKE CONTROL IMMEDIATELY' and a.audible_alert == AudibleAlert.tpHandback
+
+
+class AlertSlot:
+  """selfdrived's TurnPilot alerts frame by frame, as it raises them (plan_events, LaneChangeEvents) into AlertManager,
+  engaged (WARNING alerts shown)."""
+  def __init__(self):
+    from openpilot.selfdrive.selfdrived.alertmanager import AlertManager
+    from openpilot.selfdrive.turnpilot.hooks import LaneChangeEvents
+    self.am, self.lane_events, self.frame = AlertManager(), LaneChangeEvents(), 0
+
+  def step(self, p):
+    from openpilot.selfdrive.turnpilot.hooks import plan_events, shown_plan
+    sm = FakeSM(p)
+    events = Events()
+    for name in plan_events(sm) + list(self.lane_events.update(shown_plan(sm), 0.01)):
+      events.add(getattr(EventName, name))
+    self.am.add_many(self.frame, events.create_alerts([ET.PERMANENT, ET.WARNING], [car.CarParams.new_message(), car.CarState.new_message(),
+                                                                                 sm, False, 0, 0]))
+    self.am.process_alerts(self.frame, set())
+    self.frame += 1
+    return self.am.current_alert
+
+
+def test_lane_change_outranks_wrong_lane():
+  # a change offered for a turn beyond an intersection where the car is in a turn-only lane: the wrong lane is confirmed a
+  # second after the offer, and must not hide its countdown and its prompt to signal
+  slot = AlertSlot()
+  for frame in range(300):
+    mismatch = 'turnOnlyGoingStraight' if frame >= 100 else 'none'
+    a = slot.step(plan(laneChangeOffer='right', laneChangeCountdown=max(3. - frame * 0.01, 0.), laneMismatch=mismatch))
+    assert a.alert_type == 'turnpilotLaneChangeRight/warning', frame
+  # the change gone, the wrong lane is said
+  for _ in range(300):
+    a = slot.step(plan(laneMismatch='turnOnlyGoingStraight'))
+  assert a.alert_type == 'turnpilotWrongLane/warning'
+
+
+def test_too_fast_outranks_the_abort_it_causes():
+  # a lane change aborted earlier in the drive, then an offered one dropped by a too-fast skip on the skip's frame: the
+  # driver is told why (too fast, rerouting) at once, not "Lane Change Cancelled: Route changed"
+  slot = AlertSlot()
+  for _ in range(10):
+    slot.step(plan(laneChangeOffer='left'))
+  for _ in range(400):
+    slot.step(plan(laneChangeAbort='blindspot'))
+  for _ in range(10):
+    slot.step(plan(laneChangeOffer='left'))
+  a = slot.step(plan(tooFastToTurn=True, laneChangeAbort='routeChanged'))
+  assert a.alert_type == 'turnpilotTooFastToTurn/warning' and a.audible_alert == AudibleAlert.tpTooFastTurn
+
+
+def test_a_fault_while_engaged_is_heard_and_seen():
+  # turnpilotd fails one frame (its plan disabled, the fault on it) and recovers: the driver hears it, and it stays up
+  # long enough to read, over the abort of the change it cancelled
+  slot = AlertSlot()
+  for _ in range(10):
+    slot.step(plan(laneChangeOffer='left'))
+  a = slot.step(plan(state='disabled', fault='error', reason='TurnPilot error', laneChangeAbort='fault'))
+  assert a.alert_type == 'turnpilotUnavailable/warning' and a.audible_alert != AudibleAlert.none
+  for _ in range(200):
+    a = slot.step(plan())
+  assert a.alert_type == 'turnpilotUnavailable/warning'  # 2 s after a single bad frame
+
+
+def test_offer_hides_only_the_stock_prompt_for_its_own_side():
+  from openpilot.selfdrive.turnpilot.hooks import hides_stock_lane_change
+  Dir = log.LaneChangeDirection
+  assert hides_stock_lane_change(('turnpilotLaneChangeLeft',), Dir.left)
+  assert not hides_stock_lane_change(('turnpilotLaneChangeLeft',), Dir.right)  # the driver's own change the other way
+  assert hides_stock_lane_change(('turnpilotLaneChangeRight',), Dir.right)
+  assert not hides_stock_lane_change(('turnpilotLaneChangeRight',), Dir.left)
+  assert not hides_stock_lane_change(('turnpilotLaneChangeAborted',), Dir.left)
+  assert not hides_stock_lane_change((), Dir.right)

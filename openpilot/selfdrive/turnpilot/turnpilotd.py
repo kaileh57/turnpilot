@@ -35,10 +35,11 @@ Once the detector is back and TurnPilot acts again, the dropped maneuver is take
 half driven (_take_up_dropped).
 A handback or a fault cancels a lane change that is offered and not yet started, with laneChangeAbort handedBack or
 fault for ABORT_HOLD_S (selfdrived raises turnpilotLaneChangeAborted); TurnPilot turned off cancels it as turnedOff.
-A change DesireHelper has started goes on.
+A change DesireHelper has started goes on, and one it may have started on the request already isn't announced as
+aborted (lane_planner.LanePlanner._abort).
 Alert priority (hooks.plan_events): handback, then fault (turnpilotUnavailable), then too fast to turn, then a lane
 change, then wrong lane. While TurnPilot isn't acting or is faulted, too fast to turn, wrong lane and lane change offers
-are never set here.
+are never set here; the rest of the order is selfdrived's (hooks.plan_events, hooks.lane_change_events).
 """
 import time
 

@@ -184,19 +184,26 @@ def test_stale_or_disabled_plan_never_changes_planner_output():
 
 
 def test_plan_events_one_slot_by_priority():
-  # handback, then fault, then too fast to turn, then wrong lane: at most one of TurnPilot's alerts a frame
+  # handback, then fault, then too fast to turn, then a lane change, then wrong lane: at most one of TurnPilot's alerts a frame
   Fault, Handback, LaneMismatch = custom.TurnpilotPlan.Fault, custom.TurnpilotPlan.Handback, custom.TurnpilotPlan.LaneMismatch
-  def events(handback=Handback.none, fault=Fault.none, too_fast=False, mismatch=LaneMismatch.none):
+  def events(handback=Handback.none, fault=Fault.none, too_fast=False, mismatch=LaneMismatch.none, offer='none', abort='none'):
     msg = messaging.new_message('turnpilotPlan')
     p = msg.turnpilotPlan
     p.state, p.handback, p.fault, p.tooFastToTurn, p.laneMismatch = State.turning, handback, fault, too_fast, mismatch
-    return plan_events(FakeSM({'turnpilotPlan': msg.as_reader().turnpilotPlan}))
+    p.laneChangeOffer, p.laneChangeAbort = offer, abort
+    plan = msg.as_reader().turnpilotPlan
+    return plan_events(FakeSM({'turnpilotPlan': plan})) + list(lane_change_events(plan))
   everything = {'fault': Fault.error, 'too_fast': True, 'mismatch': LaneMismatch.wrongLaneForTurn}
   assert events(Handback.detectorStopped, **everything) == []  # handback.py raises the handback's own event
   assert events(Handback.modelFellBack, **everything) == []
   assert events(**everything) == ['turnpilotUnavailable']
   assert events(too_fast=True, mismatch=LaneMismatch.wrongLaneForTurn) == ['turnpilotTooFastToTurn']
   assert events(mismatch=LaneMismatch.wrongLaneForTurn) == ['turnpilotWrongLane']
+  # a lane change, offered or just aborted, outranks the wrong lane; too fast to turn and a fault outrank the lane change
+  assert events(mismatch=LaneMismatch.turnOnlyGoingStraight, offer='left') == ['turnpilotLaneChangeLeft']
+  assert events(mismatch=LaneMismatch.turnOnlyGoingStraight, abort='noSignal') == ['turnpilotLaneChangeAborted']
+  assert events(too_fast=True, abort='routeChanged') == ['turnpilotTooFastToTurn']
+  assert events(fault=Fault.error, abort='fault') == ['turnpilotUnavailable']
 
 
 def lane_change_plan(offer='none', countdown=0., lane_change='none', abort='none', shadow=False):

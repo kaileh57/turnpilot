@@ -252,6 +252,18 @@ def turnpilot_unavailable_alert(CP: car.CarParams, CS: car.CarState, sm: messagi
   return NormalPermanentAlert("TurnPilot Unavailable", sm['turnpilotPlan'].reason or "TurnPilot is doing nothing")
 
 
+TURNPILOT_FAULT_ALERT_S = 3.  # a fault while engaged stays up this long: a one-frame fault is heard, and can be read
+
+
+def turnpilot_fault_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
+  """TurnPilot faulted while openpilot is engaged: whatever it was doing (a turn's desire and cap, a scene hold, a lane
+  change) just dropped, so the driver hears it, and a one-frame fault stays up TURNPILOT_FAULT_ALERT_S. Above the lane
+  change and too-fast alerts (hooks.plan_events), below openpilot's own soft disables."""
+  return Alert("TurnPilot Unavailable", sm['turnpilotPlan'].reason or "TurnPilot is doing nothing",
+               AlertStatus.userPrompt, AlertSize.mid,
+               Priority.LOW, VisualAlert.none, AudibleAlert.prompt, TURNPILOT_FAULT_ALERT_S)
+
+
 def turnpilot_wrong_lane_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
   straight = sm['turnpilotPlan'].laneMismatch == custom.TurnpilotPlan.LaneMismatch.turnOnlyGoingStraight
   return Alert("Wrong Lane", "In a turn-only lane, route goes straight" if straight else "This lane doesn't turn with the route",
@@ -448,6 +460,7 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
 
   # TurnPilot
   EventName.turnpilotUnavailable: {
+    ET.WARNING: turnpilot_fault_alert,
     ET.PERMANENT: turnpilot_unavailable_alert,
   },
 

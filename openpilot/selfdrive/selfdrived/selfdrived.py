@@ -23,7 +23,7 @@ from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 from openpilot.selfdrive.turnpilot.handback import HandbackEvents
-from openpilot.selfdrive.turnpilot.hooks import LaneChangeEvents, fresh_plan, plan_events, shown_plan
+from openpilot.selfdrive.turnpilot.hooks import LaneChangeEvents, fresh_plan, hides_stock_lane_change, plan_events, shown_plan
 
 from openpilot.common.version import get_build_metadata
 from openpilot.common.hardware import HARDWARE
@@ -318,18 +318,17 @@ class SelfdriveD:
 
     # Handle lane change
     # TurnPilot: a planned lane change's warning and abort; while one is offered its alert says what to do, not stock's
-    turnpilot_offer = False
-    # (shown_plan: a fault's disabled plan carries its abort; the alert priority is in hooks.plan_events)
-    for name in self.turnpilot_events.update(shown_plan(self.sm), DT_CTRL):
+    # (shown_plan: a disabled plan carries a handback's or turning off's abort; the alert priority is in hooks.plan_events)
+    turnpilot_names = self.turnpilot_events.update(shown_plan(self.sm), DT_CTRL)
+    for name in turnpilot_names:
       self.events.add(getattr(EventName, name))
-      turnpilot_offer = turnpilot_offer or name != 'turnpilotLaneChangeAborted'
     if self.sm['modelV2'].meta.laneChangeState == LaneChangeState.preLaneChange:
       direction = self.sm['modelV2'].meta.laneChangeDirection
       if (CS.leftBlindspot and direction == LaneChangeDirection.left) or \
          (CS.rightBlindspot and direction == LaneChangeDirection.right):
         self.events.add(EventName.laneChangeBlocked)
-      elif turnpilot_offer:
-        pass
+      elif hides_stock_lane_change(turnpilot_names, direction):
+        pass  # the offer to that side says what to do; the driver's own change the other way gets stock's prompt
       else:
         if direction == LaneChangeDirection.left:
           self.events.add(EventName.preLaneChangeLeft)
