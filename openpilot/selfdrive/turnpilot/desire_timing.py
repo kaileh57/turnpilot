@@ -129,6 +129,12 @@ class DesireTiming:
     if the car hasn't turned TURN_STARTED_DEG."""
     self.active, self._held, self._gap = False, True, 0
 
+  def track_yaw(self, yaw_rate: float, dt: float):
+    """A frame turnpilotd faulted on, with this turn's desire out: the car's turn toward it still counts, so its desire is
+    cleared at its angle once TurnPilot runs again, as if there had been no fault."""
+    if self.started and self.side and not self.done:
+      self.turned_deg += math.degrees(yaw_rate * dt) * self.side
+
   def cancel(self):
     """A turn skipped with its desire out but not yet turned on (turnpilotd: a dropped turn too close to pulse again):
     its desire comes out of the model's queue now, and nothing more goes for it."""

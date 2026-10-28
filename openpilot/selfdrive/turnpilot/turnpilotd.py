@@ -38,7 +38,8 @@ disable's end) the speed cap holds the car at no more than its speed then, and a
 (hold_v), or than the driver's gas has taken it to.
 A fault (plan()) is a disabled plan; it carries the handback, so a fault never hides one, and the detector's deadlines
 and the scene's stops in force run on through it (only turning TurnPilot off resets them). So does a committed turn:
-its route and desire state are kept (its desire, dropped by the disabled plan, pulses again only as on re-engaging), and
+its route and desire state are kept (its desire, dropped by the disabled plan, pulses again only as on re-engaging), its
+junction dead-reckoned and its yaw counted through the fault (fault_track), and
 the car is held to its speed while faulted (hold_v), as on a handback. A faulted plan carries the
 scene's limits (live pedestrians, or those carried through a detector gap, and the junction hold in force where it
 was; scene_policy.py), which plannerd acts on (hooks.limits_plan), so a turnpilotd failing every frame still never
@@ -138,6 +139,7 @@ class TurnPilot:
     self.oracle_ok = False  # the sim light oracle is accepted: SIMULATION=1 and TurnPilotSimLightOracle (main())
     self.yellow_decel = YELLOW_DECEL  # TurnPilotYellowDecel (main())
     self.map_now = None  # this frame's map control decision, once update() has made it
+    self._rf_ticked = self._yaw_ticked = False  # update() dead-reckoned the route, and counted the yaw, this frame
     self.reset()
 
   def reset(self, detector: bool = True, keep_turn: bool = False):
@@ -180,8 +182,23 @@ class TurnPilot:
   def turn_committed(self) -> bool:
     """The route's maneuver is a turn whose desire went out and isn't over: it is held through a gap in the route
     (route_follower.py), and a fallback's route cancel waits for it."""
-    d = self.desires
-    return d.maneuver_id == self.follower.maneuver_id and d.started and not d.done and d.side != 0
+    d, rf = self.desires, self.follower
+    return d.maneuver_id == rf.maneuver_id and d.started and not d.done and d.side != 0 and rf.upcoming is not None
+
+  def fault_track(self, sm) -> None:
+    """A fault (plan()) with a turn committed: the frame's dead-reckoning and yaw, if update() didn't get to them, so the
+    turn is over where it would have been (passed, or cleared at its angle). Frozen through the fault, the junction stayed
+    ahead of the car and the turn was held, and pulsed again, out on the road after it."""
+    if not self.turn_committed:
+      return
+    try:
+      cs = sm['carState']
+      if not self._rf_ticked:
+        self.follower.dead_reckon(max(cs.vEgo, 0.), DT_MDL)
+      if not self._yaw_ticked:
+        self.desires.track_yaw(default_yaw_rate(cs, sm['modelV2']), DT_MDL)
+    except Exception:
+      log_error("turnpilotd.fault_track_failed")
 
   def watch_model(self, model, enabled: bool) -> None:
     """Note a fallback from the big driving model, whether or not TurnPilot is on: it lasts the drive."""
@@ -279,6 +296,7 @@ class TurnPilot:
     rf = self.follower
     rf.update(sm['navInstruction'], sm.updated['navInstruction'], sm.valid['navInstruction'], v_ego, DT_MDL,
               committed=self.turn_committed)
+    self._rf_ticked = True
     upcoming = None if rf.arrived else rf.upcoming
     available = scene.available
     objects = list(scene.objects) if available else []
@@ -358,6 +376,7 @@ class TurnPilot:
                                  lat_active=lat_active, replaced=rf.replaced,
                                  may_start=skip.feasible_now and not held, go=self.release_go,
                                  holding=decision.should_stop)
+    self._yaw_ticked = True
     if held and desire not in (Desire.none, CLEAR_DESIRE) and desire != self.last_desire:
       desire = Desire.none  # held: the desire out stays out, but never a new rising edge (a repeat pulse under way)
     plan.desire = self.last_desire = desire
@@ -468,9 +487,11 @@ class TurnPilot:
     It also carries a model fallback's handback, which outranks the fault (see the module docstring): a fallback lasts
     the drive, so it is noted here too, where update() isn't reached."""
     self.handback_now = self.scene_now = self.map_now = None
+    self._rf_ticked = self._yaw_ticked = False
     if enabled and disengage_on_accel:
       # a gas tap is the driver's go at a map stop: with DisengageOnAccelerator it would disengage instead, so TurnPilot
       # refuses to run (Kellen: never stop control silently). The holds in force stay on the faulted plan
+      self.fault_track(sm)
       self.stop('fault')
       self.watch_model(sm['modelV2'], enabled)
       msg = disabled_plan(shadow, DISENGAGE_ON_ACCEL_REASON, Fault.disengageOnAccelerator,
@@ -479,6 +500,7 @@ class TurnPilot:
       self.fault_limits(msg.turnpilotPlan, sm, scene, map_controls=False)
       return msg
     if enabled and not long_control:
+      self.fault_track(sm)
       self.stop('fault')
       self.watch_model(sm['modelV2'], enabled)
       handback = Handback.modelFellBack if self.fell_back else Handback.none
@@ -490,6 +512,7 @@ class TurnPilot:
       return self.update(sm, scene, enabled, shadow, *args, **kwargs)
     except Exception:
       log_error("turnpilotd.plan_failed")
+      self.fault_track(sm)
       self.stop('fault')
       if self.turn_committed and self.hold_v is None:
         try:  # the turn's cap is gone with the plan: the car is held to its speed (module docstring), not sped up in the turn

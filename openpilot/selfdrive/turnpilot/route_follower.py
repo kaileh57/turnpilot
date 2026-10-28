@@ -231,12 +231,24 @@ class RouteFollower:
         self.reset()  # route, but not replaced (a turn under way finishes and its desire is cleared as for a pass)
         self.maneuver_id += 1
         return
-      travelled = max(v_ego, 0.) * dt
-      self.distance -= travelled
-      self.distance_remaining -= travelled
-      self.through_distance -= travelled
-      self.ahead_distance -= travelled
+      self._travel(max(v_ego, 0.) * dt)
+    self._check_passed()
 
+  def dead_reckon(self, v_ego: float, dt: float):
+    """A frame turnpilotd faulted on with a turn committed (turnpilotd.py): the distances run down with the car, as between
+    navd's updates, so the turn is over where it would have been, not held on past its junction."""
+    self.passed = self.replaced = False
+    if self.valid:
+      self._travel(max(v_ego, 0.) * dt)
+      self._check_passed()
+
+  def _travel(self, travelled: float):
+    self.distance -= travelled
+    self.distance_remaining -= travelled
+    self.through_distance -= travelled
+    self.ahead_distance -= travelled
+
+  def _check_passed(self):
     if self.valid and self.maneuver is not None and self.maneuver.kind == NONE and self.ahead is not None and \
        self.distance < -NAVD_ADVANCE_M:
       self._move_on()

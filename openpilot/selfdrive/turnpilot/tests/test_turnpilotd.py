@@ -1126,6 +1126,32 @@ def test_navd_moving_on_early_to_a_turn_the_same_way_without_junction_data_keeps
     assert_turn_held(sim, n)
     assert all(p.desire != CLEAR_DESIRE for s, _, p in sim.trace[n:] if s < 302.), (at, gap)
 
+
+def test_a_fault_in_a_committed_turn_doesnt_hold_it_past_its_junction():
+  # a fault (turnpilotd failing, or the car's longitudinal unknown) for 3 s from 3 m before the committed left, while the
+  # car drives round it: the turn's distance and its yaw run on through the fault, so its desire is cleared or it is
+  # passed where it would have been. No turnLeft is held, nor pulsed afresh, out on the road after it
+  for how in ('error', 'noLong'):
+    sim = Sim([(300., "turn", "left", T_LEFT), (1500., "turn", "right", junction_of("right"))])
+    while sim.distance() > 3. or sim.s < 10.:
+      sim.step()
+    assert sim.tp.turn_committed
+    sim.cruise = 4.3
+    for _ in range(int(3. / DT_MDL)):
+      if how == 'error':
+        sim.tp.update = mock.Mock(side_effect=RuntimeError("synthetic failure"))
+      else:
+        sim.long_control = None
+      sim.step(yaw_rate=0.5 if sim.s < 312. else 0.)
+    if how == 'error':
+      del sim.tp.update
+    sim.long_control = True
+    while sim.s < 360.:
+      sim.step(yaw_rate=0.5 if sim.s < 312. else 0.)
+    late = [(s, p.desire) for s, _, p in sim.trace if s > 300. + 15. and p.desire == Desire.turnLeft]
+    assert not late, (how, late[:3])
+    assert sim.tp.follower.maneuver.side == -1, how  # the right after it is the maneuver now
+
 # --- map stop control (map_controls.py) ---
 
 def stop_at(sim, s_line, limit=60.):
