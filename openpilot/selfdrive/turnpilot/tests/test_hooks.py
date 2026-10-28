@@ -190,7 +190,7 @@ def test_plan_events_one_slot_by_priority():
     p = msg.turnpilotPlan
     p.state, p.handback, p.fault, p.tooFastToTurn, p.laneMismatch = State.turning, handback, fault, too_fast, mismatch
     return plan_events(FakeSM({'turnpilotPlan': msg.as_reader().turnpilotPlan}))
-  everything = dict(fault=Fault.error, too_fast=True, mismatch=LaneMismatch.wrongLaneForTurn)
+  everything = {'fault': Fault.error, 'too_fast': True, 'mismatch': LaneMismatch.wrongLaneForTurn}
   assert events(Handback.detectorStopped, **everything) == []  # handback.py raises the handback's own event
   assert events(Handback.modelFellBack, **everything) == []
   assert events(**everything) == ['turnpilotUnavailable']

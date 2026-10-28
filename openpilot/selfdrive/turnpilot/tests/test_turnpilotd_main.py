@@ -101,7 +101,9 @@ def test_plan_failure_publishes_a_disabled_plan_and_goes_on():
   plans = [p.turnpilotPlan for p in plans]
   assert all(p.state == State.disabled and p.reason == turnpilotd.ERROR_REASON and p.desire == 0 for p in plans[:4])
   assert all(p.fault == custom.TurnpilotPlan.Fault.error for p in plans[:4])  # selfdrived shows turnpilotUnavailable
-  assert all(p.state == State.noRoute and p.fault == custom.TurnpilotPlan.Fault.none for p in plans[4:])
+  # recovered: no detections in this harness, so TurnPilot waits for the detector (tp/safety-scene) rather than acting
+  assert all(p.state == State.unavailable and p.reason == turnpilotd.WAITING_REASON and p.fault == custom.TurnpilotPlan.Fault.none
+             for p in plans[4:])
   assert errors == ["turnpilotd.scene_failed", "turnpilotd.plan_failed"] * 4  # the tracker reads modelV2 too
 
 
@@ -110,7 +112,8 @@ def test_scene_failure_publishes_an_empty_scene_and_goes_on():
   tracker.update.side_effect = RuntimeError("synthetic failure")
   plans, scenes, errors = run_main(frames=5, failing_frames=0, tracker=tracker)
   assert len(plans) == len(scenes) == 5
-  assert not any(s.available for s in scenes) and all(p.turnpilotPlan.state == State.noRoute for p in plans)
+  # an empty scene: unavailable, so TurnPilot doesn't act (waiting for the detector; once it has run, a stopped detector)
+  assert not any(s.available for s in scenes) and all(p.turnpilotPlan.state == State.unavailable for p in plans)
   assert errors == ["turnpilotd.scene_failed"] * 5
 
 

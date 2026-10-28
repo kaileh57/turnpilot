@@ -8,7 +8,7 @@ from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_control, car_state, model_v2, nav_instruction, scene
 from openpilot.selfdrive.turnpilot.desire_timing import TURN_DESIRE_LEAD_M
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, V_TURN_MIN
-from openpilot.selfdrive.turnpilot.turnpilotd import (CAR_UNKNOWN_REASON, DETECTOR_DEADLINE_S, ERROR_REASON, NO_LONG_REASON, WAITING_REASON,
+from openpilot.selfdrive.turnpilot.turnpilotd import (CAR_UNKNOWN_REASON, DETECTOR_DEADLINE_S, NO_LONG_REASON, WAITING_REASON,
                                                        TurnPilot, long_control_for)
 from openpilot.selfdrive.turnpilot.handback import Handback
 from openpilot.selfdrive.turnpilot.scene.tracker import STALE_S
@@ -43,12 +43,12 @@ class Sim:
     self.big = False
     self.trace = []
 
-  def step(self, objects=(), available=True, steer=0., blinker=False, lat_active=True):
+  def step(self, objects=(), available=True, steer=0., blinker=False, lat_active=True, yaw_rate=0.):
     self.sm.updated = dict.fromkeys(self.sm.data, False)
     instr = self.navd.update(self.s)
     if instr is not None:
       self.sm.put('navInstruction', instr)
-    self.sm.put('carState', car_state(self.v, steer, left_blinker=blinker))
+    self.sm.put('carState', car_state(self.v, steer, left_blinker=blinker, yaw_rate=yaw_rate))
     self.sm.put('carControl', car_control(lat_active))
     self.sm.put('modelV2', model_v2(*self.model_lanes, big=self.big))
     plan = self.tp.plan(self.sm, scene(objects, available), True, self.shadow, self.driver_signals,
@@ -304,7 +304,8 @@ def test_handback_mid_turn_keeps_the_turn_cap_and_sends_no_new_pulse():
   plans = [sim.step(available=False) for _ in range(int(1.5 / DT_MDL))]
   assert plans[-1].handback == Handback.detectorStopped and plans[-1].speedCap <= capped + 1.
   first = next(i for i, p in enumerate(plans) if p.handback != Handback.none)
-  assert not [s for s in rising(sim.trace[n - 1 + first:], 'desire', Desire.turnLeft)]
+  assert all(s < sim.trace[n + first][0] for s in rising(sim.trace, 'desire', Desire.turnLeft))
+  assert plans[-1].desire == Desire.turnLeft  # held, not cancelled
   assert all(p.desire in (Desire.none, Desire.turnLeft, CLEAR_DESIRE) for p in plans)
 
 
@@ -316,11 +317,12 @@ def test_handback_in_the_turn_holds_its_desire_to_the_clear():
     while sim.distance() > 5.:
       sim.step()
     for _ in range(int(10. / DT_MDL)):
-      sim.step(available=not stop_detector, steer=90.)
+      sim.step(available=not stop_detector, yaw_rate=0.3)  # 17 deg/s
     return sim
   kept, handed = drive(False), drive(True)
   assert handed.trace[-1][2].handback == Handback.detectorStopped
-  desires = lambda sim: [p.desire for _, _, p in sim.trace]
+  def desires(sim):
+    return [p.desire for _, _, p in sim.trace]
   assert CLEAR_DESIRE in desires(handed)
   assert desires(handed).index(CLEAR_DESIRE) == desires(kept).index(CLEAR_DESIRE)
   assert len(rising(handed.trace, 'desire', Desire.turnLeft)) == len(rising(kept.trace, 'desire', Desire.turnLeft))
