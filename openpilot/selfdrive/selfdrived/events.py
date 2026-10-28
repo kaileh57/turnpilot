@@ -13,6 +13,7 @@ from openpilot.common.git import get_short_branch
 from openpilot.common.realtime import DT_CTRL
 from openpilot.selfdrive.locationd.calibrationd import MIN_SPEED_FILTER
 from openpilot.common.hardware import HARDWARE
+from openpilot.selfdrive.turnpilot.hooks import ABORT_TEXT, active_plan, lane_change_text
 
 AlertSize = log.SelfdriveState.AlertSize
 AlertStatus = log.SelfdriveState.AlertStatus
@@ -234,6 +235,24 @@ def user_soft_disable_alert(alert_text_2: str) -> AlertCallbackType:
       return ImmediateDisableAlert(alert_text_2)
     return UserSoftDisableAlert(alert_text_2)
   return func
+
+def turnpilot_lane_change_alert(side: str) -> AlertCallbackType:
+  def func(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
+    plan = active_plan(sm)
+    return Alert(lane_change_text(plan, side), "TurnPilot, for the route",
+                 AlertStatus.userPrompt, AlertSize.mid,
+                 Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1)
+  return func
+
+
+def turnpilot_lane_change_aborted_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool,
+                                        soft_disable_time: int, personality) -> Alert:
+  plan = active_plan(sm)
+  reason = ABORT_TEXT.get(str(plan.laneChangeAbort), '') if plan is not None else ABORT_TEXT['stale']
+  return Alert("Lane Change Cancelled", reason,
+               AlertStatus.userPrompt, AlertSize.mid,
+               Priority.LOW, VisualAlert.none, AudibleAlert.refuse, 2.)
+
 
 def startup_master_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
   branch = get_short_branch()  # Ensure get_short_branch is cached to avoid lags on startup
@@ -606,6 +625,20 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       "",
       AlertStatus.userPrompt, AlertSize.small,
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1),
+  },
+
+  # TurnPilot: a planned lane change, from its warning until DesireHelper starts it (countdown, signal prompt, waiting for
+  # the blind spot), and its abort. The chimes are existing sounds until TurnPilot's own are recorded.
+  EventName.turnpilotLaneChangeLeft: {
+    ET.WARNING: turnpilot_lane_change_alert('left'),
+  },
+
+  EventName.turnpilotLaneChangeRight: {
+    ET.WARNING: turnpilot_lane_change_alert('right'),
+  },
+
+  EventName.turnpilotLaneChangeAborted: {
+    ET.WARNING: turnpilot_lane_change_aborted_alert,
   },
 
   EventName.laneChange: {

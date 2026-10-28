@@ -133,6 +133,11 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     bigModelLoading @100;
     bigModelFailed @102;
 
+    # TurnPilot: a planned lane change is coming (chime, countdown), and one was aborted before it started
+    turnpilotLaneChangeLeft @105;
+    turnpilotLaneChangeRight @106;
+    turnpilotLaneChangeAborted @107;
+
     lowBatteryDEPRECATED @40;
     soundsUnavailableDEPRECATED @47;
     deviceFallingDEPRECATED @71;
