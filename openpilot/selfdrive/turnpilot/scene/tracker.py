@@ -256,7 +256,8 @@ class SceneTracker:
     iou_score = np.where(same_group & same_camera, iou(np.array([trk.box for trk in self.tracks]), np.array([m.box for m in meas])), -1.)
     trk_xy = np.array([trk.x[:2] if trk.x is not None else (np.nan, np.nan) for trk in self.tracks])
     m_xy = np.array([m.xy if m.xy is not None else (np.nan, np.nan) for m in meas])
-    dist = np.linalg.norm(trk_xy[:, None] - m_xy[None], axis=2)
+    diff = trk_xy[:, None] - m_xy[None]
+    dist = np.hypot(diff[..., 0], diff[..., 1])  # as the pair-by-pair hypot did, to the bit: a near tie goes the same way
     gate = GROUND_GATE_M + GROUND_GATE_FRAC * np.hypot(m_xy[:, 0], m_xy[:, 1])[None]
     with np.errstate(invalid='ignore'):
       ground_score = np.where(same_group & (dist <= gate), -dist, -np.inf)

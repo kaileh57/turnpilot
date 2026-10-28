@@ -318,3 +318,68 @@ def pairwise_associate(tracks, meas, camera):
   run(sorted(j for j in free_m if meas[j].conf < HIGH_CONF), iou_score, IOU_SECOND)
   run(sorted(free_m), ground_score, -1e9)
   return pairs, sorted(free_m)
+
+
+def random_association(rng):
+  """Tracks and measurements built to hit the edge cases: both cameras and class groups, missing ground positions,
+  duplicate boxes and positions (exact ties), zero-area boxes, and measurements just inside or outside the ground gate."""
+  tracks = []
+  for i in range(int(rng.integers(0, 25))):
+    b = np.r_[rng.uniform(0, 1800, 2), 0, 0]
+    b[2:] = b[:2] + rng.uniform(0, 200, 2) * (rng.random() > 0.05)
+    if tracks and rng.random() < 0.15:
+      b = tracks[int(rng.integers(len(tracks)))].box.copy()
+    trk = Track(i, 'road' if rng.random() < 0.6 else 'wide', b, b, 0.0, 0.8, {int(rng.choice([PERSON, CAR, 1, 3, 5, 7])): 1.0})
+    if rng.random() < 0.85:
+      placed = [t for t in tracks if t.x is not None]
+      xy = placed[int(rng.integers(len(placed)))].x[:2] if placed and rng.random() < 0.1 else np.r_[rng.uniform(3, 80), rng.uniform(-15, 15)]
+      trk.x, trk.P = np.r_[xy, 0, 0], np.eye(4)
+    tracks.append(trk)
+  meas = []
+  for _ in range(int(rng.integers(0, 25))):
+    src = tracks[int(rng.integers(len(tracks)))] if tracks and rng.random() < 0.7 else None
+    bx = (src.box + rng.normal(0, rng.choice([0., 5., 40.]), 4)) if src is not None else np.r_[rng.uniform(0, 1800, 2), 0, 0]
+    if src is None:
+      bx[2:] = bx[:2] + rng.uniform(1, 200, 2)
+    xy = None
+    if rng.random() < 0.85:
+      if src is not None and src.x is not None:
+        d = GROUND_GATE_M + GROUND_GATE_FRAC * float(np.hypot(*src.x[:2]))
+        xy = src.x[:2] + rng.choice([0., 0.5, 0.999, 1.001]) * d * np.array([1., 0.])  # exact, inside, at, past the gate
+      else:
+        xy = np.r_[rng.uniform(3, 80), rng.uniform(-15, 15)]
+    meas.append(Measurement(bx, float(rng.choice([0.35, 0.49, 0.5, 0.51, 0.9])), int(rng.choice([PERSON, CAR, 1, 3, 5, 7])), xy))
+  return tracks, meas
+
+
+def test_vectorized_association_matches_the_old_loop():
+  # the pre-vectorization associate() (5f9d8c0), verbatim as pairwise_associate, on 3000 random frames of edge cases
+  tracker, matched = SceneTracker(CAMS, 'mici'), 0
+  for seed in range(3000):
+    rng = np.random.default_rng(seed)
+    tracker.tracks, meas = random_association(rng)
+    camera = 'road' if seed % 2 else 'wide'
+    got = tracker.associate(meas, camera)
+    assert got == pairwise_associate(tracker.tracks, meas, camera), f"seed {seed}"
+    matched += len(got[0])
+  assert matched > 10000
+
+
+def test_vectorized_tracker_keeps_the_old_ids():
+  # whole drives, both cameras alternating, crossing and bunched objects: the same track ids frame for frame
+  def drive(associate):
+    rng = np.random.default_rng(11)
+    tracker, cal, ids = SceneTracker(CAMS, 'mici'), calibration(), []
+    objs = [(int(rng.choice([PERSON, CAR])), rng.uniform(8, 60), rng.uniform(-12, 12), rng.uniform(-2, 2), rng.uniform(-2, 2))
+            for _ in range(30)]
+    with mock.patch.object(SceneTracker, 'associate', associate):
+      for k in range(200):
+        t, camera = 10. + k * DT, 'wide' if (k // 7) % 2 else 'road'
+        frame = [(c, x + vx * k * DT, y + vy * k * DT, float(rng.uniform(0.36, 0.95))) for c, x, y, vx, vy in objs
+                 if rng.random() < 0.8 and x + vx * k * DT > 4.]
+        tracks = tracker.update(detections(tracker, camera, t, frame, k), cal, car_state(), now=t)
+        ids.append(sorted((trk.track_id, round(float(trk.x[0]), 9), round(float(trk.x[1]), 9)) for trk in tracks))
+    return ids
+
+  old = drive(lambda self, meas, camera: pairwise_associate(self.tracks, meas, camera))
+  assert drive(SceneTracker.associate) == old and sum(map(len, old)) > 2000
