@@ -158,11 +158,12 @@ class App:
         values["TurnPilotMapKey"] = check_key(str(body["key"]))
       if str(body.get("cert") or "").strip():
         values["TurnPilotMapCert"] = check_cert(str(body["cert"]))
-        cert_fingerprint(values["TurnPilotMapCert"])
+        try:
+          cert_fingerprint(values["TurnPilotMapCert"])
+        except ValueError:  # base64's binascii.Error; only the certificate gets this message
+          raise ApiError(400, "The certificate is not valid PEM.") from None
     except MapError as e:
       raise ApiError(400, e.message) from None
-    except ValueError:
-      raise ApiError(400, "The certificate is not valid PEM.") from None
     if not values:
       raise ApiError(400, "nothing to save: send host, key or cert")
     with self.store.lock:

@@ -427,10 +427,13 @@ class TestMapSettings(WebTestCase):
     assert code == 200 and self.params.get("TurnPilotMapHost") == attacker.host
 
   def test_settings_the_client_cannot_use_are_refused_before_saving(self):
-    for body in ({"host": "https://1.2.3.4:abc"}, {"host": "1.2.3.4 8443"}, {"key": "clé-ключ-12345678"}):
+    for body in ({"host": "https://1.2.3.4:abc"}, {"host": "1.2.3.4 8443"}, {"key": "clé-ключ-12345678"}, {"host": "https://[zz]"},
+                 {"host": "https://[::1"}, {"host": "https://h\\x"}, {"host": "https://h;x"}, {"host": "https://host:"}):
       code, reply, _ = self.call("POST", "/api/map", body)
       assert code == 400, reply
       assert "Failed to parse" not in reply["error"] and "codec" not in reply["error"]  # a message for the driver, not Python's
+      if "host" in body:
+        assert "map server address" in reply["error"] and "certificate" not in reply["error"], reply  # the address, not the cert
       assert self.params.get("TurnPilotMapHost") is None and self.params.get("TurnPilotMapKey") is None
 
   def test_a_failed_refresh_is_on_the_status_for_the_page(self):

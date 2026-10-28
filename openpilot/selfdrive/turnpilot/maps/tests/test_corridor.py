@@ -1,8 +1,10 @@
+import errno
 import hashlib
 import os
 import io
 import tarfile
 import time
+from unittest.mock import patch
 
 import pytest
 
@@ -111,13 +113,15 @@ def test_prune_keeps_the_newest_and_the_one_in_use(tmp_path):
   packs_dir = tmp_path / 'packs'
   assert corridor.packs(packs_dir) == made  # oldest first, whatever their names
   (packs_dir / '.staging-dead').mkdir()  # left by a crash mid-unpack
+  os.utime(packs_dir / '.staging-dead', (1, 1))
+  (packs_dir / '.staging-live').mkdir()  # another route job's unpack in progress
   (packs_dir / '.download-dead.tar').write_bytes(b'cut off')
   os.utime(packs_dir / '.download-dead.tar', (1, 1))
   (packs_dir / '.download-live.tar').write_bytes(b'still coming')  # another download in progress
   corridor.prune(packs_dir, keep=3, in_use=made[0])
   assert corridor.packs(packs_dir) == [made[0]] + made[2:]
   assert not (packs_dir / '.staging-dead').exists() and not (packs_dir / '.download-dead.tar').exists()
-  assert (packs_dir / '.download-live.tar').exists()
+  assert (packs_dir / '.download-live.tar').exists() and (packs_dir / '.staging-live').exists()
   corridor.prune(packs_dir, keep=2)
   assert corridor.packs(packs_dir) == made[3:]
 
@@ -137,11 +141,38 @@ def test_a_cut_off_pack_is_a_retryable_bad_pack(tmp_path, compress, keep):
   assert e.retry
 
 
-def test_a_pack_that_cannot_be_written_is_a_map_error(tmp_path):
+def test_a_file_and_a_directory_at_one_path_is_a_bad_pack_not_retried(tmp_path):
+  """The server's pack is wrong the same way on every download: it waits out the refusal time, not 30 s."""
   clash = make_pack({'tiles/2/000/000/001.gph': b'a'}, extra=[member('tiles/2/000/000/001.gph/x.gph')],
                     manifest_files={'tiles/2/000/000/001.gph': hashlib.sha256(b'a').hexdigest(),
                                     'tiles/2/000/000/001.gph/x.gph': hashlib.sha256(b'x').hexdigest()})
-  rejected(tmp_path, clash, 'failed its check')
+  e = rejected(tmp_path, clash, 'is a file and a directory')
+  assert not e.retry
+
+
+@pytest.mark.parametrize('error', [errno.ENOSPC, errno.EIO])
+def test_a_pack_the_comma_cannot_save_is_a_storage_error_not_a_bad_map(tmp_path, error):
+  """A full disk is not a bad map, and downloading it again every 30 s won't help."""
+  real_open = open
+
+  def failing(path, mode='r', *args, **kwargs):
+    if 'x' in mode:
+      raise OSError(error, os.strerror(error))
+    return real_open(path, mode, *args, **kwargs)
+
+  with patch('builtins.open', failing), pytest.raises(MapError) as e:
+    unpack(tmp_path, make_pack(FILES))
+  assert (e.value.code, e.value.retry) == ('storage', False)
+  assert ('storage is full' in e.value.message) == (error == errno.ENOSPC)
+  assert not any((tmp_path / 'packs').iterdir()), "nothing is left behind"
+
+
+def test_a_corrupt_gzip_is_retried(tmp_path):
+  """gzip.BadGzipFile (a bad CRC, say) is an OSError, but it is a bad download, not the comma's disk."""
+  import gzip
+  with patch.object(corridor, 'unpack_to', side_effect=gzip.BadGzipFile('CRC check failed')):
+    e = rejected(tmp_path, make_pack(FILES), 'failed its check')
+  assert e.retry
 
 
 def test_a_pack_covers_the_places_its_level_2_tiles_do(tmp_path):

@@ -1,3 +1,4 @@
+import errno
 import gzip
 import json
 import socket
@@ -194,16 +195,39 @@ def test_a_download_that_cannot_be_saved_is_a_map_error(server, tmp_path):
   (tmp_path / 'out.tar').mkdir()  # as a full or read-only /data would fail the write
   with pytest.raises(MapError) as e:
     client_for(server, tmp_path).corridor(INDY, INDY_EAST, tmp_path / 'out.tar')
-  assert e.value.code == 'storage' and e.value.retry
+  assert e.value.code == 'storage' and not e.value.retry  # the comma's own disk: not downloaded again every 30 s
+
+
+def test_a_full_disk_says_so_and_is_not_a_retry(server, tmp_path):
+  server.corridor = (200, make_pack({'tiles/2/0.gph': b'x'}), 'application/x-tar')
+  real_open = open
+
+  def full(path, *args, **kwargs):
+    if str(path).endswith('out.tar'):
+      raise OSError(errno.ENOSPC, 'No space left on device')
+    return real_open(path, *args, **kwargs)
+
+  with patch('builtins.open', full), pytest.raises(MapError) as e:
+    client_for(server, tmp_path).corridor(INDY, INDY_EAST, tmp_path / 'out.tar')
+  assert (e.value.code, e.value.retry) == ('storage', False)
+  assert 'full' in e.value.short and 'storage is full' in e.value.message
 
 
 
 @pytest.mark.parametrize('host', ['https://1.2.3.4:abc', '1.2.3.4:99999', '1.2.3.4 8443', 'https://1.2.3.4/maps', 'https://u@1.2.3.4',
-                                  'https://1.2.3.4?x=1', 'https://1.2.3.4#x', 'https://'])
+                                  'https://1.2.3.4?x=1', 'https://1.2.3.4#x', 'https://', 'https://[zz]', 'https://[::1',
+                                  'https://h\\x', 'https://h;x', 'https://host:', 'host:', 'https://[1.2.3.4]', 'https://-h.com',
+                                  'https://h_x.com', 'https://h..com'])
 def test_bad_hosts_are_map_errors(host):
   with pytest.raises(MapError) as e:
     normalize_host(host)
   assert e.value.code == 'not_configured'
+
+
+def test_good_hosts_are_kept():
+  assert normalize_host('https://[::1]:8443') == 'https://[::1]:8443'
+  assert normalize_host('maps.example.com') == 'https://maps.example.com'
+  assert normalize_host('https://maps-1.example.com:443/') == 'https://maps-1.example.com:443'
 
 
 def test_a_key_that_is_not_printable_ascii_is_refused():

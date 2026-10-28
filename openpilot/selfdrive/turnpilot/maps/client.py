@@ -3,6 +3,8 @@
 Every failure is a MapError with a code and a message meant for the driver; nothing here retries or falls back.
 """
 import base64
+import errno
+import ipaddress
 import hashlib
 import json
 import os
@@ -39,6 +41,17 @@ def bad_host(host: str, why: str) -> MapError:
   return MapError('not_configured', f"The map server address {host!r} {why}. Fix it in the TurnPilot web app.", 'Map server address is wrong')
 
 
+def storage_error(e: OSError) -> MapError:
+  """The comma couldn't save the map: its own storage, which a new download won't fix, so it isn't a retry."""
+  if e.errno in (errno.ENOSPC, errno.EDQUOT):
+    return MapError('storage', "The comma's storage is full, so TurnPilot can't save the map for this drive. Free up space " +
+                    "on the comma (old drives), then set the destination again.", "Comma storage full: can't save the map")
+  return MapError('storage', f"TurnPilot can't save the map on the comma ({type(e).__name__}: {e}).", "Can't save the map")
+
+
+HOSTNAME = re.compile(r'^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$')
+
+
 def normalize_host(host: str) -> str:
   """https://host[:port] from the TurnPilotMapHost param. Plain http is refused: the key would travel in the clear."""
   host = (host or '').strip().rstrip('/')
@@ -50,7 +63,10 @@ def normalize_host(host: str) -> str:
     if re.match(r'^[A-Za-z][A-Za-z0-9+.-]*:(?!\d)', host):  # 'https:' or 'http:/x': a scheme, not host:port
       raise bad_host(host, "must be just https://host or https://host:port")
     host = 'https://' + host
-  parts = urlsplit(host)
+  try:
+    parts = urlsplit(host)
+  except ValueError:  # a bracketed host that isn't an IPv6 address, as https://[zz] or https://[::1
+    raise bad_host(host, "is not a valid address") from None
   if parts.scheme != 'https':
     raise bad_host(host, "must start with https://")
   if not parts.hostname or parts.username is not None or parts.path or parts.query or parts.fragment or '#' in host or '?' in host:
@@ -59,8 +75,16 @@ def normalize_host(host: str) -> str:
     parts.port  # noqa: B018  # raises for a port that isn't a number from 0 to 65535
   except ValueError:
     raise bad_host(host, "has a port that isn't a number from 1 to 65535") from None
-  if parts.port == 0:
+  if parts.port == 0 or parts.netloc.endswith(':'):
     raise bad_host(host, "has a port that isn't a number from 1 to 65535")
+  name = parts.hostname
+  if parts.netloc.startswith('['):
+    try:
+      ipaddress.IPv6Address(name)
+    except ValueError:
+      raise bad_host(host, "is not a valid address") from None
+  elif not HOSTNAME.match(name):
+    raise bad_host(host, "is not a valid host name: letters, digits, dots and dashes only")
   return f"https://{parts.netloc}"
 
 
@@ -214,9 +238,8 @@ class MapClient:
             if not gunzip.eof:
               raise broke_off(f"the gzip stream ended early, after {received} bytes")
             f.write(gunzip.flush())
-      except OSError as e:
-        raise MapError('storage', f"TurnPilot can't save the map download on the comma ({type(e).__name__}: {e}).",
-                       "Can't save the map", retry=True) from None
+      except OSError as e:  # writing the download on the comma: a full disk is still full in 30 s
+        raise storage_error(e) from None
       if total is not None and received != total:
         raise broke_off(f"{received} of {total} bytes")
     return size

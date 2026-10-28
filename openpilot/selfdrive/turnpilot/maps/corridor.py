@@ -4,6 +4,7 @@ The pack is a tar of manifest.json and a Valhalla tile hierarchy under tiles/. E
 is written: regular files and directories only, relative paths with no '..', nothing outside manifest.json and tiles/,
 and exactly the files the manifest lists, each with its SHA-256. Any problem rejects the whole pack.
 """
+import gzip
 import hashlib
 import json
 import shutil
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path, PurePosixPath
 
-from openpilot.selfdrive.turnpilot.maps.client import MapError
+from openpilot.selfdrive.turnpilot.maps.client import MapError, storage_error
 
 MANIFEST = 'manifest.json'
 TILES = 'tiles'
@@ -109,9 +110,12 @@ def unpack(tar_path: Path, packs_dir: Path) -> Pack:
   except MapError:
     shutil.rmtree(staging, ignore_errors=True)
     raise
-  except (tarfile.TarError, EOFError, zlib.error, OSError) as e:  # cut off, unreadable, or the disk: never a raw error
+  except (tarfile.TarError, EOFError, zlib.error, gzip.BadGzipFile) as e:  # cut off or corrupt: a new download could help
     shutil.rmtree(staging, ignore_errors=True)
     raise bad_pack(f"cut off or unreadable: {type(e).__name__}: {e}", retry=True) from None
+  except OSError as e:  # the comma's own storage (a full disk): not a bad map, and a new download won't fix it
+    shutil.rmtree(staging, ignore_errors=True)
+    raise storage_error(e) from None
   except BaseException:
     shutil.rmtree(staging, ignore_errors=True)
     raise
@@ -151,6 +155,13 @@ def unpack_to(tar_path: Path, packs_dir: Path, staging: Path) -> Pack:
       raise bad_pack(f"missing {missing[0]}" + (f" and {len(missing) - 1} more" if len(missing) > 1 else ''))
     if extra := sorted(set(files) - listed):
       raise bad_pack(f"unlisted file {extra[0]}" + (f" and {len(extra) - 1} more" if len(extra) > 1 else ''))
+    # a file where another member needs a directory ('tiles/2/x' and 'tiles/2/x/y.gph') can't be unpacked, on any try
+    for path in members:
+      parts = path.split('/')
+      for i in range(1, len(parts)):
+        parent = '/'.join(parts[:i])
+        if parent in files or parent == MANIFEST:
+          raise bad_pack(f"{parent!r} is a file and a directory")
 
     staging.mkdir()
     for path, member in files.items():
@@ -180,11 +191,14 @@ def packs(packs_dir: Path) -> list[Path]:
 
 
 def prune(packs_dir: Path, keep: int = KEEP_PACKS, in_use: Path | None = None):
-  """Delete all but the newest keep packs, never the one in use, and any leftover staging directories or downloads."""
+  """Delete all but the newest keep packs, never the one in use, and staging directories and downloads left by a crash.
+  A recent one may be another route job's, still in progress (navd doesn't wait for a cancelled job), so it stays."""
+  stale_before = time.time() - STALE_DOWNLOAD_S  # noqa: TID251  # file times are wall clock
   for stale in packs_dir.glob('.staging-*') if packs_dir.is_dir() else []:
-    shutil.rmtree(stale, ignore_errors=True)
+    if stale.stat().st_mtime < stale_before:
+      shutil.rmtree(stale, ignore_errors=True)
   for stale in packs_dir.glob('.download-*.tar') if packs_dir.is_dir() else []:
-    if stale.stat().st_mtime < time.time() - STALE_DOWNLOAD_S:  # noqa: TID251  # file times are wall clock
+    if stale.stat().st_mtime < stale_before:
       stale.unlink(missing_ok=True)
   for old in packs(packs_dir)[:-keep] if keep > 0 else packs(packs_dir):
     if in_use is None or old.resolve() != in_use.resolve():
