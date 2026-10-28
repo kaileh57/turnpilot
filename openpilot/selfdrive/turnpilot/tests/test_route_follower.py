@@ -128,7 +128,8 @@ def test_committed_turn_is_held_through_a_gap_in_the_route():
   for _ in range(19):
     rf.update(None, False, True, 6., DT_MDL, committed=True)
   rf.update(nav_instruction(8., route_count=1), True, True, 6., DT_MDL, committed=True)
-  # ...still dead-reckoned while the turn is committed: navd's distance to the same junction is never taken up then
+  # ...still dead-reckoned while the turn is committed: navd's reading of the same junction supports its track, but
+  # doesn't move it
   assert rf.maneuver_id == first and not rf.replaced and not rf.passed and abs(rf.distance - 7.7) < 1e-4
   # not committed, the maneuver is dropped as before
   rf = RouteFollower()
@@ -248,6 +249,53 @@ def test_an_outlier_that_committed_the_turn_is_corrected_back_to_the_track_befor
     rf.update(nav_instruction(jumped, junction=LEFT_90, route_count=1), True, True, 6., DT_MDL, committed=True)
     assert abs(rf.distance - track) < 1e-3
     second_on(rf, True)
+
+
+def test_a_committed_turns_junction_is_on_the_track_most_of_its_readings_agree_on():
+  def second_on(rf, committed):  # navd's next update a second (6 m) on
+    for _ in range(19):
+      rf.update(None, False, True, 6., DT_MDL, committed=committed)
+  def approach(rf, readings, committed_from):
+    for i, (truth, off) in enumerate(readings):
+      rf.update(nav_instruction(truth + off, junction=LEFT_90, route_count=1), True, True, 6., DT_MDL,
+                committed=i > committed_from)
+      second_on(rf, i >= committed_from)
+  # the reading before the outlier 5 m off too, the outlier lasting two fixes and decaying: the readings before and after
+  # it outvote it, the junction back where it is from navd's next true reading
+  for offs in ((-5., -20., 0.), (12., -20., 0.), (-20., -20., 0.), (-20., -15., 0.), (-10., -20., -30., 0.)):
+    rf = RouteFollower()
+    truths = [100. - 6. * i for i in range(8)]
+    readings = [(t, 0.) for t in truths[:4]] + list(zip(truths[4:], offs, strict=False))
+    approach(rf, readings, 4 + offs.index(-20.))
+    assert not rf.passed and abs(rf.distance - (truths[3 + len(offs)] - 5.7)) < 0.5, (offs, rf.distance)
+  # an offset that lasts from after the commit, the readings before it many: never outvotes them, the junction
+  # dead-reckoned on to its pass
+  rf = RouteFollower()
+  approach(rf, [(100. - 6. * i, 0.) for i in range(6)], 5)
+  first, passed_at, truth = rf.maneuver_id, None, 70. - 5.7
+  for i in range(int(14. / DT_MDL)):
+    truth -= 0.3
+    instr = nav_instruction(truth - 20., junction=LEFT_90, route_count=1) if i % 20 == 19 else None
+    rf.update(instr, instr is not None, True, 6., DT_MDL, committed=passed_at is None)
+    if passed_at is None and rf.passed:
+      passed_at = truth
+    if passed_at is None:
+      assert rf.maneuver_id == first and abs(rf.distance - truth) < 1e-3
+  assert passed_at is not None and passed_at < -14.
+  # one reading each way (a step navd has just moved on to, its first reading the outlier): the junction stays on the
+  # track it is on, and isn't passed until the other track is too, never on the one reading
+  rf = RouteFollower()
+  rf.update(nav_instruction(40., junction=LEFT_90, route_count=1), True, True, 6., DT_MDL, committed=True)
+  second_on(rf, True)
+  rf.update(nav_instruction(54., junction=LEFT_90, route_count=1), True, True, 6., DT_MDL, committed=True)
+  assert abs(rf.distance - 34.) < 1e-3
+  passed_at, truth = None, 54.
+  for _ in range(int(14. / DT_MDL)):
+    truth -= 0.3
+    rf.update(None, False, True, 6., DT_MDL, committed=passed_at is None)
+    if passed_at is None and rf.passed:
+      passed_at = truth
+  assert passed_at is not None and passed_at < -14.
 
 
 def test_reroute_onto_the_same_committed_turn_from_further_off():

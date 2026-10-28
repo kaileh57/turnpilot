@@ -1141,6 +1141,141 @@ def test_gps_outlier_that_brings_the_turns_first_pulse_out_doesnt_hold_its_junct
       assert stops and HOLD_LINE_M < min(stops) and max(stops) < HOLD_LINE_M + 2., (case, stops[0], stops[-1])
 
 
+def assert_junction_kept(sim, J, side, case, from_s, ids=None):
+  """From from_s to the junction at J: the turn's cap and desire kept (no CLEAR), the car held to its cap through it
+  (4.3 m/s here), the follower's junction where it is in the last 30 m, and on an unprotected left the car stopped at
+  its hold line, not short of it."""
+  before = [(s, v, p) for s, v, p in sim.trace if from_s <= s < J + 8.]
+  assert before and all(p.speedCap < NO_SPEED_CAP and p.desire != CLEAR_DESIRE for _, _, p in before), case
+  assert max(v for s, v, _ in sim.trace if J - 15. < s < J + 8.) < 5., case
+  if ids is not None:
+    assert ids and max(ids) < 1., (case, max(ids))
+  if side == 'left':
+    stops = [J - s for s, v, _ in sim.trace if v < 0.3 and J - 40. < s < J]
+    assert stops and HOLD_LINE_M < min(stops) and max(stops) < HOLD_LINE_M + 2., (case, stops[0], stops[-1])
+
+
+def test_gps_outliers_around_the_turns_first_pulse_never_hold_its_junction_short():
+  # navd's readings from near m out carry offs (one a second), then are true again. The reading that brings the turn's
+  # first pulse out is an outlier, and so may the ones either side of it be (noise of 5 m or more before it, the outlier
+  # lasting two fixes or decaying), or it is the first reading of a reroute (route_count 1 from it on). However many
+  # readings it is off for, the readings before and after it outvote it: the junction is never held where it put it,
+  # the turn read as passed, its cap lifted, short of the junction
+  J = 400.
+  for side, cruise, near, offs, route_count in (
+      ('right', 13., 72., (-5., -20.), 0), ('right', 13., 72., (12., -20.), 0), ('right', 9., 65., (12., -20.), 0),
+      ('left', 13., 72., (12., -20.), 0), ('left', 13., 72., (-8., -20.), 0), ('right', 13., 72., (-10., -20., -30.), 0),
+      ('right', 13., 72., (-20., -20.), 0), ('right', 6., 55., (-12., -15.), 0), ('right', 13., 60., (-20., -17., -12., -6.), 0),
+      ('left', 13., 60., (-20., -15.), 0),
+      ('right', 13., 60., (-20.,), 1), ('right', 13., 70., (-25.,), 1), ('right', 13., 50., (-12.,), 1), ('left', 13., 60., (-20.,), 1)):
+    nxt = 'left' if side == 'right' else 'right'
+    mans = [(J, "turn", side, junction_of(side)), (J + 1200., "turn", nxt, junction_of(nxt, 2))]
+    sim = Sim(mans, cruise=cruise)
+    def outliers(sim, instr, side=side, offs=offs, near=near, mans=mans, route_count=route_count, k=[0]):  # noqa: B006
+      if sim.s < J - near or sim.s > J + 5.:
+        return instr, True
+      off = offs[k[0]] if k[0] < len(offs) else 0.
+      k[0] += 1
+      return nav_instruction(J - sim.s + off, "turn", side, remaining=J + 1300. - sim.s + off, junction=junction_of(side),
+                             route_count=route_count, ahead=[(mans[1][0] - sim.s + off,) + tuple(mans[1][1:])]), True
+    sim.nav_filter = outliers
+    committed_at, errors = None, []
+    while sim.s < J + 30.:
+      sim.step(yaw_rate=(0.5 if side == 'left' else -0.5) if J - 2. < sim.s < J + 12. else 0.)
+      if committed_at is None and sim.tp.turn_committed:
+        committed_at = sim.s
+      if J - 30. < sim.s < J:
+        errors.append(abs(sim.distance() - (J - sim.s)))
+    case = (side, cruise, near, offs, route_count)
+    assert committed_at is not None and committed_at >= J - near - 1., case  # an outlier is what brought the pulse out
+    assert_junction_kept(sim, J, side, case, committed_at, errors)
+
+
+def test_gps_outlier_that_commits_the_turn_and_a_fault_after_it_dont_pass_the_turn_short():
+  # navd's reading 60 m out is 20 m short and brings the turn's first pulse out; turnpilotd faults from 56 m for
+  # frames frames, dead-reckoning the committed turn. It is on the track navd's readings agree on, not on the outlier's:
+  # not read as passed short of the junction once the fault is over, its cap kept to it
+  J = 400.
+  for frames in (60, 100, 120, 160):
+    mans = [(J, "turn", "right", junction_of("right")), (J + 1200., "turn", "left", junction_of("left", 2))]
+    sim = Sim(mans)
+    def outlier(sim, instr, mans=mans, done=[]):  # noqa: B006
+      if sim.s < J - 60. or done:
+        return instr, True
+      done.append(sim.s)
+      return nav_instruction(J - sim.s - 20., "turn", "right", remaining=J + 1300. - sim.s - 20., junction=junction_of("right"),
+                             ahead=[(mans[1][0] - sim.s - 20.,) + tuple(mans[1][1:])]), True
+    sim.nav_filter = outlier
+    update, faulted = sim.tp.follower.update, [0]
+    def failing(*args, sim=sim, frames=frames, update=update, faulted=faulted, **kwargs):
+      if sim.s >= J - 56. and faulted[0] < frames:
+        faulted[0] += 1
+        raise RuntimeError("test fault")
+      return update(*args, **kwargs)
+    sim.tp.follower.update = failing
+    committed_at = None
+    while sim.s < J + 30.:
+      sim.step(yaw_rate=-0.5 if J - 2. < sim.s < J + 12. else 0.)
+      if committed_at is None and sim.tp.turn_committed:
+        committed_at = sim.s
+    assert committed_at is not None and committed_at >= J - 61., frames
+    assert faulted[0] == frames
+    caps = [p.speedCap for s, _, p in sim.trace if J - 1. < s < J]
+    assert caps and max(caps) < NO_SPEED_CAP, frames  # the cap kept to the junction
+    assert all(p.desire != CLEAR_DESIRE for s, _, p in sim.trace if committed_at <= s < J), frames
+    assert max(v for s, v, _ in sim.trace if J - 15. < s < J) < 9., frames  # never sped up past the cruise it slowed from
+
+
+def test_gps_outlier_on_the_first_reading_of_the_next_turns_step_doesnt_hold_its_junction_short():
+  # a right, and a second turn gap m on. navd's first reading on the second turn's step, which brings its first pulse
+  # out, is off m short; every reading after it is true. The second turn's junction isn't held there: two readings
+  # agree on the true one, and on a tie the junction stays where it was, never passed on the outlier's one reading
+  for off, gap, second in ((-20., 60., 'right'), (-20., 70., 'right'), (-25., 80., 'right'), (-20., 60., 'left'),
+                           (-15., 65., 'left')):
+    J1, J2 = 300., 300. + gap
+    j2 = (90., 180., 2, 'present') if second == 'right' else (90., 0., 2, 'present')
+    mans = [(J1, "turn", "right", junction_of("right")), (J2, "turn", second, j2), (J2 + 1200., "turn", "right", junction_of("right", 3))]
+    sim = Sim(mans)
+    def outlier(sim, instr, off=off, J2=J2, second=second, j2=j2, mans=mans, done=[]):  # noqa: B006
+      if sim.navd.step != 1 or done:
+        return instr, True
+      done.append(sim.s)
+      return nav_instruction(J2 - sim.s + off, "turn", second, remaining=2000. - sim.s + off, junction=j2,
+                             ahead=[(mans[2][0] - sim.s + off, "turn", "right", junction_of("right", 3))]), True
+    sim.nav_filter = outlier
+    errors, y2 = [], (0.5 if second == 'left' else -0.5)
+    while sim.s < J2 + 30.:
+      sim.step(yaw_rate=-0.5 if J1 - 2. < sim.s < J1 + 12. else (y2 if J2 - 2. < sim.s < J2 + 12. else 0.))
+      if J2 - 30. < sim.s < J2:
+        errors.append(abs(sim.distance() - (J2 - sim.s)))
+    assert_junction_kept(sim, J2, second, (off, gap, second), J2 - 30., errors)
+
+
+def test_gps_outlier_on_the_last_reading_of_a_straight_on_step_doesnt_hold_the_turn_after_it_short():
+  # a straight-on step ends 70 m before a right. navd's last reading on it, 75 m before the right, is 20 m short, and
+  # the follower moves on to the right from it. The right is on the track navd's readings of it agree on, those before
+  # the outlier (allManeuvers) and after it, not held 20 m short to its pass
+  J, gap = 400., 70.
+  mans = [(J - gap, "new name", "straight", (0., 0., 2)), (J, "turn", "right", junction_of("right")),
+          (J + 1200., "turn", "left", junction_of("left", 2))]
+  sim = Sim(mans)
+  def outlier(sim, instr, done=[]):  # noqa: B006
+    if J - sim.s > 75. or done:
+      return instr, True
+    done.append(sim.s)
+    assert sim.navd.step == 0
+    return nav_instruction(J - gap - sim.s - 20., "new name", "straight", remaining=1800. - sim.s - 20., junction=(0., 0., 2),
+                           ahead=[(J - sim.s - 20., "turn", "right", junction_of("right")),
+                                  (mans[2][0] - sim.s - 20., "turn", "left", junction_of("left", 2))]), True
+  sim.nav_filter = outlier
+  errors = []
+  while sim.s < J + 30.:
+    sim.step(yaw_rate=-0.5 if J - 2. < sim.s < J + 12. else 0.)
+    if J - 30. < sim.s < J:
+      errors.append(abs(sim.distance() - (J - sim.s)))
+  assert_junction_kept(sim, J, 'right', 'none step', J - 30., errors)
+
+
 def test_navd_moving_on_early_to_a_turn_the_same_way_without_junction_data_keeps_the_committed_turn():
   # a route without junction data: a right, and another right gap m on. navd moves on to the second at m before the
   # first: with no bearings the two read as the same junction, but the committed right's junction stays where it was

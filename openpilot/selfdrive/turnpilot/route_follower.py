@@ -31,14 +31,18 @@ committed, and a car slowing for a turn must not speed up into it). The junction
   sharp turn's, up to 10 m before its end, or a GPS jump forward) doesn't mean the car has made the turn. It is over
   only on real evidence: the car has turned it (DesireTiming clears it at its angle) or is dead-reckoned PASSED_DIST_M
   past it. Until then its id and its cap stay and no CLEAR goes; navd's next update after that takes up the next step;
-- a jump in the distance to the same junction, up or down, is GPS noise: the dead-reckoned distance stands. While the
-  turn is committed navd's distance is never taken up for it: without bearings, navd moving on early to the next turn
-  the same way reads as the same junction too. The one exception is the reading taken up last before the commit, which
-  may itself be the outlier that brought the turn's first pulse forward: a reading that comes back, within TRACK_AGREE_M,
-  to the track the junction was dead-reckoned on before that one (and not to that one's) shows it was, and the junction
-  goes back to that track. Until a reading agrees with one of the two, either may still be: a second reading off both
-  doesn't settle it. Otherwise the outlier would be held to the end of the turn, and the turn read as passed, its
-  cap lifted, short of the junction;
+- a jump in the distance to the same junction, up or down, is GPS noise: navd's distance is not taken up for it. While
+  the turn is committed its junction is on the track most of navd's readings of it agree on (JunctionTracks): each
+  reading, from before the commit too, is dead-reckoned on, and one within TRACK_AGREE_M of a track supports it (and
+  moves it, but not once the turn is held: a bias of a few m that lasts would walk it along). The reading that brought
+  the turn's first pulse out may itself be an outlier, as may the first reading of a reroute or of a step navd has
+  just moved on to, the readings either side of it off too, or it lasting two fixes: those readings never outvote the
+  ones before and after them, and the junction goes back to where they put it. On a tie it stays on the track it was
+  on, never moved by one reading, and on a track only one reading supports the turn counts as passed only once every
+  other track is too. Once its track has LOCK_READINGS readings the junction stays on it to the end of the turn: an
+  offset that lasts from then on (a GPS jump, navd moving on early to the next turn the same way on a route without
+  bearings) never outvotes it. A reroute's readings, off by its snap, have no vote. Otherwise an outlier would be held
+  to the end of the turn, and the turn read as passed, its cap lifted, short of the junction;
 - a new route (a new routeCount) whose first maneuver is the same junction (same_junction) within SAME_TURN_M of the
   dead-reckoned one is the same maneuver (a reroute onto the road the car is on, its origin snapped up to a reroute's
   25 m off), still where it was dead-reckoned. A new route that doesn't turn there (a reroute whose origin snapped past
@@ -88,9 +92,11 @@ SAME_TURN_M = 40.          # a committed turn is the first maneuver of a new rou
                            # (navd reroutes 25 m off the route; the next junction the same way is a block on)
 SAME_BEARING_DEG = 15.     # the same junction's bearings, from two routes or two fixes, are this close
 ARRIVE_DIST_M = 15.
-TRACK_AGREE_M = 5.         # a committed turn's reading back on the track before the last one taken up, this close to it
-                           # and that much off the last one's, shows the last was an outlier (a GPS fix's noise is a few m,
-                           # dead reckoning's over navd's 1 s much less; the smallest outlier that lifts the cap early is 8 m)
+TRACK_AGREE_M = 5.         # a reading of a junction this close to a track supports it (a GPS fix's noise is a few m, dead
+                           # reckoning's over navd's 1 s much less; the smallest outlier that lifts the cap early is 8 m)
+TRACK_READINGS = 5         # a track is where the median of its last this many readings puts the junction, dead-reckoned
+MAX_TRACKS = 6
+LOCK_READINGS = 3          # a committed turn's track this many readings support is its junction's to the end of the turn
 
 
 @dataclass(frozen=True)
@@ -183,6 +189,55 @@ def same_junction(a: Maneuver, b: Maneuver) -> bool:
   return (a.type, a.modifier) == (b.type, b.modifier) and (same_bearings(a, b) or not (a.geometry and b.geometry))
 
 
+class JunctionTracks:
+  """navd's readings of the distance to one junction, dead-reckoned, grouped by the track they agree on: a reading
+  within TRACK_AGREE_M of a track's distance supports it, any other starts one (module docstring)."""
+  def __init__(self, distance: float | None = None):
+    self._tracks: list[list] = []  # [support, readings (dead-reckoned, the last TRACK_READINGS)]
+    self._locked: list | None = None
+    if distance is not None:
+      self.take(distance)
+
+  def __bool__(self) -> bool:
+    return bool(self._tracks)
+
+  @staticmethod
+  def _distance(track) -> float:
+    """The median of the track's readings, of an even number the further middle one: never brought nearer by one."""
+    return sorted(track[1])[len(track[1]) // 2]
+
+  def travel(self, travelled: float):
+    for track in self._tracks:
+      track[1] = [d - travelled for d in track[1]]
+
+  def take(self, distance: float, refine: bool = True):
+    """refine: a reading that supports a track also moves it (not while the maneuver is held: a bias of a few m
+    that lasts, the car standing at a hold line, would walk it along)."""
+    near = [t for t in self._tracks if abs(self._distance(t) - distance) <= TRACK_AGREE_M]
+    if near:
+      track = min(near, key=lambda t: abs(self._distance(t) - distance))
+      track[0] += 1
+      if refine:
+        track[1] = (track[1] + [distance])[-TRACK_READINGS:]
+      return
+    self._tracks.append([1, [distance]])
+    if len(self._tracks) > MAX_TRACKS:  # the least supported, the oldest of those
+      self._tracks.remove(min((t for t in self._tracks if t is not self._locked), key=lambda t: t[0]))
+
+  def furthest(self) -> float:
+    return max(self._distance(t) for t in self._tracks)
+
+  def best(self, current: float, lock: bool = False) -> tuple[float, int]:
+    """(distance, support) of the track the most readings support; on a tie the one the junction is on (current):
+    one reading never moves it, nearer or further. lock: once that track has LOCK_READINGS, it is the junction's from
+    then on, whatever readings come after (an offset that lasts, a reroute's snap)."""
+    track = self._locked if self._locked in self._tracks else \
+      max(self._tracks, key=lambda t: (t[0], -abs(self._distance(t) - current)))
+    if lock and track[0] >= LOCK_READINGS:
+      self._locked = track
+    return self._distance(track), track[0]
+
+
 class RouteFollower:
   def __init__(self, maneuver_id: int = 0):
     """maneuver_id: where the ids start. A follower that replaces another one (turnpilotd after a fault) starts past the
@@ -205,8 +260,11 @@ class RouteFollower:
     self._passed_id = -1
     self._stale_t = 0.
     self._moved_on_from: tuple[str, str] | None = None  # (type, modifier) of the NONE step left for the turn after it
-    self._held_id = -1  # a committed maneuver navd's distance was off for (a reroute, GPS noise): dead-reckoned to its end
-    self._prior_distance = float('inf')  # m to the maneuver on the track before navd's last distance taken up, dead-reckoned
+    self._held_id = -1  # a committed maneuver: on the track its readings agree on to its end, not on navd's distance
+    self._tracks = JunctionTracks()        # navd's readings of the maneuver's junction
+    self._ahead_tracks = JunctionTracks()  # ...and of the turn or keep ahead's, past a NONE maneuver
+    self._support = 0  # readings supporting the track a held maneuver is on
+    self._held_route = -1  # the routeCount it was committed on: a reroute's readings, off by its snap, don't vote
 
   @property
   def upcoming(self) -> Maneuver | None:
@@ -241,7 +299,20 @@ class RouteFollower:
         self.maneuver_id += 1
         return
       self._travel(max(v_ego, 0.) * dt)
+    if committed and self.valid and self.maneuver is not None:
+      self._hold()
+      self._on_track()
     self._check_passed()
+
+  def _hold(self):
+    """The committed maneuver is held from here on, on the route it was committed on."""
+    if self._held_id != self.maneuver_id:
+      self._held_id, self._held_route = self.maneuver_id, self.route_count
+
+  def _on_track(self):
+    """A held maneuver's junction: on the track navd's readings of it agree on most (module docstring)."""
+    if self._held_id == self.maneuver_id and self._tracks:
+      self.distance, self._support = self._tracks.best(self.distance, lock=True)
 
   def dead_reckon(self, v_ego: float, dt: float):
     """A frame turnpilotd faulted on with a turn committed (turnpilotd.py): the distances run down with the car, as between
@@ -253,7 +324,8 @@ class RouteFollower:
 
   def _travel(self, travelled: float):
     self.distance -= travelled
-    self._prior_distance -= travelled
+    self._tracks.travel(travelled)
+    self._ahead_tracks.travel(travelled)
     self.distance_remaining -= travelled
     self.through_distance -= travelled
     self.ahead_distance -= travelled
@@ -262,7 +334,12 @@ class RouteFollower:
     if self.valid and self.maneuver is not None and self.maneuver.kind == NONE and self.ahead is not None and \
        self.distance < -NAVD_ADVANCE_M:
       self._move_on()
-    if self.valid and self.distance < -PASSED_DIST_M and self._passed_id != self.maneuver_id:
+    # a held turn on a track one reading supports (that reading may be an outlier) is passed only once every track its
+    # readings left open is: never on one reading
+    distance = self.distance
+    if self._held_id == self.maneuver_id and self._support < 2 and self._tracks:
+      distance = max(distance, self._tracks.furthest())
+    if self.valid and distance < -PASSED_DIST_M and self._passed_id != self.maneuver_id:
       self._passed_id = self.maneuver_id
       self.passed = True
 
@@ -283,8 +360,8 @@ class RouteFollower:
     """Past a NONE step where navd moves on from it: the turn or keep after it is the maneuver now (module docstring)."""
     self._moved_on_from = (self.maneuver.type, self.maneuver.modifier)
     self.maneuver, self.distance = self.ahead, self.ahead_distance
-    self._prior_distance = self.distance
-    self.ahead, self.ahead_distance = None, float('inf')
+    self._tracks = self._ahead_tracks if self._ahead_tracks else JunctionTracks(self.distance)
+    self.ahead, self.ahead_distance, self._ahead_tracks = None, float('inf'), JunctionTracks()
     self.maneuver_id += 1
 
   @staticmethod
@@ -300,15 +377,21 @@ class RouteFollower:
     distance = float(instruction.maneuverDistance)
     maneuver = maneuver_from_instruction(instruction)
     prev = self.maneuver
-    self._prior_distance -= travelled
+    self._tracks.travel(travelled)
+    self._ahead_tracks.travel(travelled)
     route_count, new_route = int(instruction.routeCount), self.valid and int(instruction.routeCount) != self.route_count
     if self._moved_on_from is not None:
       if not new_route and maneuver.kind == NONE and (maneuver.type, maneuver.modifier) == self._moved_on_from:
         # navd still on the step the car is past: the turn after it, by navd's distance to it when it's that one
         following, following_distance = self._following(instruction)
         same = following is not None and prev is not None and (following.type, following.modifier) == (prev.type, prev.modifier)
-        self._prior_distance = self.distance - travelled
-        self.distance = following_distance if same else self.distance - travelled
+        self.distance -= travelled
+        if same:
+          self._tracks.take(following_distance, refine=self._held_id != self.maneuver_id)
+          if self._held_id == self.maneuver_id:
+            self._on_track()
+          else:
+            self.distance = following_distance
         self.distance_remaining = float(instruction.distanceRemaining)
         return
       self._moved_on_from = None
@@ -323,22 +406,22 @@ class RouteFollower:
         self.distance -= travelled
         return
       # the same junction, by the route: a reroute onto the road the car is on, GPS noise either way, navd moving on to
-      # the next turn the same way on a route without bearings. Its distance is dead-reckoned from here (module docstring)
-      self._held_id = self.maneuver_id
-    if here and self._held_id == self.maneuver_id and (committed or (not new_route and same_bearings(maneuver, prev))):
-      # the junction is where it was: while the turn is committed, and after it to its pass while navd is still on its
-      # step (by its bearings: without them the next step may be another turn the same way)
-      track, prior = self.distance - travelled, self._prior_distance
-      if committed and abs(distance - prior) <= TRACK_AGREE_M < abs(track - prior):
-        # back on the track before the last reading taken up: that one was the outlier (module docstring)
-        track = prior
-      if track == prior or abs(distance - track) <= TRACK_AGREE_M:
-        self._prior_distance = track  # two readings agree on it: no other track to come back to
-      advanced, jumped, distance = False, False, track
-    elif same and not (new_route or advanced or jumped):
-      self._prior_distance = self.distance - travelled
+      # the next turn the same way on a route without bearings. On the track its readings agree on (module docstring)
+      self._hold()
+    held = here and self._held_id == self.maneuver_id and (committed or (not new_route and same_bearings(maneuver, prev)))
+    # the same junction's readings: a held one's, and a new route's too when its bearings say it is that junction and
+    # it is close to where it was
+    junction = held or (here and not (advanced or jumped) and
+                        (not new_route or (same_bearings(maneuver, prev) and abs(distance - self.distance) <= SAME_TURN_M)))
+    if junction:
+      if not held or route_count == self._held_route:  # a reroute's readings, off by its snap, have no vote
+        self._tracks.take(distance, refine=not held)
     else:
-      self._prior_distance = distance
+      self._tracks = JunctionTracks(distance)
+    if held:
+      # the junction is where its readings put it: while the turn is committed, and after it to its pass while navd is
+      # still on its step (by its bearings: without them the next step may be another turn the same way)
+      advanced, jumped = False, False
     self.route_count = route_count
     new = not same or advanced or jumped or (new_route and not committed)
     if new:
@@ -349,10 +432,17 @@ class RouteFollower:
       self.maneuver_id += 1
     self.valid = True
     self.maneuver = maneuver
-    self.distance = distance
+    self.distance = self.distance - travelled if held else distance
     self.distance_remaining = float(instruction.distanceRemaining)
     self.through_lanes = lanes_from_list(instruction.throughLanes)
     self.through_distance = float(instruction.throughLanesDistance) if self.through_lanes else float('inf')
+    if held:
+      self._on_track()
+    prev_ahead = self.ahead
     self.ahead, self.ahead_distance = None, float('inf')
     if maneuver.kind == NONE:  # a bend or a road going on: the turn after it may be close
       self.ahead, self.ahead_distance = self._following(instruction)
+    if self.ahead is not None and prev_ahead is not None and not new and same_junction(self.ahead, prev_ahead):
+      self._ahead_tracks.take(self.ahead_distance)
+    else:
+      self._ahead_tracks = JunctionTracks(self.ahead_distance) if self.ahead is not None else JunctionTracks()
