@@ -231,7 +231,7 @@ def check(name: str, res: dict) -> list[str]:
       fails.append("never held to a stop for the pedestrian in the crosswalk")
     elif not any(x['resumed'] for x in h if x['stopped']):
       fails.append("did not move on after the crosswalk cleared")
-  elif name == 'unprotected_left':
+  elif name.startswith('unprotected_left'):  # and its variants at other approaches
     h = _hold_with(hs, 'oncoming')
     if not h:
       fails.append("never waited for oncoming traffic")
@@ -255,7 +255,7 @@ def check(name: str, res: dict) -> list[str]:
   elif name == 'lane_change':
     if not res['lane_changes']:
       fails.append("never changed lanes")
-  if name in ('ped_crosswalk_right', 'unprotected_left', 'lane_change', 'route_demo'):
+  if name in ('ped_crosswalk_right', 'lane_change', 'route_demo') or name.startswith('unprotected_left'):
     if res['outcome'] != 'arrived':
       fails.append(f"ended {res['outcome']}, not arrived")
     if attempted == 0 or taken < attempted:
