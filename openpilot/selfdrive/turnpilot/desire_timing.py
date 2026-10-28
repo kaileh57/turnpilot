@@ -11,8 +11,9 @@ approach took longer than that, it planned the turn and then dropped it 10 m out
 the turn back at once. So a turn desire is pulsed again every REPULSE_S on the approach, and once more ENTRY_M
 before the junction, so the last pulse is fresh for the whole turn: at 4 m/s a turn outlasts one pulse, and the
 model let go of it halfway round. None once the car has turned TURN_STARTED_DEG (by its yaw rate): pulses during
-the turn turned the car on past the exit road, into the curb. A repeat pulse is a short drop to none, long enough
-that modeld (unsynchronized, conflated subscriber) can't miss it.
+the turn turned the car on past the exit road, into the curb. That holds for every pulse: a repeat, one on engaging, and
+one as the car pulls away after a standstill (STANDSTILL_REARM_S), as when it stops halfway round for a pedestrian.
+A repeat pulse is a short drop to none, long enough that modeld (unsynchronized, conflated subscriber) can't miss it.
 The model keeps the rising edges of the last 132 frames (6.6 s at 20 Hz, the big model's state_desire_q), and
 forgets a pulse when it leaves that queue. A pulse still in the queue once the car is round the corner turns it
 on: at a 55 degree "left" the car turned 122-126 degrees into the curb, the last pulse 6.6 s from leaving.
@@ -162,7 +163,7 @@ class DesireTiming:
     turn = maneuver.kind == TURN
     if not lat_active:
       self.active, self._held, self._gap = False, True, 0
-    if turn and (self.active or self._held):
+    if turn and (self.active or self._held or self.started):  # a stop after a re-arm is still in the turn
       self.turned_deg += math.degrees(yaw_rate * dt) * maneuver.side
       if self.turned_deg >= max(maneuver.angle_deg - CLEAR_MARGIN_DEG, CLEAR_MIN_FRACTION * maneuver.angle_deg):
         if self.side:
@@ -197,8 +198,8 @@ class DesireTiming:
       return Desire.none
 
     if not self.active:
-      if turn and (not may_start or (self._held and self.turned_deg >= TURN_STARTED_DEG)):
-        return Desire.none  # a pulse in the turn turns the car on past the exit road
+      if turn and (not may_start or self.turned_deg >= TURN_STARTED_DEG):
+        return Desire.none  # a pulse in the turn (re-engaging, pulling away) turns the car on past the exit road
       self.active = self.started = True
       self._held = False
       self.pulses += 1

@@ -328,3 +328,24 @@ def test_abandoned_turn_sends_nothing_more_but_is_still_cleared():
   dt_ = DesireTiming()
   dt_.abandon()
   assert set(step_through(dt_, [(5., 1, None, 30., 4., yaw, False)])) == {Desire.none}
+
+
+def test_no_pulse_after_a_standstill_in_the_turn():
+  # stopped 40 degrees into a left for longer than STANDSTILL_REARM_S (a queue, a pedestrian on the exit crosswalk): the
+  # car pulls away with no new pulse (one now turns it on past the exit road), and the turn is still cleared at 80 degrees
+  yaw = 0.5  # rad/s, 29 deg/s
+  dt_ = DesireTiming()
+  out = step_through(dt_, [(9., 1, LEFT_TURN, 45., 5., 0., False),            # the approach: pulses
+                           (40. / 28.65, 1, LEFT_TURN, 0., 4., yaw, False),    # 40 degrees round the corner
+                           (STANDSTILL_REARM_S + 1., 1, LEFT_TURN, -2., 0., 0., False),  # stopped
+                           (3., 1, LEFT_TURN, -2., 4., yaw, False)])           # on round the corner
+  turning = int(round(9. / DT_MDL))
+  assert Desire.turnLeft in out[:turning]
+  assert pulses(out, Desire.turnLeft) == pulses(out[:turning], Desire.turnLeft)
+  assert out.count(CLEAR_DESIRE) == CLEAR_FRAMES
+  # stopped before turning at all (a red light), the pulse still goes again as the car pulls away
+  dt_ = DesireTiming()
+  out = step_through(dt_, [(5., 1, LEFT_TURN, 40., 5., 0., False), (STANDSTILL_REARM_S + 1., 1, LEFT_TURN, 15., 0., 0., False),
+                           (1., 1, LEFT_TURN, 15., 4., 0., False)])
+  stop_end = int(round((5. + STANDSTILL_REARM_S + 1.) / DT_MDL))
+  assert out[stop_end] == Desire.turnLeft
