@@ -37,7 +37,8 @@ Objects are TurnpilotScene.TrackedObject (or anything with the same fields): x m
 calibrated frame, vx/vy over-ground velocity in that frame (ego motion removed), cls compared by name, inPath
 set by the tracker, age its hits. If a tracker publishes velocity relative to the car instead, a parked car ahead
 reads as oncoming and the junction hold is conservative, not missed. Nor is a new track's vx trusted for the oncoming
-hold: until VEL_TRUST_HITS a vehicle in the oncoming lanes is taken as coming at ONCOMING_ASSUMED_SPEED.
+hold: until VEL_TRUST_HITS a vehicle in the oncoming lanes is taken as coming at ONCOMING_ASSUMED_SPEED, and held for on
+the comfortable curve only: a parked car or a ghost of a few frames never brakes the car hard.
 """
 import math
 from collections import deque
@@ -218,10 +219,10 @@ def committed_past_line(distance: float, v_ego: float, far_side: bool) -> bool:
   return distance < ONCOMING_ENTRY_M or v_ego ** 2 / (2. * STOP_DECEL) > distance - ONCOMING_ENTRY_M
 
 
-def hold_line_stop(maneuver, distance, v_ego, reason: str, far_side: bool = False) -> list[Stop]:
+def hold_line_stop(maneuver, distance, v_ego, reason: str, far_side: bool = False, confirmed: bool = True) -> list[Stop]:
   """A stop at the hold line before a turn, while the junction rules apply. Past it and not committed, a far-side turn
   stops where the comfortable curve can (standing, where it is), which is short of the oncoming lanes: never a hard stop
-  in the junction, never creeping on toward them."""
+  in the junction, never creeping on toward them. confirmed: as stop()'s, the evidence for it earned a hard stop."""
   if maneuver is None or maneuver.kind != TURN or distance < -TURN_ZONE_PAST_M:
     return []
   d_hold = distance - HOLD_LINE_M
@@ -231,7 +232,7 @@ def hold_line_stop(maneuver, distance, v_ego, reason: str, far_side: bool = Fals
     d_hold = v_ego ** 2 / (2. * STOP_DECEL)
   if d_hold > v_ego ** 2 / (2. * STOP_DECEL) + HOLD_ENGAGE_MARGIN_M:
     return []
-  return [stop(v_ego, d_hold, reason)]
+  return [stop(v_ego, d_hold, reason, confirmed)]
 
 
 def far_side_turn(maneuver, right_hand_traffic: bool) -> bool:
@@ -249,9 +250,10 @@ def leaving_crosswalk(obj, distance: float, side: int) -> bool:
 
 
 def junction_stops(objects, maneuver, distance, v_ego, right_hand_traffic, is_walker=crosswalk_walker,
-                   may_leave=confirmed_track) -> list[Stop]:
+                   may_leave=confirmed_track, may_harden=confirmed_track) -> list[Stop]:
   """Holds at the hold line before a turn: the crosswalk of a curb-side turn, oncoming traffic across a far-side one.
-  may_leave: whether a walker's velocity is trusted to let it go when it is leaving the crosswalk."""
+  may_leave: whether a walker's velocity is trusted to let it go when it is leaving the crosswalk; may_harden: whether an
+  oncoming vehicle's track is confirmed, to brake harder than the curve for it."""
   far_side = far_side_turn(maneuver, right_hand_traffic)
   if not hold_line_stop(maneuver, distance, v_ego, "", far_side):
     return []
@@ -262,14 +264,21 @@ def junction_stops(objects, maneuver, distance, v_ego, right_hand_traffic, is_wa
                CROSSWALK_Y_NEAR_M < obj.y * side < CROSSWALK_Y_FAR_M and
                not (may_leave(obj) and leaving_crosswalk(obj, distance, side))]
     return hold_line_stop(maneuver, distance, v_ego, "pedestrian in crosswalk") if walkers else []
+  holds = []
   for obj in objects:
-    # a new track's vx is range noise, its sign included (VEL_TRUST_HITS): taken as coming, never as going away
-    toward = -obj.vx if velocity_trusted(obj) else max(-obj.vx, ONCOMING_ASSUMED_SPEED)
+    # a new track's vx is range noise, its sign included (VEL_TRUST_HITS): taken as coming, never as going away. Taken so,
+    # it holds on the comfortable curve only: a hard stop needs a track whose existence and motion are both trusted (a
+    # parked car or a ghost of a few frames otherwise brakes the car at the planner's emergency floor)
+    trusted = velocity_trusted(obj)
+    toward = -obj.vx if trusted else max(-obj.vx, ONCOMING_ASSUMED_SPEED)
     if str(obj.cls) in VEHICLES and ONCOMING_Y_NEAR_M < obj.y * side < ONCOMING_Y_FAR_M and \
        obj.x > distance - ONCOMING_PAST_M and toward > ONCOMING_MIN_SPEED and \
        max(obj.x - distance, 0.) / toward < ONCOMING_TTA_S:
-      return hold_line_stop(maneuver, distance, v_ego, "waiting for oncoming", far_side)
-  return []
+      hard = trusted and may_harden(obj)
+      holds = hold_line_stop(maneuver, distance, v_ego, "waiting for oncoming", far_side, hard)
+      if hard:
+        return holds
+  return holds
 
 
 def decide(stops: list[Stop], v_ego: float) -> SceneDecision:
@@ -358,7 +367,8 @@ class ScenePolicy:
         ev.leaving = ev.leaving + 1 if leaving else 0
       peds = pedestrian_stops(objects, v_ego, lambda obj: self.tracks[obj.trackId].confirmed)
       junction = junction_stops(objects, maneuver, distance, v_ego, right_hand_traffic, lambda obj: self.tracks[obj.trackId].walker,
-                                lambda obj: self.tracks[obj.trackId].confirmed and self.tracks[obj.trackId].leaving >= CROSSWALK_LEAVING_FRAMES)
+                                lambda obj: self.tracks[obj.trackId].confirmed and self.tracks[obj.trackId].leaving >= CROSSWALK_LEAVING_FRAMES,
+                                lambda obj: self.tracks[obj.trackId].confirmed)
       self.carried = peds
       self.carried_junction = (maneuver_id, junction[0].reason) if junction else None
     else:

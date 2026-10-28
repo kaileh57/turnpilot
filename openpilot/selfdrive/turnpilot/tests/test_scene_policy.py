@@ -461,3 +461,16 @@ def test_after_the_go_an_oncoming_car_still_holds_short_of_the_oncoming_lanes():
   # standing past the line (crept there): stays where it is, never creeps on toward the oncoming lanes
   d = ScenePolicy().update(oncoming.objects, True, LEFT_TURN, HOLD_LINE_M - 2., 0., maneuver_id=4)
   assert d.should_stop and d.speed_cap == 0.
+
+
+def test_an_untrusted_track_in_the_oncoming_lanes_never_brakes_harder_than_the_curve():
+  # a parked or waiting car (vx 0), or a ghost a few frames old, in the oncoming lanes 20 m past the junction as the car
+  # nears its hold line: taken as coming until its velocity is trusted, so it holds, but only on the comfortable curve,
+  # never the hard stop a trusted oncoming car gets (the planner would clip -5 to its emergency floor)
+  for age in (1, 3, 12, VEL_TRUST_HITS - 1):
+    d = policy([car(31., 5., vx=0., age=age)], maneuver=LEFT_TURN, distance=11., v_ego=4.46)
+    assert d.holding and d.reason == "waiting for oncoming", age
+    assert d.accel_cap >= -STOP_DECEL, (age, d.accel_cap)
+  # a trusted one closing fast still gets the hard stop it needs
+  d = policy([car(31., 5., vx=-12., age=VEL_TRUST_HITS)], maneuver=LEFT_TURN, distance=11., v_ego=4.46)
+  assert d.holding and d.accel_cap < -STOP_DECEL
