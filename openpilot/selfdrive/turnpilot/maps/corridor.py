@@ -12,6 +12,7 @@ import time
 import uuid
 import zlib
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path, PurePosixPath
 
 from openpilot.selfdrive.turnpilot.maps.client import MapError
@@ -22,6 +23,11 @@ KEEP_PACKS = 3
 STALE_DOWNLOAD_S = 3600.  # a download this old was cut off by a crash or a restart
 MAX_MANIFEST = 16 * 1024 * 1024
 CHUNK = 1024 * 1024
+LEVEL2_SIZE = 0.25  # degrees: Valhalla's local road tiles. Levels 0 and 1 are 4 and 1 degrees, so they cover far more than the corridor
+
+
+def level2_index(lon: float, lat: float) -> int:
+  return int((lat + 90) // LEVEL2_SIZE) * round(360 / LEVEL2_SIZE) + int((lon + 180) // LEVEL2_SIZE)
 
 
 @dataclass(frozen=True)
@@ -32,6 +38,25 @@ class Pack:
   @property
   def tiles(self) -> Path:
     return self.path / TILES
+
+  @cached_property
+  def level2(self) -> frozenset[int]:
+    """The level-2 tiles in the pack, by index: 'tiles/2/000/756/425.gph' is 756425."""
+    found = set()
+    for name in self.manifest['files']:
+      parts = name.removesuffix('.gph').split('/')
+      if len(parts) > 2 and parts[1] == '2' and all(p.isdigit() for p in parts[2:]):
+        found.add(int(''.join(parts[2:])))
+    return frozenset(found)
+
+  def covers(self, lon: float, lat: float) -> bool:
+    """Whether (lon, lat) is on the pack's local roads. The pack's level 0 and 1 tiles reach much further, and Valhalla
+    happily snaps a start out there to a highway kilometres away, so only level 2 counts."""
+    return level2_index(lon, lat) in self.level2
+
+  def holds(self, steps: list[dict]) -> bool:
+    """Whether every point of a route's steps is covered."""
+    return all(self.covers(lon, lat) for step in steps for lon, lat in step['geometry']['coordinates'])
 
 
 def bad_pack(detail: str, retry: bool = False) -> MapError:

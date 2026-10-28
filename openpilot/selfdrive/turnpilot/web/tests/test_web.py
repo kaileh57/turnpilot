@@ -343,8 +343,10 @@ class TestGeofence(WebTestCase):
     assert self.call("GET", "/api/status")[1]["map"]["override"] == "/sim/tiles"
 
   def test_status_map(self):
+    assert self.call("GET", "/api/status")[1]["map"]["nav"] is None  # no destination, no navd status
+    assert self.navigate(INDY)[0] == 200
     self.params.put(STATUS_PARAM, {"state": "downloading", "message": "Downloading map for this drive…", "short": "Downloading map",
-                                   "code": "", "progress": 0.4, "at": 1})
+                                   "code": "", "progress": 0.4, "destination": list(INDY), "at": 1})
     with mock.patch.object(self.app.store, "last_gps", return_value=(INDY[1], INDY[0])):
       m = self.call("GET", "/api/status")[1]["map"]
     assert m["car_region"] == "Indianapolis area" and not m["car_outside"]
@@ -354,6 +356,16 @@ class TestGeofence(WebTestCase):
     with mock.patch.object(self.app.store, "last_gps", return_value=(CHICAGO[1], CHICAGO[0])):
       m = self.call("GET", "/api/status")[1]["map"]
     assert m["car_outside"] and m["car_region"] is None
+
+  def test_status_of_another_destination_is_not_shown_as_this_ones(self):
+    """navd's status still names the previous destination until it starts on the new one."""
+    self.params.put(STATUS_PARAM, {"state": "error", "message": "The car is outside TurnPilot's mapped area.", "short": "Car outside",
+                                   "code": "outside_coverage", "destination": [SEATTLE[0], SEATTLE[1]], "at": 1})
+    assert self.navigate(INDY)[0] == 200
+    nav = self.call("GET", "/api/status")[1]["map"]["nav"]
+    assert nav["state"] == "checking" and nav["destination"] == [INDY[0], INDY[1]], nav
+    self.params.put(STATUS_PARAM, {"state": "ready", "message": "Ready", "short": "Ready", "code": "", "destination": [INDY[0], INDY[1]]})
+    assert self.call("GET", "/api/status")[1]["map"]["nav"]["state"] == "ready"
 
   def test_coverage_endpoint(self):
     body = self.call("GET", "/api/coverage")[1]

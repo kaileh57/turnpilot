@@ -28,6 +28,13 @@ SEATTLE = (-122.335, 47.608)
 CHICAGO = (-87.63, 41.88)  # in neither
 
 
+def level2_tile(lon, lat) -> str:
+  """The Valhalla level-2 tile (0.25 degrees) that holds (lon, lat), as a pack names it."""
+  index = int((lat + 90) // 0.25) * 1440 + int((lon + 180) // 0.25)
+  digits = f"{index:09d}"
+  return f"tiles/2/{digits[:3]}/{digits[3:6]}/{digits[6:]}.gph"
+
+
 def coverage_doc(version='2026-10-27', rings=None):
   rings = rings or {'indianapolis': ('Indianapolis area', INDY_RING), 'seattle': ('Seattle area', SEATTLE_RING)}
   return {'type': 'FeatureCollection', 'version': version, 'features': [

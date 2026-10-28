@@ -25,6 +25,7 @@ PACKS_DIR = 'corridors'
 CONFIG_KEYS = ('TurnPilotMapHost', 'TurnPilotMapKey', 'TurnPilotMapCert')
 RETRY_SECONDS = 30.  # between downloads after one that could work on a retry (a network blip)
 REFUSED_RETRY_SECONDS = 300.  # after a refusal (422, bad key, bad TLS, bad pack), unless the destination or settings change
+CANCELLED = 'cancelled'
 
 
 def local_override(params) -> str:
@@ -81,14 +82,20 @@ class MapRouter:
     self.failure = None
     self.status.set('idle')
 
-  def route(self, start, destination, bearing, language) -> list[dict]:
+  def route(self, start, destination, bearing, language, position=None, cancelled=None) -> list[dict]:
+    """The steps from start to destination. position() gives the car's (start, bearing) now: after a download, which
+    can take minutes, the route starts there. cancelled() true stops a download with a MapError 'cancelled', which
+    leaves the status and the retry wait alone: the destination changed, and that is the new status."""
     try:
       check_route_source(self.params)
       tiles = local_override(self.params)
       if tiles:
         return self.route_local(tiles, start, destination, bearing, language)
-      return self.route_server(start, destination, bearing, language)
+      return self.route_server(start, destination, bearing, language, position, cancelled)
     except MapError as e:
+      if e.code == CANCELLED:
+        cloudlog.warning(f"turnpilot: the map download for {destination} was cancelled")
+        raise
       cloudlog.error(f"turnpilot route refused: {e.code}: {e.message}")
       self.status.error(e, destination=list(destination))
       raise
@@ -102,7 +109,8 @@ class MapRouter:
     steps = self.routed(self.local[1], start, destination, bearing, language, 'the local tiles')
     if not steps:
       raise MapError('no_route', f"Valhalla found no route on the local tiles ({tiles}).", 'No route found')
-    self.status.set('ready', 'Routing on local tiles (developer override, no geofence).', 'Local tiles', source='local')
+    self.status.set('ready', 'Routing on local tiles (developer override, no geofence).', 'Local tiles', source='local',
+                    destination=list(destination))
     return steps
 
   def coverage_or_fetch(self):
@@ -115,38 +123,46 @@ class MapRouter:
         raise no_coverage(f"Fetching it now failed: {e.message}") from None
     return coverage
 
-  def route_server(self, start, destination, bearing, language):
+  def route_server(self, start, destination, bearing, language, position=None, cancelled=None):
     current = self.corridor
     if current is not None and current.destination == destination and current.pack.path.is_dir():
-      # a reroute: the corridor is wider than the route, and the geofence sits inside the tiles, so try it first
-      try:
-        steps = current.source.route(start, destination, bearing, language)
-      except Exception as e:  # the car left the corridor: Valhalla finds no road near it
-        cloudlog.warning(f"turnpilot: routing on the corridor failed ({e}), downloading a new corridor")
-        steps = []
-      if steps:
-        self.ready(current.region)
-        return steps
+      # a reroute on the corridor, which is wider than the route, while the car is on its local roads
+      if current.pack.covers(*start):
+        steps = self.routed(current.source, start, destination, bearing, language, 'the map for this drive')
+        if not steps:
+          raise MapError('no_route', "No route on the map for this drive.", 'No route found')
+        if current.pack.holds(steps):
+          self.ready(current.region, destination)
+          return steps
+        cloudlog.warning("turnpilot: the reroute leaves the corridor, downloading a new corridor")
+      else:
+        cloudlog.warning(f"turnpilot: the car at {start} left the corridor, downloading a new corridor")
     elif (self.status.last or {}).get('destination') != list(destination):  # a retry keeps showing its error meanwhile
       self.status.set('checking', 'Checking the mapped area', destination=list(destination))
 
     coverage = self.coverage_or_fetch()
     region = check_trip(coverage, start, destination)
-    self.download(start, destination, region, coverage.names())
+    self.download(start, destination, region, coverage.names(), cancelled)
     assert self.corridor is not None
+    if position is not None:  # the download took a while: route from where the car is now
+      start, bearing = position()
     try:
       steps = self.routed(self.corridor.source, start, destination, bearing, language, 'the downloaded map')
       if not steps:
         raise MapError('no_route', "No route on the downloaded map for this drive.", 'No route found')
+      if not self.corridor.pack.holds(steps):
+        raise MapError('route_off_map', "The route for this drive leaves the map downloaded for it, so TurnPilot won't follow it.",
+                       'Route leaves the downloaded map')
     except MapError as e:
       # the corridor is kept, and the same destination waits out the retry time before it is downloaded again
       self.failure = Failure(destination, self.config(), e, time.monotonic())
       raise
-    self.ready(region)
+    self.ready(region, destination)
     return steps
 
-  def ready(self, region: Region):
-    self.status.set('ready', f"Ready: map for this drive in the {region.name}", 'Ready', source='server', region=region.name)
+  def ready(self, region: Region, destination):
+    self.status.set('ready', f"Ready: map for this drive in the {region.name}", 'Ready', source='server', region=region.name,
+                    destination=list(destination))
 
   def routed(self, source, start, destination, bearing, language, what):
     try:
@@ -154,7 +170,7 @@ class MapRouter:
     except Exception as e:
       raise MapError('routing_failed', f"Routing on {what} failed: {e}", 'Routing failed') from None
 
-  def download(self, start, destination, region: Region, names: str):
+  def download(self, start, destination, region: Region, names: str, cancelled=None):
     config = self.config()
     failure = self.failure
     if failure is not None and failure.destination == destination and failure.config == config:
@@ -162,9 +178,11 @@ class MapRouter:
       if time.monotonic() - failure.at < wait:
         raise failure.error
     try:
-      self.corridor = self.fetch(start, destination, region, names)
+      self.corridor = self.fetch(start, destination, region, names, cancelled)
       self.failure = None
     except MapError as e:
+      if e.code == CANCELLED:
+        raise
       self.failure = Failure(destination, config, e, time.monotonic())
       raise
     except Exception as e:  # anything else is still a failure the driver sees, and waits out the retry time
@@ -173,7 +191,7 @@ class MapRouter:
       self.failure = Failure(destination, config, error, time.monotonic())
       raise error from None
 
-  def fetch(self, start, destination, region: Region, names: str) -> Corridor:
+  def fetch(self, start, destination, region: Region, names: str, cancelled=None) -> Corridor:
     client = self.client_factory(self.params, self.directory)
     packs_dir = self.packs_dir
     packs_dir.mkdir(parents=True, exist_ok=True)
@@ -185,9 +203,15 @@ class MapRouter:
                       bytes=done, total=total, **base)
 
     report = Throttle(progress)
-    report(0, None, final=True)
+
+    def received(done, total):
+      if cancelled is not None and cancelled():
+        raise MapError(CANCELLED, "The destination changed during the map download.", 'Map download cancelled')
+      report(done, total)
+
+    received(0, None)  # shows the download at once, and checks for a cancel before connecting
     try:
-      size = client.corridor(start, destination, download, report, names)
+      size = client.corridor(start, destination, download, received, names)
       report(size, size, final=True)
       pack = corridor.unpack(download, packs_dir)
     finally:

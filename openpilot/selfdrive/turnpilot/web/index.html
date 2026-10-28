@@ -307,7 +307,7 @@ function renderMap(s) {
     if (m.coverage_error) problems.push(m.coverage_error);
     else if (m.car_outside) problems.push(m.outside_message.replace("Outside", "The car is outside"));
   }
-  var nav = s.destination ? m.nav : null;  // navd's status is about the current destination only
+  var nav = s.destination ? m.nav : null;  // the server passes navd's status only for the current destination
   if (nav && nav.state === "error") problems.unshift("No route: " + nav.message);
   err.hidden = !problems.length;
   err.textContent = problems.join(" ");

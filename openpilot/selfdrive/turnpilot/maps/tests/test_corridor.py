@@ -142,3 +142,14 @@ def test_a_pack_that_cannot_be_written_is_a_map_error(tmp_path):
                     manifest_files={'tiles/2/000/000/001.gph': hashlib.sha256(b'a').hexdigest(),
                                     'tiles/2/000/000/001.gph/x.gph': hashlib.sha256(b'x').hexdigest()})
   rejected(tmp_path, clash, 'failed its check')
+
+
+def test_a_pack_covers_the_places_its_level_2_tiles_do(tmp_path):
+  from openpilot.selfdrive.turnpilot.maps.tests.fakes import INDY, INDY_EAST, level2_tile
+  from tools.turnpilot.mapserver import tiles
+  name = level2_tile(*INDY)
+  assert tiles.tile_bbox(*tiles.parse_path(name.removeprefix('tiles/'))) == (-86.25, 39.75, -86.0, 40.0)  # as the server's grid
+  pack = unpack(tmp_path, make_pack({name: b'two', 'tiles/0/002/813.gph': b'zero', 'tiles/1/045/876.gph': b'one'}))
+  assert pack.covers(*INDY) and pack.covers(-86.01, 39.99)
+  assert not pack.covers(-86.4, 40.3)  # inside the 1 and 4 degree level 0 and 1 tiles, which cover nearly anything
+  assert not pack.covers(INDY_EAST[0] + 0.3, INDY_EAST[1])

@@ -91,7 +91,8 @@ class UIState:
     self.is_release = self.params.get_bool("IsReleaseBranch")
     self.always_on_dm: bool = self.params.get_bool("AlwaysOnDM")
     self.navigation_enabled: bool = self.params.get_bool("NavigationEnabled")
-    self.nav_destination_set: bool = self.params.get("NavDestination") is not None
+    self.nav_destination: dict | None = self.params.get("NavDestination")
+    self.nav_destination_set: bool = self.nav_destination is not None
     self.turnpilot_enabled: bool = self.params.get_bool("TurnPilotEnabled")
     self.turnpilot_map_status: dict | None = self.params.get("TurnPilotMapStatus")  # navd's map download and route status
     self.chestnut_present: bool = False
@@ -256,7 +257,8 @@ class UIState:
     self.initial_cruise_speed = self.params.get("InitialCruiseSpeedKph", return_default=True)
     self.always_on_dm = self.params.get_bool("AlwaysOnDM")
     self.navigation_enabled = self.params.get_bool("NavigationEnabled")
-    self.nav_destination_set = self.params.get("NavDestination") is not None
+    self.nav_destination = self.params.get("NavDestination")
+    self.nav_destination_set = self.nav_destination is not None
     self.turnpilot_enabled = self.params.get_bool("TurnPilotEnabled")
     self.turnpilot_map_status = self.params.get("TurnPilotMapStatus")
     self.chestnut_active = self.params.get("ChestnutActive")

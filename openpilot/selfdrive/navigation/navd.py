@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import threading
+
 import numpy as np
 
 import openpilot.cereal.messaging as messaging
@@ -34,8 +36,35 @@ def set_banner(instruction, banners, distance_to_maneuver):
     instruction.maneuverSecondaryText = banner['secondary']['text']
 
 
+class RouteJob(threading.Thread):
+  """One router.route() call off navd's 1 Hz loop: a corridor download takes minutes over cellular. navd keeps
+  publishing meanwhile and installs the result itself, on its own thread, if the destination is still the same.
+
+  The router puts every failure in TurnPilotMapStatus; one that isn't a MapError is put there here."""
+
+  def __init__(self, engine: 'RouteEngine', destination, language):
+    super().__init__(name='navd-route', daemon=True)
+    self.engine, self.destination, self.language = engine, destination, language
+    self.start_position, self.start_bearing = engine.last_position, engine.last_bearing
+    self.cancel = threading.Event()
+    self.steps: list[dict] | None = None
+
+  def run(self):
+    router, destination = self.engine.router, self.destination
+    try:
+      self.steps = router.route(self.start_position, destination, self.start_bearing, self.language,
+                                position=self.engine.position, cancelled=self.cancel.is_set)
+    except MapError:
+      pass
+    except Exception as e:
+      cloudlog.exception("failed to get route")
+      if not self.cancel.is_set():
+        router.status.error(MapError('routing_failed', f"Routing failed: {type(e).__name__}: {e}", 'Routing failed'),
+                            destination=list(destination))
+
+
 class RouteEngine:
-  def __init__(self, sm, pm, params=None, router=None):
+  def __init__(self, sm, pm, params=None, router=None, background=True):
     self.sm = sm
     self.pm = pm
     self.params = params if params is not None else Params()
@@ -50,6 +79,11 @@ class RouteEngine:
 
     self.recompute_hold = 0
     self.reroute_counter = 0
+
+    # TurnPilot: routes are computed by a RouteJob, in a thread unless background is False (tests that step navd)
+    self.background = background
+    self.job: RouteJob | None = None
+    self.requested_destination = None  # the destination of the last route request, which a new one skips the hold for
 
     # TurnPilot: routes come from TurnPilot's map server (or local tiles), never Mapbox; see turnpilot/routing/sources.py
     self.router = router if router is not None else MapRouter(self.params)
@@ -71,51 +105,76 @@ class RouteEngine:
     if self.route is not route or self.sm.frame % ROUTE_RESEND_PERIOD == 0:
       self.send_route()
 
+  def position(self):
+    """(position, bearing) now, for a route job that finishes a download."""
+    return self.last_position, self.last_bearing
+
   def recompute_route(self, gps_ok: bool):
     if self.last_position is None:
       return
 
     destination = self.params.get("NavDestination")
-    if destination is None:
+    new_destination = None if destination is None else (destination['longitude'], destination['latitude'])
+    self.collect_route(new_destination)
+    if new_destination != self.nav_destination and self.route is not None:
+      self.clear_route()  # never guidance to a destination that was replaced
+    if self.job is not None:  # still routing: a new destination cancels it, and goes once it has stopped
+      if self.job.destination != new_destination:
+        self.job.cancel.set()
+      return
+
+    if new_destination is None:
       self.clear_route()
       self.router.clear()
       self.recompute_hold = 0
+      self.requested_destination = None
       return
-    new_destination = (destination['longitude'], destination['latitude'])
 
     # Don't recompute when GPS drifts in tunnels
     if not gps_ok and self.step_idx is not None:
       return
 
     self.recompute_hold -= 1
-    if (self.should_recompute() or new_destination != self.nav_destination) and self.recompute_hold <= 0:
+    if new_destination != self.requested_destination or (self.should_recompute() and self.recompute_hold <= 0):
       self.recompute_hold = RECOMPUTE_HOLD
       self.calculate_route(new_destination)
       self.reroute_counter = 0
 
   def calculate_route(self, destination):
+    """Start routing to destination. In the background the route arrives in a later update(); else it is here now."""
     assert self.last_position is not None
     cloudlog.warning(f"Calculating route {self.last_position} -> {destination}")
-    self.nav_destination = destination
+    self.requested_destination = destination
 
     lang = self.params.get('LanguageSetting')
     if lang is not None:
       lang = lang.replace('main_', '')
 
-    try:
-      # TurnPilot: the router checks the geofence, downloads the drive's map and routes on it; any failure raises a
-      # MapError that it has already put in TurnPilotMapStatus for the web app and the UI, and there is no route
-      steps = self.router.route(self.last_position, destination, self.last_bearing, lang)
-      self.route = steps
-      self.route_geometry = [np.array(step['geometry']['coordinates'], dtype=np.float64).reshape((-1, 2)) for step in self.route]
-      self.step_idx = 0
-    except MapError:
+    # TurnPilot: the router checks the geofence, downloads the drive's map and routes on it; any failure raises a
+    # MapError that it has already put in TurnPilotMapStatus for the web app and the UI, and there is no route
+    self.job = RouteJob(self, destination, lang)
+    if self.background:
+      self.job.start()
+    else:
+      self.job.run()
+      self.collect_route(destination)
+
+  def collect_route(self, destination):
+    """Take a finished job's route, if it is for destination (the current NavDestination) and wasn't cancelled."""
+    job = self.job
+    if job is None or job.is_alive():
+      return
+    self.job = None
+    if job.cancel.is_set() or job.destination != destination:
+      cloudlog.warning(f"navd: dropped the route to {job.destination}, the destination is now {destination}")
+      return
+    if job.steps is None:
       self.clear_route()
-    except Exception as e:
-      cloudlog.exception("failed to get route")
-      self.router.status.error(MapError('routing_failed', f"Routing failed: {type(e).__name__}: {e}", 'Routing failed'),
-                               destination=list(destination))
-      self.clear_route()
+      return
+    self.route = job.steps
+    self.route_geometry = [np.array(step['geometry']['coordinates'], dtype=np.float64).reshape((-1, 2)) for step in self.route]
+    self.step_idx = 0
+    self.nav_destination = job.destination
 
   def send_instruction(self):
     msg = messaging.new_message('navInstruction', valid=True)

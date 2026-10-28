@@ -51,7 +51,7 @@ def route_engine(tiles, start, bearing):
   params = MagicMock()
   params.get.side_effect = values.get
   pm = MagicMock()
-  engine = RouteEngine(MagicMock(), pm, params=params)
+  engine = RouteEngine(MagicMock(), pm, params=params, background=False)
   engine.last_position, engine.last_bearing = start, bearing
   return engine, pm
 

@@ -17,7 +17,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.turnpilot.maps import coverage as coverage_cache
 from openpilot.selfdrive.turnpilot.maps.client import MapError, cert_fingerprint, check_cert, missing_config, normalize_host
 from openpilot.selfdrive.turnpilot.maps.coverage import CoverageCache, CoverageRefresher, check_trip
-from openpilot.selfdrive.turnpilot.maps.status import read_status
+from openpilot.selfdrive.turnpilot.maps.status import for_destination, read_status
 from openpilot.selfdrive.turnpilot.routing.sources import local_override
 from openpilot.selfdrive.turnpilot.web import places
 from openpilot.selfdrive.turnpilot.web.pairing import PORT, icon_png, pairing_url, qr_svg
@@ -96,7 +96,7 @@ class App:
       override = local_override(params)
       missing = missing_config(params)
       refresh_status = params.get(coverage_cache.STATUS_PARAM)
-      nav = read_status(params)
+      nav = for_destination(read_status(params), params.get("NavDestination"))  # only about the current destination
     coverage, error = self.cached_coverage()
     if coverage is None and error is None:
       error = coverage_cache.NO_COVERAGE_MESSAGE
