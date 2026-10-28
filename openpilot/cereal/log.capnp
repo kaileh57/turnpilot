@@ -132,6 +132,8 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     excessiveActuation @96;
     bigModelLoading @100;
     bigModelFailed @102;
+    turnpilotDetectorStopped @105;  # TurnPilot: the detector stopped, hand back to the driver
+    turnpilotModelFellBack @106;    # TurnPilot: modeld fell back to the small model, which TurnPilot can't navigate on
 
     lowBatteryDEPRECATED @40;
     soundsUnavailableDEPRECATED @47;
