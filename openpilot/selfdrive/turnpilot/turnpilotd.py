@@ -250,7 +250,9 @@ class TurnPilot:
     # the scene's holds only ever brake, so they keep the real maneuver through a handback
     decision = self.scene.update(objects, available, maneuver, rf.distance, v_ego, right_hand_traffic, rf.maneuver_id, cs.gasPressed)
     plan.accelCap = decision.accel_cap
-    plan.speedCap = min(decision.speed_cap, turn_speed_cap(cap_on, rf.distance, v_ego, right_hand_traffic))
+    # past a bend or a straight-on step, the turn after it is slowed for already (route_follower.py: ahead)
+    ahead_cap = turn_speed_cap(rf.ahead, rf.ahead_distance, v_ego, right_hand_traffic) if act_on is not None else NO_SPEED_CAP
+    plan.speedCap = min(decision.speed_cap, turn_speed_cap(cap_on, rf.distance, v_ego, right_hand_traffic), ahead_cap)
     plan.shouldStop = decision.should_stop
     no_junction_data = maneuver is not None and maneuver.kind in (TURN, KEEP) and not maneuver.geometry
     plan.reason = decision.reason or lane_reason or (NO_JUNCTION_DATA_REASON if no_junction_data else "")

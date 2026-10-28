@@ -567,3 +567,16 @@ def test_navd_going_quiet_on_the_approach_keeps_the_turn_cap():
   while sim.s < 330.:
     sim.step()
   assert_turn_held(sim, n)
+
+
+def test_turn_just_after_a_bend_or_a_new_name_is_slowed_for_not_skipped():
+  # a left junction turn 30-50 m after a step that is NONE (a bend no other road meets, a straight-on name change): the
+  # turn cap brakes for the left before navd moves past that step, so the left isn't skipped as too fast
+  for first in (("turn", "right", junction_of("right", 0, 60.)), ("new name", "straight", (0., 0., 2))):
+    for gap in (30., 50.):
+      sim = Sim([(300.,) + first, (300. + gap, "turn", "left", junction_of("left")), (1500., "turn", "right", junction_of("right"))])
+      while sim.s < 300. + gap + 5.:
+        sim.step()
+      plans = [p for _, _, p in sim.trace]
+      assert not any(p.tooFastToTurn for p in plans), (first, gap)
+      assert Desire.turnLeft in [p.desire for p in plans], (first, gap)

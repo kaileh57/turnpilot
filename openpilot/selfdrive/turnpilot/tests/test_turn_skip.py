@@ -120,12 +120,14 @@ def test_following_the_cap_never_skips(modifier, angle, cruise):
 
 
 def test_a_road_that_bends_is_the_models():
-  # the route bends left where no other road meets it: no desire, no speed cap, nothing to skip
+  # the route bends left where no other road meets it: no desire, no speed cap, nothing to skip (the left 1200 m past
+  # the bend is looked ahead to, and its cap is far above the cruise speed)
   sim = Sim([left_at(300., branches=0), left_at(1500.)], cruise=15.)
   sim.run(25., turn_at=300.)
   assert sim.s > 320.
   before = [plan for s, _, plan in sim.trace if s < 310.]
-  assert all(plan.desire == Desire.none and plan.speedCap == NO_SPEED_CAP and not plan.tooFastToTurn for plan in before)
+  assert all(plan.desire == Desire.none and plan.speedCap > 30. and not plan.tooFastToTurn for plan in before)
+  assert min(v for s, v, _ in sim.trace if s < 310.) > 14.9
   assert all(plan.maneuverBend and plan.state == State.following for plan in before)
   # at a junction the same left gets both
   sim = Sim([left_at(300.), left_at(1500.)], cruise=15.)

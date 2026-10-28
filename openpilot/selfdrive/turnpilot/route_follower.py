@@ -7,7 +7,10 @@ Maneuver type and modifier are Mapbox/OSRM strings, copied through by navd uncha
 What counts as a turn: only a junction maneuver, where the route leaves the road at an intersection that other roads
 meet (navInstruction.maneuverBranches > 0, from Valhalla's intersection bearings). Where the road just bends and no
 other road meets it, the maneuver is NONE: the driving model follows the bend (0.11.3's Autospeed slows for curves), and
-TurnPilot sends no desire and no speed cap there. The angle is the real one, bearing_after less bearing_before. A route
+TurnPilot sends no desire and no speed cap there. navd moves past such a step only 10 m beyond its end, so the turn or
+keep after it (RouteFollower.ahead, from allManeuvers with its junction) is looked ahead to for its speed cap: a junction
+turn 30-50 m past a bend was otherwise seen at road speed, too late to slow for, and skipped. Its desire still waits for
+navd to move on (a turn desire before a straight-on junction would turn the car there). The angle is the real one, bearing_after less bearing_before. A route
 without intersection data (maneuverGeometryValid false; Valhalla always has it) leaves every turn a junction at the
 modifier's nominal angle, which is logged once per maneuver and shown in the plan's reason.
 A new route (a destination set from the phone, a reroute) can start with a maneuver of the same type and modifier as
@@ -112,14 +115,24 @@ def turn_angle(bearing_before: float, bearing_after: float) -> float:
 
 
 def maneuver_from_instruction(instruction) -> Maneuver:
-  mtype, modifier = instruction.maneuverType, instruction.maneuverModifier
+  return make_maneuver(instruction.maneuverType, instruction.maneuverModifier, lanes_from_instruction(instruction),
+                       instruction.maneuverGeometryValid, instruction.maneuverBearingBefore, instruction.maneuverBearingAfter,
+                       instruction.maneuverBranches)
+
+
+def maneuver_from_ahead(ahead) -> Maneuver:
+  """A Maneuver from a NavInstruction.Maneuver (allManeuvers), which has no lanes."""
+  return make_maneuver(ahead.type, ahead.modifier, (), ahead.geometryValid, ahead.bearingBefore, ahead.bearingAfter, ahead.branches)
+
+
+def make_maneuver(mtype: str, modifier: str, lanes: tuple, geometry_valid: bool, bearing_before: float, bearing_after: float,
+                  branches: int) -> Maneuver:
   kind, side = classify(mtype, modifier)
-  lanes = lanes_from_instruction(instruction)
-  if not instruction.maneuverGeometryValid:
+  if not geometry_valid:
     return Maneuver(kind, side, mtype, modifier, NOMINAL_ANGLE_DEG.get(modifier, 0.), lanes)
-  angle = turn_angle(instruction.maneuverBearingBefore, instruction.maneuverBearingAfter)
+  angle = turn_angle(bearing_before, bearing_after)
   bearing_side = 0 if abs(angle) < SIDE_MIN_DEG else RIGHT if angle > 0 else LEFT
-  if kind in (TURN, KEEP) and instruction.maneuverBranches == 0:
+  if kind in (TURN, KEEP) and branches == 0:
     return Maneuver(NONE, 0, mtype, modifier, abs(angle), lanes, geometry=True, bend=True, bearing_side=bearing_side)
   return Maneuver(kind, side, mtype, modifier, abs(angle), lanes, geometry=True, bearing_side=bearing_side)
 
@@ -139,6 +152,8 @@ class RouteFollower:
     self.replaced = False                   # true for the one update in which a new route dropped the last maneuver
     self.through_lanes: tuple = ()          # NavInstruction.throughLanes: the next intersection the route goes straight through
     self.through_distance = float('inf')    # m to it, dead-reckoned
+    self.ahead: Maneuver | None = None      # past a NONE maneuver, the next turn or keep (allManeuvers), for its speed cap
+    self.ahead_distance = float('inf')      # m to it, dead-reckoned
     self._passed_id = -1
     self._stale_t = 0.
 
@@ -178,6 +193,7 @@ class RouteFollower:
       self.distance -= travelled
       self.distance_remaining -= travelled
       self.through_distance -= travelled
+      self.ahead_distance -= travelled
 
     if self.valid and self.distance < -PASSED_DIST_M and self._passed_id != self.maneuver_id:
       self._passed_id = self.maneuver_id
@@ -223,3 +239,11 @@ class RouteFollower:
     self.distance_remaining = float(instruction.distanceRemaining)
     self.through_lanes = lanes_from_list(instruction.throughLanes)
     self.through_distance = float(instruction.throughLanesDistance) if self.through_lanes else float('inf')
+    self.ahead, self.ahead_distance = None, float('inf')
+    if maneuver.kind == NONE:  # a bend or a road going on: the turn after it may be close
+      for ahead in list(instruction.allManeuvers)[1:]:
+        following = maneuver_from_ahead(ahead)
+        if following.kind != NONE:
+          if following.kind in (TURN, KEEP):
+            self.ahead, self.ahead_distance = following, float(ahead.distance)
+          break
