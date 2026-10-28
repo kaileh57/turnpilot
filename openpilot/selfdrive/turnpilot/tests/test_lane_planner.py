@@ -326,6 +326,12 @@ def test_aborts_before_the_change_starts():
     drive.paint = (lambda left, right, p=p: paint(right=p)) if p is not None else None
     drive.run(m, distance, 1.)
     assert [a for a, _ in drive.aborts] == ['lineNotBroken'] and not drive.requests, p
+  # the model stops seeing a lane that way
+  drive, distance = offered()
+  drive.lanes_right = 0
+  drive.paint = lambda left, right: paint(right=BW)
+  drive.run(m, distance, 1.)
+  assert [a for a, _ in drive.aborts] == ['noLane'] and not drive.requests
   # the blind spot fills
   drive, distance = offered()
   drive.run(m, distance, 1., blindspot=LaneChange.right)
