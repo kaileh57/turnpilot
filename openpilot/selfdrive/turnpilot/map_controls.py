@@ -83,6 +83,7 @@ OVERRUN_PAST_M = 2.           # m past the line, moving faster than COMMIT_SPEED
 DRIVE_OFF_M = 2.              # m a held car moved under the driver's gas: driven off
 LIGHT_ASSOC_M = 25.           # a light belongs to the signal control whose stop point is this close to its own
 LIGHT_STALE_S = 0.6           # s: an older light message is stale (unknown)
+STOPPING_NEAR_M = 30.         # a map stop this close that is stopping the car owns the driver's gas (MapDecision.stopping)
 
 UNPROTECTED = 'unprotectedTurn'  # MapControlStatus.Kind's name for it
 UNPROTECTED_ROUTE = -1        # its key is (UNPROTECTED_ROUTE, maneuver id): a maneuver's, not a route's control
@@ -171,6 +172,8 @@ class MapDecision:
   reason: str = ''               # the controls' status to show when nothing holds
   released_stopped: bool = False  # a hold let go this frame with the car stopped: turnpilotd re-pulses the turn
   gas_go: bool = False            # a control was released by the driver's gas tap this frame: that press is the go
+  stopping: bool = False          # a stop sign, signal or unprotected turn within STOPPING_NEAR_M is stopping or holding the
+                                  # car: a gas press now is its override or its go, never a release of the scene's holds
 
 
 @dataclass
@@ -352,6 +355,7 @@ class MapControlPolicy:
     elif lights.rejected:
       out.alert = 'lightSourceRejected'
     live = [c for c in controls if c.state is not None and not c.state.done]
+    out.stopping = any(c.kind != 'yield' and (c.held or (c.engaged and c.state.mode == 'stop')) and c.d < STOPPING_NEAR_M for c in live)
     pick = next((c for c in live if c.held), None) or next((c for c in live if c.engaged), None) or \
       next((c for c in live if c.d > -OVERRUN_PAST_M), None)
     if pick is not None:

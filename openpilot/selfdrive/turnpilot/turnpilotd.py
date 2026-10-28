@@ -360,9 +360,11 @@ class TurnPilot:
 
     # the scene's holds only ever brake, so they keep the real maneuver through a handback. The press that released a map
     # stop is its go: the scene's holds (an oncoming car, a pedestrian) only add to it (scene_policy.py)
+    # Nor is a press while a map stop is stopping the car near here (a brush on the approach to it): that is the map's
+    # override, and the detector's holds at that junction still stand once the map's go comes
     self.go_press = cs.gasPressed and (mapd.gas_go or self.go_press)
     decision = self.scene_now = self.scene.update(objects, available, maneuver, rf.distance, v_ego, right_hand_traffic, rf.maneuver_id,
-                                                 cs.gasPressed, extra_stops=mapd.stops, go_press=self.go_press)
+                                                 cs.gasPressed and not mapd.stopping, extra_stops=mapd.stops, go_press=self.go_press)
     # a hold let go with the car standing (the walker cleared, a stop's go): the model won't pull away on its own, and the
     # turn's pulse is long forgotten, so it goes again in this very plan, the one that lets the car go: held, the desire
     # was dropped to none, so it is a fresh edge (desire_timing.py). BeamNG: let go a frame before its pulse, the car drove
@@ -550,8 +552,9 @@ class TurnPilot:
             log_error("turnpilotd.fault_map_controls_failed")
             stops = self.map_controls.held_stops()
         self.go_press = cs.gasPressed and ((self.map_now is not None and self.map_now.gas_go) or self.go_press)
+        stopping = self.map_now is not None and self.map_now.stopping
         decision = self.scene.update(list(scene.objects) if scene.available else [], scene.available, None, float('inf'),
-                                     max(cs.vEgo, 0.), gas_pressed=cs.gasPressed, extra_stops=stops, go_press=self.go_press)
+                                     max(cs.vEgo, 0.), gas_pressed=cs.gasPressed and not stopping, extra_stops=stops, go_press=self.go_press)
         self.was_stopping = decision.should_stop
       if self.hold_v is not None:
         self.hold_v = None if not sm['carControl'].latActive else \

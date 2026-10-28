@@ -1445,3 +1445,27 @@ def test_fault_on_the_approach_keeps_the_unprotected_stop():
   assert all(p.fault == Fault.error for p in plans)
   assert sim.v < 0.05 and 300. - sim.s >= HOLD_LINE_M and plans[-1].shouldStop
 
+
+
+def test_a_gas_brush_on_the_approach_to_a_map_stop_never_releases_the_detectors_hold():
+  # oncoming traffic in a steady stream; the driver brushes the gas on the final approach to the unprotected left, inside
+  # the scene's gas-release zone. The map's stop is in force there: the brush is an override of it, not a release of the
+  # detector's oncoming hold, so after the driver's go the car still waits for the car coming
+  def stream(sim):
+    return ({'cls': 'car', 'x': 330. - sim.s, 'y': 5., 'vx': -10., 'age': 30},)
+  for brush_at in (12., 10.5):
+    sim = Sim(TURNS_AHEAD)
+    sim.go_taps = False
+    frames = 0
+    while not (sim.v < 0.05 and sim.s > 250.):
+      brush = 300. - sim.s <= brush_at and frames < 3
+      frames += brush
+      sim.step(stream(sim), gas=brush)
+      assert sim.t < 120.
+    assert frames == 3 and sim.tp.scene.released_id is None
+    sim.run(2., objects=stream)
+    plan = sim.step(stream(sim), gas=True)
+    assert plan.shouldStop and plan.reason == "waiting for oncoming", brush_at
+    held_s = sim.s
+    sim.run(4., objects=stream)
+    assert sim.s - held_s < 0.05, brush_at
