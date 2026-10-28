@@ -18,9 +18,20 @@ forgets a pulse when it leaves that queue. A pulse still in the queue once the c
 on: at a 55 degree "left" the car turned 122-126 degrees into the curb, the last pulse 6.6 s from leaving.
 So once the turn is done, CLEAR_DESIRE goes out and modeld drops the turn desires from the queue: at the
 junction (navd past it) once the car has turned CLEAR_MIN_DEG, or anywhere within CLEAR_MARGIN_DEG of the turn's
-nominal angle (80 degrees for a left or right).
+angle (80 degrees for a 90 degree left or right), but not before CLEAR_MIN_FRACTION of it (a 40 degree left at 30).
+The angle is the junction's real one from Valhalla's bearings (route_follower.py), else the modifier's nominal one.
 Short of CLEAR_MIN_DEG it waits: in H2's single-pulse runs, with the pulse gone at 5-16 degrees the model gave up
 3 turns of 3, and at 25-42 degrees it finished 9 of 10 on its own (the one it gave up was at 32).
+No turn pulse starts while the car is too fast to make the turn (turn_skip.py, may_start false): the turn speed cap
+has the car at 6.9 m/s by the lead, and faster than the check allows something else holds the speed (the driver's
+foot), so the model would turn from road speed. Too fast for long, the turn is skipped and no pulse goes at all. A pulse
+already out is held and never cancelled, since dropping it and sending it again would be a new rising edge, and a turn
+under way is finished. A keep goes at any speed.
+Nor does any desire go out while openpilot isn't steering (carControl.latActive): modeld would not feed it to the
+model, and a pulse, repeat or timeout spent then is lost. Once openpilot engages, a fresh pulse goes, unless the driver
+has turned the car TURN_STARTED_DEG toward a turn meanwhile.
+When a new route replaces the maneuver (RouteFollower.replaced), a turn pulse the car hasn't started turning on is
+cleared at once: the old junction may be just ahead, and the pulse would turn the car there.
 """
 import math
 
@@ -44,7 +55,8 @@ PULSE_GAP_FRAMES = 3          # frames of none before a repeat pulse
 STANDSTILL_SPEED = 0.3        # m/s
 STANDSTILL_REARM_S = 2.       # stopped this long (a queue, a red light), the pulse goes again once the car moves
 CLEAR_MIN_DEG = 45.           # past the junction, the turn desire is cleared once the car has turned this far...
-CLEAR_MARGIN_DEG = 10.        # ...and before it, once it has turned the maneuver's nominal angle less this
+CLEAR_MARGIN_DEG = 10.        # ...and before it, once it has turned the maneuver's angle less this...
+CLEAR_MIN_FRACTION = 0.75     # ...and at least this much of it
 CLEAR_WAIT_S = 6.             # past the junction short of CLEAR_MIN_DEG, the turn may get there this long after
 CLEAR_FRAMES = 5              # frames CLEAR_DESIRE is published
 
@@ -75,6 +87,7 @@ class DesireTiming:
     self._moving_t = 0.
     self._stopped_t = 0.
     self.side = 0             # set once a turn desire went out: the turn to clear once it is done
+    self._held = False        # held off while openpilot wasn't steering, since the last pulse
 
   def _turn_over(self):
     """The maneuver was passed or replaced: clear its turn desire now, or once the car has turned CLEAR_MIN_DEG."""
@@ -86,12 +99,17 @@ class DesireTiming:
     self.clear_frames, self._pending, self.side = CLEAR_FRAMES, None, 0
 
   def update(self, maneuver, distance: float, maneuver_id: int, passed: bool, v_ego: float,
-             steering_angle_deg: float, keep_left_ok: bool, keep_right_ok: bool, dt: float, yaw_rate: float = 0.) -> int:
+             steering_angle_deg: float, keep_left_ok: bool, keep_right_ok: bool, dt: float, yaw_rate: float = 0.,
+             lat_active: bool = True, replaced: bool = False, may_start: bool = True) -> int:
     """The desire to publish, CLEAR_DESIRE once a turn is done. maneuver is RouteFollower.upcoming (None when there is
     none); keep_left_ok/keep_right_ok: the model sees a lane line and road that way (lane_planner.ModelLanes);
-    yaw_rate: rad/s, left positive."""
+    yaw_rate: rad/s, left positive; lat_active: carControl.latActive; replaced: RouteFollower.replaced;
+    may_start: the car can still make the turn (turn_skip.py); no turn pulse starts while it can't."""
     if maneuver_id != self.maneuver_id:
-      self._turn_over()
+      if replaced and self.side and self.turned_deg < TURN_STARTED_DEG:
+        self._clear()
+      else:
+        self._turn_over()
     if self._pending is not None:
       self._pending[0] += math.degrees(yaw_rate * dt) * self._pending[1]
       self._pending[2] += dt
@@ -99,7 +117,8 @@ class DesireTiming:
         self._clear()
       elif self._pending[2] > CLEAR_WAIT_S:
         self._pending = None
-    desire = self._update(maneuver, distance, maneuver_id, passed, v_ego, keep_left_ok, keep_right_ok, dt, yaw_rate)
+    desire = self._update(maneuver, distance, maneuver_id, passed, v_ego, keep_left_ok, keep_right_ok, dt, yaw_rate, lat_active,
+                          may_start)
     if desire != Desire.none:
       self._pending = None  # the next maneuver's pulse is in the model's queue now
     if self.clear_frames > 0:
@@ -108,7 +127,7 @@ class DesireTiming:
     return desire
 
   def _update(self, maneuver, distance: float, maneuver_id: int, passed: bool, v_ego: float,
-              keep_left_ok: bool, keep_right_ok: bool, dt: float, yaw_rate: float) -> int:
+              keep_left_ok: bool, keep_right_ok: bool, dt: float, yaw_rate: float, lat_active: bool, may_start: bool) -> int:
     if maneuver_id != self.maneuver_id:
       self.maneuver_id = maneuver_id
       self._reset()
@@ -134,6 +153,19 @@ class DesireTiming:
       self.active = False
       return Desire.none
 
+    turn = maneuver.kind == TURN
+    if not lat_active:
+      self.active, self._held, self._gap = False, True, 0
+    if turn and (self.active or self._held):
+      self.turned_deg += math.degrees(yaw_rate * dt) * maneuver.side
+      if self.turned_deg >= max(maneuver.angle_deg - CLEAR_MARGIN_DEG, CLEAR_MIN_FRACTION * maneuver.angle_deg):
+        if self.side:
+          self._clear()
+        self.done, self.active = True, False
+        return Desire.none
+    if not lat_active:
+      return Desire.none
+
     if v_ego < STANDSTILL_SPEED:
       self._stopped_t += dt
       if self._stopped_t > STANDSTILL_REARM_S:
@@ -146,17 +178,12 @@ class DesireTiming:
         self.done, self.active = True, False
         return Desire.none
 
-    if self.active and maneuver.kind == TURN:
+    if self.active and turn:
       self._since_pulse += dt
-      self.turned_deg += math.degrees(yaw_rate * dt) * maneuver.side
-      if self.turned_deg >= maneuver.angle_deg - CLEAR_MARGIN_DEG:
-        self._clear()
-        self.done, self.active = True, False
-        return Desire.none
       entry = not self.entry and distance < ENTRY_M and self._since_pulse >= ENTRY_GAP_S
       self.entry = self.entry or distance < ENTRY_M
       if (entry or (self._since_pulse >= REPULSE_S and distance > ENTRY_M)) and self.turned_deg < TURN_STARTED_DEG and \
-         self.pulses < MAX_PULSES:
+         self.pulses < MAX_PULSES and may_start:
         self._gap, self._since_pulse = PULSE_GAP_FRAMES, 0.
         self.pulses += 1
     if self._gap > 0:
@@ -164,9 +191,12 @@ class DesireTiming:
       return Desire.none
 
     if not self.active:
+      if turn and (not may_start or (self._held and self.turned_deg >= TURN_STARTED_DEG)):
+        return Desire.none  # a pulse in the turn turns the car on past the exit road
       self.active = self.started = True
+      self._held = False
       self.pulses += 1
       self._since_pulse = 0.
-      if maneuver.kind == TURN:
+      if turn:
         self.side = maneuver.side
     return desire

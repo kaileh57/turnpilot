@@ -27,6 +27,16 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
     left @1;
     right @2;
   }
+  enum Fault {
+    none @0;
+    error @1;           # turnpilotd failed this frame (logged); TurnPilot does nothing until it recovers
+    noLongitudinal @2;  # openpilot doesn't control speed on this car, so TurnPilot does nothing
+  }
+  enum LaneMismatch {
+    none @0;
+    turnOnlyGoingStraight @1;  # the car is in a lane that only turns, at an intersection the route goes straight through
+    wrongLaneForTurn @2;       # the route turns at the junction ahead and the car's lane doesn't turn that way
+  }
   state @0 :State;
   desire @1 :UInt8;               # index into log.Desire; modeld uses it while DesireHelper is idle
   laneChange @2 :LaneChange;      # request for DesireHelper (acts like blinker plus nudge)
@@ -40,6 +50,12 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
   maneuverModifier @10 :Text;     # e.g. "left", "slight right"
   routeValid @11 :Bool;
   shadow @12 :Bool;               # computed but not applied (TurnPilotShadowMode)
+  fault @13 :Fault;               # why a disabled plan is disabled while TurnPilot is on; selfdrived shows it
+  tooFastToTurn @14 :Bool;        # the next turn is skipped, too fast to make it: no desire, no cap; navd reroutes past it
+  laneMismatch @15 :LaneMismatch; # shown and logged; the lane planner should have moved the car earlier
+  maneuverAngle @16 :Float32;     # deg, unsigned: from the junction's bearings when maneuverGeometryValid, else nominal
+  maneuverGeometryValid @17 :Bool;
+  maneuverBend @18 :Bool;         # the road bends and no other road meets it there: the model's, not a turn
 }
 
 struct TurnpilotDetections @0xaedffd8f31e7b55d {

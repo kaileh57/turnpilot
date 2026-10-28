@@ -2,7 +2,7 @@ import openpilot.cereal.messaging as messaging
 from openpilot.cereal import custom, log
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
-from openpilot.selfdrive.turnpilot.lane_planner import (LC_BLOCK_X_M, LanePlanner, ModelLanes, lane_change_window, lane_changes_needed,
+from openpilot.selfdrive.turnpilot.lane_planner import (LC_BLOCK_X_M, LanePlanner, ModelLanes, lane_change_window, lane_changes_needed, lane_mismatch,
                                                         model_lanes, model_lanes_from_msg, target_lane_blocked)
 from openpilot.selfdrive.turnpilot.route_follower import LEFT, NOMINAL_ANGLE_DEG, RIGHT, Maneuver, classify
 from openpilot.selfdrive.turnpilot.tests.synthetic import car_state, model_v2, road, scene
@@ -137,3 +137,36 @@ def test_no_request_below_lane_change_speed():
   drive = Drive(lanes_left=0, lanes_right=2, v=7.)
   drive.run(maneuver("turn", "right", TWO_LANES_RIGHT_TURN), 200., 10.)
   assert not drive.requests
+
+
+LaneMismatch = custom.TurnpilotPlan.LaneMismatch
+LEFT_ONLY_AND_THROUGH = ((("left",), False), (("straight",), True), (("straight", "right"), True))
+
+
+def test_turn_only_lane_where_the_route_goes_straight():
+  # three lanes at an intersection the route goes straight through, 40 m ahead at 10 m/s (the planner changes no lane
+  # closer than 60 m): in the left-turn-only lane it is flagged, in the through lanes not
+  in_left = model_lanes(*road(0, 2))
+  assert lane_mismatch(None, 500., LEFT_ONLY_AND_THROUGH, 40., in_left, 10.) == LaneMismatch.turnOnlyGoingStraight
+  for lanes in (model_lanes(*road(1, 1)), model_lanes(*road(2, 0))):
+    assert lane_mismatch(None, 500., LEFT_ONLY_AND_THROUGH, 40., lanes, 10.) == LaneMismatch.none
+  # further out the lane planner still has time; past it, nothing; a turn before it comes first
+  assert lane_mismatch(None, 500., LEFT_ONLY_AND_THROUGH, 100., in_left, 10.) == LaneMismatch.none
+  assert lane_mismatch(None, 500., LEFT_ONLY_AND_THROUGH, -5., in_left, 10.) == LaneMismatch.none
+  assert lane_mismatch(maneuver("turn", "left", THREE_LANES_LEFT_TURN), 20., LEFT_ONLY_AND_THROUGH, 40., in_left, 10.) == \
+         LaneMismatch.none
+  # without the model reading the ego lane's lines the lane count means nothing
+  unsure = model_lanes(*road(0, 2, line_prob=0.3))
+  assert lane_mismatch(None, 500., LEFT_ONLY_AND_THROUGH, 40., unsure, 10.) == LaneMismatch.none
+
+
+def test_wrong_lane_for_the_turn():
+  # the route turns left from the left-turn lane; the car is still in a through lane 40 m out
+  left_turn = maneuver("turn", "left", THREE_LANES_LEFT_TURN)
+  assert lane_mismatch(left_turn, 40., (), 0., model_lanes(*road(1, 1)), 10.) == LaneMismatch.wrongLaneForTurn
+  assert lane_mismatch(left_turn, 40., (), 0., model_lanes(*road(0, 2)), 10.) == LaneMismatch.none
+  assert lane_mismatch(left_turn, 150., (), 0., model_lanes(*road(1, 1)), 10.) == LaneMismatch.none  # the planner's turn
+  # a right from a lane marked straight-and-right is fine
+  right_turn = maneuver("turn", "right", ((("straight",), False), (("straight", "right"), False)))
+  assert lane_mismatch(right_turn, 40., (), 0., model_lanes(*road(1, 0)), 10.) == LaneMismatch.none
+  assert lane_mismatch(right_turn, 40., (), 0., model_lanes(*road(0, 1)), 10.) == LaneMismatch.wrongLaneForTurn

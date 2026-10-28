@@ -5,6 +5,7 @@ from openpilot.selfdrive.turnpilot.desire_timing import (CLEAR_FRAMES, CLEAR_MAR
                                                          DesireTiming, keep_lead)
 from openpilot.selfdrive.turnpilot.hooks import CLEAR_DESIRE
 from openpilot.selfdrive.turnpilot.route_follower import RouteFollower, maneuver_from_instruction
+from openpilot.selfdrive.turnpilot.turn_skip import TurnSkip
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, nav_instruction
 
 Desire = log.Desire
@@ -13,7 +14,7 @@ Desire = log.Desire
 def drive(maneuvers, v=8., seconds=40., lines=(True, True), turns_at=8., speed_profile=None, noise=None, steer_sign=1.):
   """Drive along a route; the car steers into a turn once it is turns_at m from it (None: never turns).
   noise(i) m is added to the position navd sees on frame i. Returns [(s, distance, desire)] per frame."""
-  navd, rf, dt_ = FakeNavd(maneuvers), RouteFollower(), DesireTiming()
+  navd, rf, dt_, skip = FakeNavd(maneuvers), RouteFollower(), DesireTiming(), TurnSkip()
   s, out = 0., []
   for i in range(int(seconds / DT_MDL)):
     v_now = speed_profile(i * DT_MDL) if speed_profile else v
@@ -22,7 +23,10 @@ def drive(maneuvers, v=8., seconds=40., lines=(True, True), turns_at=8., speed_p
     steer, yaw = 0., 0.
     if turns_at is not None and rf.upcoming is not None and rf.distance < turns_at:
       steer, yaw = 90. * steer_sign, v_now / 8. * steer_sign  # an 8 m radius
-    desire = dt_.update(rf.upcoming, rf.distance, rf.maneuver_id, rf.passed, v_now, steer, *lines, DT_MDL, yaw)
+    # as turnpilotd: a turn the car is too fast for is skipped, and no pulse starts while it can't make it
+    state = skip.update(rf.upcoming, rf.distance, rf.maneuver_id, v_now, dt_.maneuver_id == rf.maneuver_id and dt_.started)
+    desire = dt_.update(None if state.skipped else rf.upcoming, rf.distance, rf.maneuver_id, rf.passed, v_now, steer, *lines,
+                        DT_MDL, yaw, may_start=state.feasible_now)
     out.append((s, rf.distance, desire))
     s += v_now * DT_MDL
   return out
@@ -38,15 +42,17 @@ def rising_edges(trace, desire):
 
 
 def test_left_turn_desire_from_the_lead():
-  trace = drive([(200., "turn", "left"), (900., "turn", "right")], v=12.)
+  # at 5.5 m/s, about what the turn cap leaves the car at by then (at 9 m/s the entry pulse waits: turn_skip.py)
+  v = 5.5
+  trace = drive([(200., "turn", "left"), (900., "turn", "right")], v=v)
   edges = rising_edges(trace, Desire.turnLeft)
-  assert len(edges) == 2 and 0. < edges[1][1] < ENTRY_M  # the pulse at the lead, and the one for the turn itself
+  assert len(edges) == 3 and 0. < edges[-1][1] < ENTRY_M  # the pulse at the lead, a repeat, and one for the turn itself
   s, d = edges[0]
-  assert TURN_DESIRE_LEAD_M - 12. * DT_MDL - 1. < d < TURN_DESIRE_LEAD_M  # within a frame of the lead, dead-reckoned
+  assert TURN_DESIRE_LEAD_M - v * DT_MDL - 1. < d < TURN_DESIRE_LEAD_M  # within a frame of the lead, dead-reckoned
   assert all(desire == Desire.none for s, d, desire in trace if s < 200. - TURN_DESIRE_LEAD_M - 1.)
-  # held into the junction (the car turns 8 m out, at 86 deg/s), cleared once it has turned 80 degrees
+  # held into the junction (the car turns 8 m out, at 64 deg/s), cleared once it has turned 80 degrees
   held = [desire for s, d, desire in trace if 200. - TURN_DESIRE_LEAD_M + 1. < s < 202.]
-  assert held.count(Desire.turnLeft) == len(held) - PULSE_GAP_FRAMES  # but for the drop before the entry pulse
+  assert held.count(Desire.turnLeft) == len(held) - 2 * PULSE_GAP_FRAMES  # but for the drops before the repeat pulses
   assert [desire for s, d, desire in trace if 202. < s < 210.].count(CLEAR_DESIRE) == CLEAR_FRAMES
   assert all(desire != Desire.turnLeft for s, d, desire in trace if s > 230.)
   assert not rising_edges(trace, Desire.turnRight)  # the next turn, 700 m on, isn't reached
@@ -78,6 +84,22 @@ def test_slight_right_exit_sends_keep_right():
   assert len(edges) == 1
   assert keep_lead(v) - v * 1.1 < edges[0][1] <= keep_lead(v)
   assert not rising_edges(trace, Desire.turnRight)
+
+
+def test_no_turn_pulse_at_road_speed():
+  # 12 m/s to 25 m out, then 8: too fast for the left at its lead, so the turn is skipped, and no pulse goes even once the
+  # car has slowed (turn_skip.py; the old fixed 10 m/s gate waited and pulsed 25 m out)
+  def slower(t):
+    return 12. if t < 175. / 12. else 8.
+  assert not rising_edges(drive([(200., "turn", "left"), (900., "turn", "right")], seconds=30., speed_profile=slower),
+                          Desire.turnLeft)
+  # a pulse already out is held when the car speeds up, rather than dropped and sent again
+  def faster(t):
+    return 8. if t < 165. / 8. else 12.
+  trace = drive([(200., "turn", "left"), (900., "turn", "right")], seconds=30., speed_profile=faster, turns_at=None)
+  assert len(rising_edges(trace, Desire.turnLeft)) == 1
+  assert all(desire == Desire.turnLeft for s, d, desire in trace if 166. < s < 200.)
+  # a keep goes at any speed: test_slight_right_exit_sends_keep_right drives at 25 m/s
 
 
 def test_keep_suppressed_without_lane_line_on_that_side():
@@ -184,3 +206,107 @@ def test_next_turn_pulse_cancels_a_pending_clear():
                                       (20. / 17.2, 1, LEFT_TURN, 0., 4., 0.3, False),
                                       (3., 2, RIGHT_TURN, 30., 4., 0.3, True)])
   assert CLEAR_DESIRE not in out and Desire.turnRight in out
+
+
+def engage_through(dt_, legs, dt=DT_MDL):
+  """step_through with openpilot steering or not: legs of (seconds, maneuver, distance at the start, v, yaw rate, lat_active),
+  all one maneuver. Returns the desires."""
+  out = []
+  for seconds, maneuver, d0, v, yaw, lat_active in legs:
+    for k in range(int(round(seconds / dt))):
+      out.append(dt_.update(maneuver, d0 - v * k * dt, 1, False, v, 0., True, True, dt, yaw, lat_active=lat_active))
+  return out
+
+
+def pulses(out, desire):
+  return sum(cur == desire and prev != desire for prev, cur in zip([Desire.none] + out[:-1], out, strict=True))
+
+
+def test_no_desire_until_openpilot_steers():
+  # a slow approach with openpilot off from 40 m (longer than the timeout and every repeat), engaged 8 m out: one fresh
+  # pulse then, none before
+  out = engage_through(DesireTiming(), [(32. / 1.5, LEFT_TURN, 40., 1.5, 0., False), (2., LEFT_TURN, 8., 1.5, 0., True)])
+  i = int(round(32. / 1.5 / DT_MDL))
+  assert Desire.turnLeft not in out[:i] and CLEAR_DESIRE not in out
+  assert out[i] == Desire.turnLeft and pulses(out, Desire.turnLeft) == 1
+  # a keep the same way
+  out = engage_through(DesireTiming(), [(2., KEEP_LEFT, 20., 5., 0., False), (1., KEEP_LEFT, 10., 5., 0., True)])
+  assert Desire.keepLeft not in out[:40] and out[40] == Desire.keepLeft
+
+
+def test_disengaged_on_the_approach_pulses_again_when_engaged():
+  out = engage_through(DesireTiming(), [(1., LEFT_TURN, 40., 4., 0., True), (1., LEFT_TURN, 36., 4., 0., False),
+                                        (1., LEFT_TURN, 32., 4., 0., True)])
+  assert pulses(out, Desire.turnLeft) == 2 and out[20:40] == [Desire.none] * 20 and out[40] == Desire.turnLeft
+
+
+def test_no_pulse_on_engaging_in_the_turn():
+  # the driver took over 15 m out and turned the car 30 degrees by hand before engaging again: a pulse now would turn it
+  # on past the exit road
+  yaw = 0.3  # rad/s, 17 deg/s
+  out = engage_through(DesireTiming(), [(25. / 4., LEFT_TURN, 40., 4., 0., True), (30. / 17.2, LEFT_TURN, 15., 4., yaw, False),
+                                        (1., LEFT_TURN, 8., 4., yaw, True)])
+  assert pulses(out, Desire.turnLeft) == 2  # the one at the lead and a repeat on the REPULSE_S clock, both before the takeover
+  assert Desire.turnLeft not in out[int(round(25. / 4. / DT_MDL)):]
+
+
+def test_turn_desire_cleared_with_openpilot_off():
+  # pulsed with openpilot steering, then the driver took over and drove the turn: the clear still goes at 80 degrees
+  yaw = 0.5
+  out = engage_through(DesireTiming(), [(5., LEFT_TURN, 40., 4., 0., True), (3.5, LEFT_TURN, 20., 4., yaw, False)])
+  assert Desire.turnLeft in out and out.count(CLEAR_DESIRE) == CLEAR_FRAMES
+  i = out.index(CLEAR_DESIRE)
+  assert abs((i * DT_MDL - 5.) * yaw * 57.3 - (90. - CLEAR_MARGIN_DEG)) < 2.
+
+
+
+def drive_into_new_route(marked: bool, v=7.):
+  """A left at 300 m, pulsed from its lead; 25 m before it a new route arrives that starts with a left 284 m on, after
+  one invalid instruction from navd (marked) or none. Returns the switch point and [(s, distance, desire)] per frame."""
+  navd, rf, dt_ = FakeNavd([(300., "turn", "left"), (900., "turn", "right")]), RouteFollower(), DesireTiming()
+  s, switch, trace = 0., None, []
+  for _ in range(int(90. / DT_MDL)):
+    if switch is None and 300. - s < 25.:
+      switch, navd = s, FakeNavd([(s + 284., "turn", "left"), (s + 900., "turn", "right")])
+      instr, updated, valid = nav_instruction(0., valid=False), marked, False
+      navd.frame = int(marked)  # the new route's first instruction a second after the invalid one, or now
+    else:
+      instr = navd.update(s)
+      updated, valid = instr is not None, True
+    rf.update(instr, updated, valid, v, DT_MDL)
+    trace.append((s, rf.distance, dt_.update(rf.upcoming, rf.distance, rf.maneuver_id, rf.passed, v, 0., True, True, DT_MDL,
+                                             replaced=rf.replaced)))
+    s += v * DT_MDL
+  return switch, trace
+
+
+def test_new_route_clears_the_old_turn_at_once():
+  # the old pulse is cleared at once, and the next goes at the new left's lead, not at 284, 260 or 220 m
+  for marked in (False, True):
+    switch, trace = drive_into_new_route(marked)
+    assert any(desire == Desire.turnLeft for s, _, desire in trace if s < switch), marked
+    cleared = [s for s, _, desire in trace if desire == CLEAR_DESIRE]
+    assert len(cleared) == CLEAR_FRAMES and switch <= cleared[0] < switch + 2., marked
+    after = [(d, desire) for s, d, desire in trace if s > switch]
+    assert all(desire != Desire.turnLeft for d, desire in after if d > TURN_DESIRE_LEAD_M), marked
+    assert any(desire == Desire.turnLeft for d, desire in after if d < TURN_DESIRE_LEAD_M), marked
+
+
+def test_navd_going_quiet_mid_turn_still_clears_the_desire():
+  # the pulse is out and the car is 20 degrees into the turn when navd stops publishing: the route is lost (no maneuver),
+  # but the turn's desire is still cleared once the car has turned CLEAR_MIN_DEG, not left in the model's queue
+  navd, rf, dt_ = FakeNavd([(100., "turn", "left"), (900., "turn", "right")]), RouteFollower(), DesireTiming()
+  s, v, out, quiet_at = 0., 4., [], None
+  for _ in range(int(40. / DT_MDL)):
+    instr = navd.update(s) if quiet_at is None else None
+    rf.update(instr, instr is not None, True, v, DT_MDL)
+    yaw = 0.25 if 100. - s < 8. else 0.  # 14 deg/s from 8 m out
+    if quiet_at is None and dt_.turned_deg >= 20.:
+      quiet_at = s
+    out.append((rf.valid, dt_.update(rf.upcoming, rf.distance, rf.maneuver_id, rf.passed, v, 0., True, True, DT_MDL, yaw,
+                                     replaced=rf.replaced)))
+    s += v * DT_MDL
+  assert quiet_at is not None and Desire.turnLeft in [d for _, d in out]
+  assert [d for _, d in out].count(CLEAR_DESIRE) == CLEAR_FRAMES
+  first_clear = [d for _, d in out].index(CLEAR_DESIRE)
+  assert not out[first_clear][0]  # after the route was lost

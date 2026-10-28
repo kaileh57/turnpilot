@@ -1,0 +1,126 @@
+"""turnpilotd as a process: when the manager runs it, and its loop living through exceptions, since a dead process
+soft-disables openpilot for the rest of the drive."""
+from unittest import mock
+
+import pytest
+
+from opendbc.car.structs import car
+from openpilot.cereal import custom, messaging
+from openpilot.selfdrive.turnpilot import turnpilotd
+from openpilot.selfdrive.turnpilot.tests.synthetic import car_control, car_state, model_v2, nav_instruction
+from openpilot.system.manager.process_config import managed_processes
+
+State = custom.TurnpilotPlan.State
+
+
+class FakeParams(dict):
+  def get(self, key):
+    return super().get(key)
+
+  def get_bool(self, key):
+    return bool(super().get(key, False))
+
+
+def car_params_bytes(long_control=True):
+  return car.CarParams.new_message(openpilotLongitudinalControl=long_control).to_bytes()
+
+
+@pytest.mark.parametrize("started", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_runs_onroad_only_with_turnpilot_enabled(started, enabled):
+  params = FakeParams(TurnPilotEnabled=enabled)
+  assert managed_processes['turnpilotd'].should_run(started, params, car.CarParams.new_message()) == (started and enabled)
+
+
+def test_unreadable_car_params_fail_safe():
+  params = FakeParams(CarParams=b"not capnp")
+  assert not turnpilotd.long_control_for(params)
+  assert turnpilotd.driver_signals_for(params)
+
+
+def test_error_log_is_throttled():
+  log = turnpilotd.ErrorLog()
+  with mock.patch.object(turnpilotd.cloudlog, 'exception') as exception, mock.patch.object(turnpilotd.time, 'monotonic') as now:
+    for t in (100., 101., 100. + turnpilotd.ERROR_LOG_PERIOD_S):
+      now.return_value = t
+      log("a")
+    log("b")
+  assert [c.args[0] for c in exception.call_args_list] == ["a", "a", "b"]
+
+
+class Stop(BaseException):
+  """Ends the loop from Ratekeeper.keep_time; a BaseException, so the loop's own guards don't take it."""
+
+
+class LoopSM:
+  """What turnpilotd's main loop reads from its SubMaster. modelV2 raises for the first frames, and the input checks
+  pass on the frames checks(frame) says."""
+  def __init__(self, failing_frames, checks):
+    self.data = {'carState': car_state(10.), 'carControl': car_control(), 'modelV2': model_v2(),
+                 'navInstruction': nav_instruction(0., valid=False)}
+    for service in ('deviceState', 'narrowRoadCameraState', 'extrinsicsCalibration'):
+      self.data[service] = getattr(messaging.new_message(service).as_reader(), service)
+    self.updated = dict.fromkeys(self.data, False)
+    self.valid = dict.fromkeys(self.data, True)
+    self.seen = {'deviceState': True, 'narrowRoadCameraState': True, 'turnpilotDetections': False}
+    self.frame, self.failing_frames, self.checks = -1, failing_frames, checks
+
+  def update(self, timeout):
+    self.frame += 1
+
+  def __getitem__(self, s):
+    if s == 'modelV2' and self.frame < self.failing_frames:
+      raise RuntimeError("synthetic failure")
+    return self.data.get(s)
+
+  def all_checks(self, services):
+    return self.checks(self.frame)
+
+
+def run_main(frames, failing_frames=0, tracker=None, checks=lambda frame: True):
+  sent, sm = [], LoopSM(failing_frames, checks)
+  pm = mock.MagicMock()
+  pm.send.side_effect = lambda s, msg: sent.append((s, msg.as_reader()))
+  rk = mock.MagicMock()
+  rk.keep_time.side_effect = [None] * (frames - 1) + [Stop()]
+  params = FakeParams(TurnPilotEnabled=True, CarParams=car_params_bytes())
+  with mock.patch.object(messaging, 'SubMaster', return_value=sm), mock.patch.object(messaging, 'PubMaster', return_value=pm), \
+       mock.patch.object(turnpilotd, 'Params', return_value=params), mock.patch.object(turnpilotd, 'Ratekeeper', return_value=rk), \
+       mock.patch.object(turnpilotd, 'SceneTracker', return_value=tracker or mock.MagicMock()), \
+       mock.patch.object(turnpilotd, 'DEVICE_CAMERAS', mock.MagicMock()), \
+       mock.patch.object(turnpilotd, 'log_error') as log_error, pytest.raises(Stop):
+    turnpilotd.main()
+  plans = [msg for s, msg in sent if s == 'turnpilotPlan']
+  scenes = [msg.turnpilotScene for s, msg in sent if s == 'turnpilotScene']
+  return plans, scenes, [c.args[0] for c in log_error.call_args_list]
+
+
+def test_plan_failure_publishes_a_disabled_plan_and_goes_on():
+  plans, scenes, errors = run_main(frames=10, failing_frames=4)
+  assert len(plans) == len(scenes) == 10
+  plans = [p.turnpilotPlan for p in plans]
+  assert all(p.state == State.disabled and p.reason == turnpilotd.ERROR_REASON and p.desire == 0 for p in plans[:4])
+  assert all(p.fault == custom.TurnpilotPlan.Fault.error for p in plans[:4])  # selfdrived shows turnpilotUnavailable
+  assert all(p.state == State.noRoute and p.fault == custom.TurnpilotPlan.Fault.none for p in plans[4:])
+  assert errors == ["turnpilotd.scene_failed", "turnpilotd.plan_failed"] * 4  # the tracker reads modelV2 too
+
+
+def test_scene_failure_publishes_an_empty_scene_and_goes_on():
+  tracker = mock.MagicMock()
+  tracker.update.side_effect = RuntimeError("synthetic failure")
+  plans, scenes, errors = run_main(frames=5, failing_frames=0, tracker=tracker)
+  assert len(plans) == len(scenes) == 5
+  assert not any(s.available for s in scenes) and all(p.turnpilotPlan.state == State.noRoute for p in plans)
+  assert errors == ["turnpilotd.scene_failed"] * 5
+
+
+def test_a_bad_input_frame_keeps_the_plan_valid():
+  # a plan invalid for one frame would drop its desire for that frame, and modeld would take it coming back as a pulse
+  plans, _, _ = run_main(frames=40, checks=lambda frame: frame != 20)
+  assert all(p.valid for p in plans)
+  # inputs failing for 15 frames: invalid from the PLAN_INPUT_GRACE_FRAMES-th, valid again once they pass
+  plans, _, _ = run_main(frames=40, checks=lambda frame: not 10 <= frame < 25)
+  assert [i for i, p in enumerate(plans) if not p.valid] == list(range(10 + turnpilotd.PLAN_INPUT_GRACE_FRAMES - 1, 25))
+  # and invalid from the start until the inputs first pass
+  plans, _, _ = run_main(frames=5, checks=lambda frame: frame >= 3)
+  assert [p.valid for p in plans] == [False, False, False, True, True]

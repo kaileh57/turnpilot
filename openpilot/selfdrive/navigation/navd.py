@@ -18,6 +18,7 @@ MANEUVER_TRANSITION_THRESHOLD = 10
 REROUTE_COUNTER_MIN = 3
 ROUTE_RESEND_PERIOD = 10  # updates (seconds); a restarted mapsd gets the route within this
 RECOMPUTE_HOLD = 10  # updates (seconds) between route requests
+SKIP_MATCH_M = 50.  # TurnPilot: a skipped turn is this step's maneuver if turnpilotd's distance to it is this close to navd's
 
 
 def set_banner(instruction, banners, distance_to_maneuver):
@@ -47,9 +48,12 @@ class RouteEngine:
     self.step_idx = None
     self.route = None
     self.route_geometry = None  # an (n, 2) array of (longitude, latitude) per step
+    self.route_count = 0  # TurnPilot: routes calculated, so a replaced route is told apart from the one it replaces
 
     self.recompute_hold = 0
     self.reroute_counter = 0
+    self.maneuver_distance = None  # TurnPilot: m to the current step's maneuver, as last sent
+    self.skipped = None  # TurnPilot: (route_count, step_idx) of a turn turnpilotd skipped (too fast): reroute once past it
 
     # TurnPilot: routes come from TurnPilot's map server (or local tiles), never Mapbox; see turnpilot/routing/sources.py
     self.router = router if router is not None else MapRouter(self.params)
@@ -61,15 +65,36 @@ class RouteEngine:
     if source is not None:
       gps = self.sm[source]
       self.last_position, self.last_bearing = (gps.longitude, gps.latitude), gps.bearingDeg
-    route = self.route
+    self.note_skip()
+    route, route_count = self.route, self.route_count
     try:
       self.recompute_route(gps_ok=source is not None)
-      self.send_instruction()
+      if route is not None and self.route is not None and self.route_count != route_count:
+        # TurnPilot: one invalid instruction between two routes, so no maneuver (and its turn desire) carries over to
+        # a new route that starts with one of the same type
+        self.pm.send('navInstruction', messaging.new_message('navInstruction', valid=False))
+      else:
+        self.send_instruction()
     except Exception:
       cloudlog.exception("navd.failed_to_compute")
     # mapsd dedupes repeats, so a periodic resend is how a restarted mapsd gets the route
     if self.route is not route or self.sm.frame % ROUTE_RESEND_PERIOD == 0:
       self.send_route()
+
+  def note_skip(self):
+    """TurnPilot: turnpilotd skipped the turn ahead (too fast to make it; turnpilot/turn_skip.py). navd doesn't move on
+    to the turn's step once past the junction, it reroutes from there at once (should_recompute)."""
+    if 'turnpilotPlan' not in self.sm.data or not self.sm.updated['turnpilotPlan'] or not self.sm.valid['turnpilotPlan']:
+      return
+    plan = self.sm['turnpilotPlan']
+    if not plan.tooFastToTurn or self.step_idx is None or self.maneuver_distance is None:
+      return
+    if abs(plan.maneuverDistance - self.maneuver_distance) < SKIP_MATCH_M and self.skipped != (self.route_count, self.step_idx):
+      self.skipped = (self.route_count, self.step_idx)
+      cloudlog.event("navd.turn_skipped", step_idx=self.step_idx, maneuver_distance=round(self.maneuver_distance, 1))
+
+  def skip_here(self) -> bool:
+    return self.skipped == (self.route_count, self.step_idx)
 
   def recompute_route(self, gps_ok: bool):
     if self.last_position is None:
@@ -88,7 +113,8 @@ class RouteEngine:
       return
 
     self.recompute_hold -= 1
-    if (self.should_recompute() or new_destination != self.nav_destination) and self.recompute_hold <= 0:
+    skipped_past = self.skipped_turn_passed()  # TurnPilot: a reroute past a skipped turn waits for nothing
+    if skipped_past or ((self.should_recompute() or new_destination != self.nav_destination) and self.recompute_hold <= 0):
       self.recompute_hold = RECOMPUTE_HOLD
       self.calculate_route(new_destination)
       self.reroute_counter = 0
@@ -102,11 +128,13 @@ class RouteEngine:
     if lang is not None:
       lang = lang.replace('main_', '')
 
+    self.skipped = None
     try:
       # TurnPilot: the router checks the geofence, downloads the drive's map and routes on it; any failure raises a
       # MapError that it has already put in TurnPilotMapStatus for the web app and the UI, and there is no route
       steps = self.router.route(self.last_position, destination, self.last_bearing, lang)
       self.route = steps
+      self.route_count += 1
       self.route_geometry = [np.array(step['geometry']['coordinates'], dtype=np.float64).reshape((-1, 2)) for step in self.route]
       self.step_idx = 0
     except MapError:
@@ -150,6 +178,7 @@ class RouteEngine:
       banner_step = self.route[max(self.step_idx - 1, 0)]
 
     # Current instruction
+    self.maneuver_distance = distance_to_maneuver_along_geometry
     msg.navInstruction.maneuverDistance = distance_to_maneuver_along_geometry
     set_banner(msg.navInstruction, banner_step['bannerInstructions'], distance_to_maneuver_along_geometry)
     fill_guidance(msg.navInstruction, self.route, self.step_idx, distance_to_maneuver_along_geometry)
@@ -164,7 +193,9 @@ class RouteEngine:
 
     # Transition to next route segment
     if distance_to_maneuver_along_geometry < -MANEUVER_TRANSITION_THRESHOLD:
-      if self.step_idx + 1 < len(self.route):
+      if self.skip_here():
+        pass  # TurnPilot: past a skipped turn the car is off route; the next update reroutes, the turn's step never starts
+      elif self.step_idx + 1 < len(self.route):
         self.step_idx += 1
         self.recompute_hold = 0
       else:
@@ -187,6 +218,14 @@ class RouteEngine:
     self.step_idx = None
     self.nav_destination = None
 
+  def skipped_turn_passed(self) -> bool:
+    """TurnPilot: the car is past the junction of a turn turnpilotd skipped."""
+    if not self.skip_here() or self.step_idx is None or self.last_position is None:
+      return False
+    assert self.route is not None and self.route_geometry is not None
+    along, _ = along_path(self.route_geometry[self.step_idx], self.last_position)
+    return self.route[self.step_idx]['distance'] - along < -MANEUVER_TRANSITION_THRESHOLD
+
   def should_recompute(self):
     if self.step_idx is None:
       return True
@@ -206,7 +245,9 @@ class RouteEngine:
 
 def main():
   pm = messaging.PubMaster(['navInstruction', 'navRoute'])
-  sm = messaging.SubMaster(['gpsLocation', 'gpsLocationExternal'])
+  # TurnPilot: turnpilotPlan says when a turn was skipped (too fast), so navd reroutes past it at once
+  sm = messaging.SubMaster(['gpsLocation', 'gpsLocationExternal', 'turnpilotPlan'], ignore_alive=['turnpilotPlan'],
+                           ignore_avg_freq=['turnpilotPlan'], ignore_valid=['turnpilotPlan'])
 
   rk = Ratekeeper(1.0)
   route_engine = RouteEngine(sm, pm)

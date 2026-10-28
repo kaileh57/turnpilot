@@ -17,7 +17,7 @@ import requests
 import openpilot.cereal.messaging as messaging
 from openpilot.common.prefix import OpenpilotPrefix
 from openpilot.selfdrive.navigation.mapsd import MapsD
-from openpilot.selfdrive.navigation.navd import REROUTE_COUNTER_MIN, ROUTE_RESEND_PERIOD, RouteEngine, set_banner
+from openpilot.selfdrive.navigation.navd import RECOMPUTE_HOLD, REROUTE_COUNTER_MIN, ROUTE_RESEND_PERIOD, RouteEngine, set_banner
 from openpilot.selfdrive.navigation.pmtiles import PMTiles, decode_directory, tile_id
 from openpilot.selfdrive.navigation.renderer import MAJOR, MEDIUM, MINOR, SIZE, STREET, TRACK, MapRenderer, draw_segments, mercator, project, stroke_widths
 from openpilot.selfdrive.navigation.route import RouteTracker
@@ -328,6 +328,73 @@ class TestRouteEngine(unittest.TestCase):
     self.sm.frame = ROUTE_RESEND_PERIOD  # and again periodically, for a mapsd that started after it
     self.engine.update()
     self.assertEqual(sent(), 2)
+
+  def skip_route(self):
+    """A right turn 111 m ahead, onto a road north; the plan turnpilotd publishes, skipping it or not."""
+    distance = 111.195
+    self.response = [
+      {'geometry': {'coordinates': [[0, 0], [0.0005, 0], [0.001, 0]]}, 'distance': distance, 'duration': 10,
+       'bannerInstructions': [{'distanceAlongGeometry': 100, 'primary': {'text': 'Turn left', 'type': 'turn', 'modifier': 'left'}}]},
+      {'geometry': {'coordinates': [[0.001, 0], [0.001, 0.001]]}, 'distance': distance, 'duration': 10, 'bannerInstructions': []},
+    ]
+    self.load_route()
+    msg = messaging.new_message('turnpilotPlan')
+    self.plan = msg.turnpilotPlan
+    gps = self.sm.__getitem__.return_value
+    self.sm.data = {'turnpilotPlan': None}
+    self.sm.updated = {'turnpilotPlan': True}
+    self.sm.valid['turnpilotPlan'] = True
+    self.sm.__getitem__.side_effect = lambda s: self.plan if s == 'turnpilotPlan' else gps
+
+  def drive_past_junction(self, too_fast, plan_distance=55.):
+    """The car 55 m before the turn, turnpilotd's plan seen, then straight on past the junction. Returns the router."""
+    self.skip_route()
+    self.engine.last_position = (0.0005, 0)
+    self.engine.send_instruction()
+    self.plan.tooFastToTurn, self.plan.maneuverDistance = too_fast, plan_distance
+    self.engine.note_skip()
+    with serving(self.engine, self.response) as router:
+      self.engine.recompute_hold = RECOMPUTE_HOLD  # just routed: a reroute would normally wait
+      self.engine.last_position = (0.00105, 0)  # 5.6 m past the junction: not yet
+      self.engine.recompute_route(gps_ok=True)
+      self.engine.send_instruction()
+      self.assertEqual(router.call_count, 0)
+      self.engine.last_position = (0.00115, 0)  # 16.7 m past it, straight on
+      self.engine.recompute_route(gps_ok=True)
+      self.engine.send_instruction()
+    return router
+
+  def test_reroute_at_once_past_a_skipped_turn(self):
+    # TurnPilot: too fast to turn, the turn was skipped; past the junction navd reroutes at once, ignoring the hold and
+    # the off-route counter, and never starts the turn's step
+    router = self.drive_past_junction(too_fast=True)
+    self.assertEqual(router.call_count, 1)
+    self.assertEqual(router.calls[0][0], (0.00115, 0))
+    self.assertEqual(self.engine.route_count, 2)
+    self.assertIsNone(self.engine.skipped)
+
+  def test_no_skip_moves_on_as_before(self):
+    router = self.drive_past_junction(too_fast=False)
+    self.assertEqual(router.call_count, 0)
+    self.assertEqual(self.engine.step_idx, 1)
+
+  def test_skip_for_another_maneuver_is_ignored(self):
+    # turnpilotd's flag still on the previous maneuver, 300 m off what navd has: not this step's turn
+    router = self.drive_past_junction(too_fast=True, plan_distance=355.)
+    self.assertEqual(router.call_count, 0)
+    self.assertIsNone(self.engine.skipped)
+
+  def test_new_route_is_marked_by_an_invalid_instruction(self):
+    # TurnPilot: a new route can start with a maneuver like the old one's, so one invalid instruction goes between them
+    valid = lambda: [call.args[1].valid for call in self.pm.send.call_args_list if call.args[0] == 'navInstruction']  # noqa: E731
+    self.sm.frame = 1
+    with serving(self.engine, self.response):
+      self.engine.update()
+      self.values['NavDestination'] = {'latitude': 0, 'longitude': 0.003}
+      self.engine.recompute_hold = 0
+      self.engine.update()
+      self.engine.update()
+    self.assertEqual(valid(), [True, False, True])
 
   def test_maneuvers_and_rerouting(self):
     self.load_route()

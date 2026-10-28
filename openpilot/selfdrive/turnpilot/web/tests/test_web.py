@@ -188,6 +188,21 @@ class TestHandlerDefaults(OpenpilotTestCase):
     assert server.Handler.timeout == server.REQUEST_TIMEOUT and 0 < server.REQUEST_TIMEOUT <= 30
 
 
+class TestMain(OpenpilotTestCase):
+  def test_a_taken_port_is_retried(self):
+    # the manager doesn't restart a dead process, so a failed bind must not end it
+    failures, served = [OSError(48, "Address already in use")], []
+
+    def make_server(address, handler):
+      if failures:
+        raise failures.pop()
+      return mock.Mock(serve_forever=lambda: served.append(address))
+    with mock.patch.object(server, "Server", side_effect=make_server), mock.patch.object(server, "StatusReader"), \
+         mock.patch.object(server.time, "sleep") as sleep:
+      server.main()
+    assert served == [("", pairing.PORT)] and sleep.call_count == 1
+
+
 class TestConnections(WebTestCase):
   """Sockets that stall or lie about their length must not hold a handler thread for good."""
   HANDLER_TIMEOUT = 0.4
@@ -220,6 +235,46 @@ class TestConnections(WebTestCase):
 
   def test_a_request_inside_the_timeout_still_works(self):
     assert self.call("POST", "/api/destination", {"latitude": 1, "longitude": 2})[0] == 200
+
+
+class FakeSocket:
+  def __init__(self, local_ip):
+    self.local_ip = local_ip
+
+  def getsockname(self):
+    return (self.local_ip, pairing.PORT)
+
+
+class TestReach(WebTestCase):
+  """Plain HTTP on every interface: served on the hotspot and loopback, not on the LTE modem's address."""
+  HANDLER_TIMEOUT = 3.
+
+  def test_private_addresses(self):
+    for ip in ("127.0.0.1", "::1", "172.20.10.2", "192.168.1.20", "10.0.0.5", "169.254.10.1"):
+      assert server.private_address(ip), ip
+    for ip in ("100.64.12.1", "8.8.8.8", "2607:f8b0::1", "", "not an address"):
+      assert not server.private_address(ip), ip
+
+  def test_only_private_local_and_peer_addresses_are_served(self):
+    for local, peer, ok in (("172.20.10.3", "172.20.10.1", True), ("127.0.0.1", "127.0.0.1", True),
+                            ("100.64.12.1", "1.1.1.1", False), ("8.8.4.4", "1.1.1.1", False),
+                            ("172.20.10.3", "1.1.1.1", False)):
+      sock = FakeSocket(local)
+      assert self.httpd.verify_request(sock, (peer, 50000)) == ok, (local, peer)
+      self.httpd.connections.discard(sock)
+
+  def test_connections_are_capped(self):
+    with mock.patch.object(server, "MAX_CONNECTIONS", 2):
+      idle = [socket.create_connection(("127.0.0.1", self.port), timeout=5) for _ in range(2)]
+      with socket.create_connection(("127.0.0.1", self.port), timeout=2) as third:
+        assert third.recv(1) == b""  # closed unanswered at once, not after the handler timeout
+      for sock in idle:
+        sock.close()
+      for _ in range(50):  # the idle sockets' handlers see them close
+        if not self.httpd.connections:
+          break
+        time.sleep(0.05)
+      assert self.call("GET", "/api/status")[0] == 200
 
 
 class TestDestination(WebTestCase):

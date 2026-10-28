@@ -5,7 +5,17 @@ before it, and the first intersection of the step that starts with it. Valhalla 
 the last 400 m of the step, while the intersection has the lanes all along, so the banner comes first (it is
 what Mapbox shows) and the intersection fills in the rest. A lane is active if it can be used for the maneuver,
 and activeDirection is the direction it takes from there.
+
+The junction of the maneuver is the first intersection of the step that starts with it, as Valhalla gives it
+(format=osrm): the bearings of every road there, which one the route comes in by ('in') and leaves by ('out'), and
+the maneuver's bearing_before and bearing_after. TurnPilot takes a maneuver as a junction turn only where some other
+road meets it (turnpilot/route_follower.py), and its angle from the two bearings.
+Within a step the route goes straight through intersections without a maneuver; the next one with a lane list is sent
+as throughLanes, so a car in a turn-only lane there is flagged.
 """
+import numpy as np
+
+from openpilot.selfdrive.navigation.route import along_path
 
 MAX_MANEUVERS = 10  # allManeuvers is for the planner's lookahead; a long route would otherwise send every step each second
 
@@ -51,6 +61,45 @@ def approach_lanes(steps, step_idx, distance_to_maneuver) -> list[dict]:
   return lanes
 
 
+def maneuver_junction(steps, step_idx) -> dict | None:
+  """{'before', 'after' (deg), 'branches'} for the junction of the maneuver that ends step step_idx, or None when the
+  route has no intersection data for it (or there is no next step). branches counts every other road at the node,
+  one-way roads coming in included: the model doesn't know a road is one-way, and could follow it."""
+  if step_idx + 1 >= len(steps):
+    return None
+  step = steps[step_idx + 1]
+  maneuver = step.get('maneuver') or {}
+  intersections = step.get('intersections') or []
+  if not intersections or maneuver.get('bearing_before') is None or maneuver.get('bearing_after') is None:
+    return None
+  first = intersections[0]
+  bearings, out = first.get('bearings'), first.get('out')
+  if not bearings or out is None:
+    return None
+  branches = sum(1 for i in range(len(bearings)) if i not in (first.get('in'), out))
+  return {'before': float(maneuver['bearing_before']), 'after': float(maneuver['bearing_after']), 'branches': branches}
+
+
+def through_lanes(steps, step_idx, distance_to_maneuver) -> tuple[list[dict], float]:
+  """(lanes, m to it) for the next intersection ahead on the current step with a lane list of two or more, which the
+  route goes straight through; ([], 0) if there is none before the maneuver."""
+  step = steps[step_idx]
+  coordinates = (step.get('geometry') or {}).get('coordinates') or []
+  if len(coordinates) < 2:
+    return [], 0.
+  path = np.array(coordinates, dtype=np.float64).reshape((-1, 2))
+  ego_along = step['distance'] - distance_to_maneuver
+  for intersection in (step.get('intersections') or [])[1:]:  # the first is the maneuver that starts the step
+    lanes = intersection.get('lanes') or []
+    if len(lanes) < 2 or not intersection.get('location'):
+      continue
+    along = along_path(path, intersection['location'])[0]
+    if along > ego_along:
+      return [make_lane(lane.get('indications'), lane.get('valid') or lane.get('active'), lane.get('valid_indication'))
+              for lane in lanes], along - ego_along
+  return [], 0.
+
+
 def upcoming_maneuvers(steps, step_idx, distance_to_maneuver) -> list[dict]:
   """The next MAX_MANEUVERS maneuvers ahead, with their distance from the ego: the one that ends the current step first."""
   maneuvers = []
@@ -66,3 +115,10 @@ def fill_guidance(instruction, steps, step_idx, distance_to_maneuver):
   """Fill NavInstruction.lanes and allManeuvers for the ego being distance_to_maneuver short of the end of the step."""
   instruction.lanes = approach_lanes(steps, step_idx, distance_to_maneuver)
   instruction.allManeuvers = upcoming_maneuvers(steps, step_idx, distance_to_maneuver)
+  junction = maneuver_junction(steps, step_idx)
+  instruction.maneuverGeometryValid = junction is not None
+  if junction is not None:
+    instruction.maneuverBearingBefore = junction['before']
+    instruction.maneuverBearingAfter = junction['after']
+    instruction.maneuverBranches = min(junction['branches'], 255)
+  instruction.throughLanes, instruction.throughLanesDistance = through_lanes(steps, step_idx, distance_to_maneuver)

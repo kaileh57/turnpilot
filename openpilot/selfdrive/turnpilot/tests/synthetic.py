@@ -5,8 +5,17 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 LANE_WIDTH = 3.6
 
 
-def nav_instruction(distance, mtype="turn", modifier="left", remaining=None, lanes=(), valid=True):
-  """A navInstruction reader. lanes: ((directions, active), ...) left to right."""
+def set_lanes(builder, field, lanes):
+  builder.init(field, len(lanes))
+  for lane, (directions, active) in zip(getattr(builder, field), lanes, strict=True):
+    lane.directions = list(directions)
+    lane.active = active
+
+
+def nav_instruction(distance, mtype="turn", modifier="left", remaining=None, lanes=(), valid=True, junction=None,
+                    through=None):
+  """A navInstruction reader. lanes: ((directions, active), ...) left to right. junction: (bearing_before,
+  bearing_after, branches) from Valhalla, or None for a route without intersection data. through: (lanes, distance)."""
   msg = messaging.new_message('navInstruction', valid=valid)
   ni = msg.navInstruction
   ni.maneuverDistance = float(distance)
@@ -14,19 +23,31 @@ def nav_instruction(distance, mtype="turn", modifier="left", remaining=None, lan
   ni.maneuverModifier = modifier
   ni.distanceRemaining = float(distance + 500. if remaining is None else remaining)
   if lanes:
-    ni.init('lanes', len(lanes))
-    for lane, (directions, active) in zip(ni.lanes, lanes, strict=True):
-      lane.directions = list(directions)
-      lane.active = active
+    set_lanes(ni, 'lanes', lanes)
+  if junction is not None:
+    ni.maneuverGeometryValid = True
+    ni.maneuverBearingBefore, ni.maneuverBearingAfter, ni.maneuverBranches = junction
+  if through is not None:
+    set_lanes(ni, 'throughLanes', through[0])
+    ni.throughLanesDistance = float(through[1])
   return msg.as_reader().navInstruction
 
 
+def junction_of(modifier, branches=2, angle=None):
+  """(bearing_before, bearing_after, branches) for a turn heading north: a right turns to 90, a left to 270 (or by angle)."""
+  side = -1 if 'left' in modifier else 1
+  return 0., (side * (angle if angle is not None else 90.)) % 360., branches
+
+
 class FakeNavd:
-  """navd's 1 Hz instruction stream for a car driving along a route of maneuvers [(s, type, modifier), ...]:
-  the distance to the end of the current step, which runs to -10 m before navd moves to the next step."""
-  def __init__(self, maneuvers, lanes=None, period=20):
-    self.maneuvers = sorted(maneuvers)
+  """navd's 1 Hz instruction stream for a car driving along a route of maneuvers [(s, type, modifier[, junction]), ...]:
+  the distance to the end of the current step, which runs to -10 m before navd moves to the next step. junction:
+  (bearing_before, bearing_after, branches), as nav_instruction takes it; without it the route has no junction data.
+  through: {step: (lanes, s)}, an intersection the route goes straight through at s with those lanes."""
+  def __init__(self, maneuvers, lanes=None, period=20, through=None):
+    self.maneuvers = sorted(maneuvers, key=lambda m: m[0])
     self.lanes = lanes or {}
+    self.through = through or {}
     self.period = period
     self.step = 0
     self.frame = 0
@@ -39,8 +60,13 @@ class FakeNavd:
     self.frame += 1
     if not due:
       return None
-    pos, mtype, modifier = self.maneuvers[self.step]
-    return nav_instruction(pos - s, mtype, modifier, remaining=self.maneuvers[-1][0] - s, lanes=self.lanes.get(self.step, ()))
+    pos, mtype, modifier = self.maneuvers[self.step][:3]
+    junction = self.maneuvers[self.step][3] if len(self.maneuvers[self.step]) > 3 else None
+    through = self.through.get(self.step)
+    if through is not None:
+      through = (through[0], through[1] - s) if through[1] > s else None
+    return nav_instruction(pos - s, mtype, modifier, remaining=self.maneuvers[-1][0] - s, lanes=self.lanes.get(self.step, ()),
+                           junction=junction, through=through)
 
 
 def road(lanes_left, lanes_right, line_prob=0.9, edge_std=0.3, lane_width=LANE_WIDTH, shoulder=0.5):
@@ -81,6 +107,12 @@ def car_state(v_ego=10., steering_angle_deg=0., left_blinker=False, right_blinke
   cs.leftBlinker = left_blinker
   cs.rightBlinker = right_blinker
   return msg.as_reader().carState
+
+
+def car_control(lat_active=True):
+  msg = messaging.new_message('carControl')
+  msg.carControl.latActive = lat_active
+  return msg.as_reader().carControl
 
 
 def scene(objects=(), available=True):

@@ -394,10 +394,10 @@ def main(demo=False):
 
     sm.update(0)
     desire = DH.desire
-    # TurnPilot: nav turn desires go in while DesireHelper is idle (a nav lane change goes through DesireHelper),
-    # and a finished turn's desire comes out of the model's desire queue
+    # TurnPilot: nav turn desires go in while DesireHelper is idle (a nav lane change goes through DesireHelper) and
+    # openpilot is steering, and a finished turn's desire comes out of the model's desire queue
     tp = active_plan(sm)
-    tp_desire, clear = plan_desire(tp.desire) if tp is not None else (log.Desire.none, False)
+    tp_desire, clear = plan_desire(tp.desire, sm['carControl'].latActive) if tp is not None else (log.Desire.none, False)
     if clear and not desire_cleared:
       try:
         model.clear_desire_history([log.Desire.turnLeft, log.Desire.turnRight])

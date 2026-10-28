@@ -1,15 +1,17 @@
 """turnpilotd closed loop: synthetic navd, model and scene around a point-mass car that follows the plan's limits."""
+from opendbc.car.structs import car
 from openpilot.cereal import custom, log
 from openpilot.common.realtime import DT_MDL
-from openpilot.selfdrive.turnpilot.hooks import plan_accel
+from openpilot.selfdrive.turnpilot.hooks import CLEAR_DESIRE, plan_accel
 from openpilot.selfdrive.turnpilot.lane_planner import lane_change_window
 from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP, ONCOMING_TTA_S, PED_STOP_GAP_M
-from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_state, model_v2, nav_instruction, scene
+from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_control, car_state, model_v2, nav_instruction, scene
 from openpilot.selfdrive.turnpilot.desire_timing import TURN_DESIRE_LEAD_M
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, V_TURN_MIN
-from openpilot.selfdrive.turnpilot.turnpilotd import TurnPilot
+from openpilot.selfdrive.turnpilot.turnpilotd import CAR_UNKNOWN_REASON, NO_LONG_REASON, TurnPilot, long_control_for
 
 State = custom.TurnpilotPlan.State
+Fault = custom.TurnpilotPlan.Fault
 LaneChange = custom.TurnpilotPlan.LaneChange
 Desire = log.Desire
 THREE_LANES_LEFT_TURN = ((("left",), True), (("straight",), False), (("straight", "right"), False))
@@ -17,7 +19,8 @@ THREE_LANES_LEFT_TURN = ((("left",), True), (("straight",), False), (("straight"
 
 class FakeSM:
   def __init__(self):
-    self.data = {'carState': car_state(0.), 'navInstruction': nav_instruction(0., valid=False), 'modelV2': model_v2()}
+    self.data = {'carState': car_state(0.), 'carControl': car_control(), 'navInstruction': nav_instruction(0., valid=False),
+                 'modelV2': model_v2()}
     self.updated = dict.fromkeys(self.data, False)
     self.valid = dict.fromkeys(self.data, True)
     self.alive = dict.fromkeys(self.data, True)
@@ -30,20 +33,22 @@ class FakeSM:
 
 
 class Sim:
-  def __init__(self, maneuvers, cruise=13., nav_lanes=None, model_lanes=(0, 0), shadow=False, driver_signals=False):
+  def __init__(self, maneuvers, cruise=13., nav_lanes=None, model_lanes=(0, 0), shadow=False, driver_signals=False, long_control=True):
     self.navd, self.tp, self.sm = FakeNavd(maneuvers, nav_lanes), TurnPilot(), FakeSM()
     self.s, self.v, self.cruise, self.t = 0., cruise, cruise, 0.
-    self.model_lanes, self.shadow, self.driver_signals = model_lanes, shadow, driver_signals
+    self.model_lanes, self.shadow, self.driver_signals, self.long_control = model_lanes, shadow, driver_signals, long_control
     self.trace = []
 
-  def step(self, objects=(), available=True, steer=0., blinker=False):
+  def step(self, objects=(), available=True, steer=0., blinker=False, lat_active=True):
     self.sm.updated = dict.fromkeys(self.sm.data, False)
     instr = self.navd.update(self.s)
     if instr is not None:
       self.sm.put('navInstruction', instr)
     self.sm.put('carState', car_state(self.v, steer, left_blinker=blinker))
+    self.sm.put('carControl', car_control(lat_active))
     self.sm.put('modelV2', model_v2(*self.model_lanes))
-    plan = self.tp.update(self.sm, scene(objects, available), True, self.shadow, self.driver_signals).as_reader().turnpilotPlan
+    plan = self.tp.plan(self.sm, scene(objects, available), True, self.shadow, self.driver_signals,
+                        long_control=self.long_control).as_reader().turnpilotPlan
     a = min(plan_accel(plan.accelCap, plan.speedCap, self.v), (self.cruise - self.v) / 2., 1.5)
     if plan.shouldStop:
       a = min(a, -1.)
@@ -82,6 +87,18 @@ def test_disabled_and_no_route():
   assert plan.state == State.noRoute and not plan.routeValid
 
 
+def test_nothing_without_openpilot_longitudinal():
+  # stock ACC holds the speed: the caps would do nothing, and a turn desire would go out at road speed
+  sim = Sim([(300., "turn", "left"), (1500., "turn", "right")], cruise=15., nav_lanes={0: THREE_LANES_LEFT_TURN},
+            model_lanes=(2, 0), long_control=False)
+  sim.run(30., turn_at=300.)
+  assert sim.s > 320.
+  for _, _, plan in sim.trace:
+    assert plan.state == State.disabled and plan.reason == NO_LONG_REASON and plan.fault == Fault.noLongitudinal
+    assert (plan.desire, plan.laneChange, plan.signalPrompt) == (Desire.none, LaneChange.none, LaneChange.none)
+    assert (plan.accelCap, plan.speedCap, plan.shouldStop) == (NO_ACCEL_CAP, NO_SPEED_CAP, False)
+
+
 def test_left_turn_drive():
   sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
   sim.run(45., turn_at=300.)
@@ -104,6 +121,40 @@ def test_consecutive_turns_drive():
   assert 1 <= len(rising(sim.trace, 'desire', Desire.turnRight)) <= 4
   assert 1 <= len(rising(sim.trace, 'desire', Desire.turnLeft)) <= 4
   assert sim.s > 440.
+
+
+def test_highway_bends_are_left_alone():
+  # "continue slight right" and "new name slight left" at 30 m/s: no keep desire, no braking
+  sim = Sim([(400., "continue", "slight right"), (900., "new name", "slight left"), (5000., "turn", "right")], cruise=30.)
+  sim.run(40.)
+  assert sim.s > 1000. and min(v for _, v, _ in sim.trace) > 29.9
+  assert all(plan.desire == Desire.none and plan.speedCap == NO_SPEED_CAP for _, _, plan in sim.trace)
+
+
+def test_turn_desire_waits_for_openpilot_to_steer():
+  # the driver engages 20 m before the left: no desire before, a fresh pulse then
+  sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
+  for _ in range(int(45. / DT_MDL)):
+    sim.step(lat_active=sim.s > 280.)
+  edges = rising(sim.trace, 'desire', Desire.turnLeft)
+  assert edges and 280. < edges[0] < 281.
+  assert all(plan.desire == Desire.none for s, _, plan in sim.trace if s < 280.)
+
+
+def test_destination_change_drops_the_old_turn():
+  # a new destination from the phone 25 m before a left, whose route starts with a left 284 m on: the old pulse is
+  # cleared at once, the car speeds up again, and the next pulse waits for the new left's lead
+  sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
+  switch = None
+  for _ in range(int(80. / DT_MDL)):
+    if switch is None and sim.distance() < 25.:
+      switch = sim.s
+      sim.navd = FakeNavd([(switch + 284., "turn", "left"), (switch + 1500., "turn", "right")])
+    sim.step()
+  after = [(s, v, plan) for s, v, plan in sim.trace if s > switch]
+  assert next(s for s, _, plan in after if plan.desire == CLEAR_DESIRE) < switch + 2.
+  assert all(plan.desire != Desire.turnLeft for _, _, plan in after if plan.maneuverDistance > TURN_DESIRE_LEAD_M)
+  assert any(plan.desire == Desire.turnLeft for _, _, plan in after) and max(v for _, v, _ in after) > 12.
 
 
 def test_oncoming_car_holds_unprotected_left():
@@ -182,3 +233,30 @@ def test_shadow_computes_the_same_plan():
     d0.pop('shadow', None)
     d1.pop('shadow', None)
     assert d0 == d1
+
+
+class FakeParams(dict):
+  def get(self, key):
+    return super().get(key)
+
+
+def test_long_control_from_car_params():
+  assert long_control_for(FakeParams()) is None  # card hasn't written CarParams yet: not known
+  for long_control in (False, True):
+    cp = car.CarParams.new_message(openpilotLongitudinalControl=long_control)
+    assert long_control_for(FakeParams(CarParams=cp.to_bytes())) == long_control
+
+
+def test_unknown_longitudinal_is_disabled_without_a_fault():
+  # every drive starts before card has written CarParams: no "TurnPilot unavailable" flash, and nothing acted on
+  sim = Sim([(300., "turn", "left")], long_control=None)
+  sim.run(2.)
+  for _, _, plan in sim.trace:
+    assert plan.state == State.disabled and plan.reason == CAR_UNKNOWN_REASON and plan.fault == Fault.none
+    assert plan.desire == Desire.none and plan.speedCap == NO_SPEED_CAP
+
+
+def test_enabled_plan_has_no_fault():
+  sim = Sim([(300., "turn", "left")])
+  sim.run(2.)
+  assert all(plan.fault == Fault.none for _, _, plan in sim.trace)

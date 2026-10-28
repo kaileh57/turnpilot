@@ -34,6 +34,16 @@ def test_which_maneuvers_are_capped():
          turn_speed_cap(maneuver("turn", "slight right"), 0., 4.)
 
 
+def test_no_cap_where_the_highway_bends():
+  # "continue slight right" at 30 m/s braked the car at 2 m/s^2 toward 6.9 m/s from 300 m out
+  for mtype, modifier in (("continue", "slight right"), ("new name", "slight left"), ("turn", "slight right")):
+    for d in (300., 100., 20., 0.):
+      assert turn_speed_cap(maneuver(mtype, modifier), d, 30.) == NO_SPEED_CAP, (mtype, modifier, d)
+  # a slight turn in town is still capped, and a junction turn is capped at any speed
+  assert turn_speed_cap(maneuver("turn", "slight right"), 20., 14.) < 10.
+  assert turn_speed_cap(maneuver("turn", "right"), 100., 30.) < 15.
+
+
 def test_braking_curve():
   m = maneuver("turn", "right")
   assert math.isclose(turn_speed_cap(m, 100. + TURN_DESIRE_LEAD_M, 0.), math.sqrt(V_TURN_MIN ** 2 + 2 * 1.5 * 100.))
@@ -55,3 +65,12 @@ def test_car_reaches_turn_speed_by_the_desire():
     assert V_TURN_MIN - 0.5 < at_desire < V_TURN_MIN + 0.25, modifier  # gate 1's speed when the desire goes out
     assert v < V_CORNER + 0.5, modifier                                  # and its own turn speed by the corner
     assert min_a > -1.6, modifier
+
+
+def test_corner_curve_at_real_angles():
+  # a right whose bearings turn 70 degrees still slows to V_CORNER by CORNER_M, as the nominal 90 did; a slight keep doesn't
+  for angle in (70., 85., 90., 120.):
+    real = Maneuver(*classify("turn", "right"), "turn", "right", angle, geometry=True)
+    assert turn_speed_cap(real, CORNER_M, 4.) == V_CORNER, angle
+  keep = Maneuver(*classify("turn", "slight right"), "turn", "slight right", 30., geometry=True)
+  assert turn_speed_cap(keep, CORNER_M, 4.) > V_CORNER

@@ -132,6 +132,9 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     excessiveActuation @96;
     bigModelLoading @100;
     bigModelFailed @102;
+    turnpilotUnavailable @105;  # TurnPilot on but doing nothing: turnpilotPlan.fault
+    turnpilotTooFastToTurn @106;  # turnpilotPlan.tooFastToTurn: the turn is skipped and navd reroutes
+    turnpilotWrongLane @107;  # turnpilotPlan.laneMismatch
 
     lowBatteryDEPRECATED @40;
     soundsUnavailableDEPRECATED @47;
@@ -2440,6 +2443,15 @@ struct NavInstruction {
   speedLimitSign @11 :SpeedLimitSign;
 
   allManeuvers @12 :List(Maneuver);
+
+  # TurnPilot: the junction of the maneuver at maneuverDistance, from the route step that starts with it
+  maneuverGeometryValid @13 :Bool;     # the three below came from the route; false: the route has no intersection data
+  maneuverBearingBefore @14 :Float32;  # deg clockwise from north, heading into the junction
+  maneuverBearingAfter @15 :Float32;   # deg, heading out of it
+  maneuverBranches @16 :UInt8;         # roads at the junction besides the ones the route comes in and leaves by
+  # the lanes of the next intersection the route goes straight through before the maneuver, empty if it has none listed
+  throughLanes @17 :List(Lane);
+  throughLanesDistance @18 :Float32;   # m to that intersection
 
   struct Lane {
     directions @0 :List(Direction);
