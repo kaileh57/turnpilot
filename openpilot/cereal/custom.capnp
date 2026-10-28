@@ -40,8 +40,31 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
   maneuverModifier @10 :Text;     # e.g. "left", "slight right"
   routeValid @11 :Bool;
   shadow @12 :Bool;               # computed but not applied (TurnPilotShadowMode)
-  laneChangePaintRule @13 :LaneChange;  # laneChange, or signalPrompt where the driver signals, as it would be with the lane
-                                        # planner's broken white rule on; equal to it when TurnPilotLanePaintActive is set
+  laneChangePaintRule @13 :LaneChange;  # laneChange, or signalPrompt where the driver signals, as it would be with
+                                        # TurnPilotLanePaintActive on; equal to it when it is on
+  # A planned lane change (lane_planner.py): warned of, confirmed by the driver's blinker where openpilot can't signal,
+  # and checked every frame until DesireHelper starts it; selfdrived raises turnpilotLaneChangeLeft/Right and
+  # turnpilotLaneChangeAborted from these.
+  enum LaneChangeAbort {
+    none @0;
+    lineNotBroken @1;  # the ego line that way no longer reads broken white (solid, yellow, unknown, not read)
+    noLane @2;         # the model sees no lane that way, or only beyond a yellow line
+    laneParked @3;     # something stopped in that lane ahead: a parking strip
+    blindspot @4;      # the car's blind spot signal on that side
+    carInLane @5;      # a car in the target lane, by TurnPilot's cameras
+    noSignal @6;       # no blinker from the driver in time, or it went off before the change started
+    routeChanged @7;   # a new maneuver, or no route
+    notNeeded @8;      # already in the lane the maneuver needs
+    tooLate @9;        # too close to the maneuver to start
+    tooSlow @10;       # below DesireHelper's lane change speed
+    timedOut @11;      # DesireHelper waited too long to start (blind spot)
+    turnedOff @12;     # TurnPilotLanePaintActive turned off
+    badInputs @13;     # carState or modelV2 failing their checks
+    stale @14;         # turnpilotPlan stopped arriving (raised by selfdrived, never published)
+  }
+  laneChangeOffer @14 :LaneChange;      # the change warned of, from the warning until it starts or aborts
+  laneChangeCountdown @15 :Float32;     # s of the warning left; 0 once the change may go
+  laneChangeAbort @16 :LaneChangeAbort; # why the last change was aborted, held about 2 s; none otherwise
 }
 
 struct TurnpilotDetections @0xaedffd8f31e7b55d {

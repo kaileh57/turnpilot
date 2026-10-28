@@ -91,7 +91,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"NavDestination", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION, JSON}},
     {"TurnPilotEnabled", {PERSISTENT, BOOL, "0"}},
     {"TurnPilotShadowMode", {PERSISTENT, BOOL, "0"}},
-    {"TurnPilotLanePaintActive", {PERSISTENT, BOOL, "0"}},
+    {"TurnPilotLanePaintActive", {PERSISTENT, BOOL, "1"}},
     {"TurnPilotRouteSource", {PERSISTENT, STRING, "auto"}},
     {"TurnPilotValhallaTiles", {PERSISTENT, STRING}},
     {"TurnPilotWebToken", {PERSISTENT | DONT_LOG, STRING}},

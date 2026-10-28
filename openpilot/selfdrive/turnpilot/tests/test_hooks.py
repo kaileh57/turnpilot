@@ -2,12 +2,13 @@
 import numpy as np
 
 import openpilot.cereal.messaging as messaging
-from openpilot.cereal import log
+from openpilot.cereal import custom, log
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
 from openpilot.selfdrive.modeld.constants import ModelConstants
-from openpilot.selfdrive.turnpilot.hooks import CLEAR_DESIRE, active_plan, plan_desire
+from openpilot.selfdrive.turnpilot.hooks import (ABORT_HOLD_S, ABORT_TEXT, CLEAR_DESIRE, LaneChangeEvents, active_plan, lane_change_events,
+                                               lane_change_text, plan_desire)
 from openpilot.selfdrive.turnpilot.tests.synthetic import car_state
 
 LaneChangeState = log.LaneChangeState
@@ -138,3 +139,38 @@ def test_shadow_never_changes_planner_output():
   assert all(stop for _, stop in active) and not any(stop for _, stop in baseline)
   # an active plan with no caps changes nothing either
   assert np.allclose(run_planner(turnpilot_plan(shadow=False, accel_cap=10., speed_cap=100., should_stop=False)), baseline)
+
+
+def lane_change_plan(offer='none', countdown=0., lane_change='none', abort='none', shadow=False):
+  msg = messaging.new_message('turnpilotPlan')
+  p = msg.turnpilotPlan
+  p.laneChangeOffer, p.laneChangeCountdown, p.laneChange, p.laneChangeAbort, p.shadow = offer, countdown, lane_change, abort, shadow
+  return msg.as_reader().turnpilotPlan
+
+
+def test_lane_change_events_and_text():
+  assert lane_change_events(None) == ()
+  assert lane_change_events(lane_change_plan()) == ()
+  assert lane_change_events(lane_change_plan('left', 2.)) == ('turnpilotLaneChangeLeft',)
+  assert lane_change_events(lane_change_plan('right')) == ('turnpilotLaneChangeRight',)
+  assert lane_change_events(lane_change_plan(abort='blindspot')) == ('turnpilotLaneChangeAborted',)
+  # a new offer can follow an abort while its reason still holds
+  assert lane_change_events(lane_change_plan('left', 3., abort='noSignal')) == ('turnpilotLaneChangeLeft', 'turnpilotLaneChangeAborted')
+  assert lane_change_text(lane_change_plan('left', 2.2), 'left') == 'Lane Change Left in 3'
+  assert lane_change_text(lane_change_plan('left', 0.), 'left') == 'Signal Left to Change Lanes'
+  assert lane_change_text(lane_change_plan('right', 0., 'right'), 'right') == 'Changing Lanes Right Once Clear'
+  assert all(reason in ABORT_TEXT for reason in custom.TurnpilotPlan.LaneChangeAbort.schema.enumerants if reason != 'none')
+
+
+def test_lane_change_events_abort_when_the_plan_goes_away():
+  ev = LaneChangeEvents()
+  assert ev.update(lane_change_plan('left', 2.), 0.01) == ('turnpilotLaneChangeLeft',)
+  # turnpilotd stops (or shadow mode comes on) under the offer: an abort, held for the alert, not a silent vanish
+  n = 0
+  while ev.update(None, 0.01) == ('turnpilotLaneChangeAborted',):
+    n += 1
+  assert abs(n * 0.01 - ABORT_HOLD_S) < 0.02 and ev.update(None, 0.01) == ()
+  # gone with nothing offered: nothing to say
+  ev = LaneChangeEvents()
+  ev.update(lane_change_plan(), 0.01)
+  assert ev.update(None, 0.01) == ()
