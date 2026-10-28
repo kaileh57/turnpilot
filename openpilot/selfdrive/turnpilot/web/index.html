@@ -306,6 +306,8 @@ function renderMap(s) {
     if (m.missing.length) problems.push("Map server not set up: no " + m.missing.join(", ") + ". Open Map server below.");
     if (m.coverage_error) problems.push(m.coverage_error);
     else if (m.car_outside) problems.push(m.outside_message.replace("Outside", "The car is outside"));
+    // the cached area still shows, but the server refused the last update (a new key or certificate, the server down)
+    if (m.refresh && m.refresh.ok === false && !m.missing.length) problems.push("Can't update the mapped area: " + m.refresh.error);
   }
   var nav = s.destination ? m.nav : null;  // the server passes navd's status only for the current destination
   if (nav && nav.state === "error") problems.unshift("No route: " + nav.message);

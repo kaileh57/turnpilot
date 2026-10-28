@@ -86,6 +86,6 @@ def mapped_area_text(coverage_cache, position, override: str = '') -> str:
   if coverage is None:
     return 'no mapped area downloaded'
   if position is None:
-    return f'car position unknown; mapped: {coverage.names()}'
+    return 'car position unknown'  # the names would make it 3 lines, cut off in the button; the phone shows them
   region = coverage.region_at(position[1], position[0])
   return region.name if region else "Outside TurnPilot's mapped area"

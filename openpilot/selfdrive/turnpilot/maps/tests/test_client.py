@@ -7,7 +7,7 @@ import pytest
 import requests
 
 from openpilot.selfdrive.turnpilot.maps import client as map_client
-from openpilot.selfdrive.turnpilot.maps.client import MapClient, MapError, cert_fingerprint, normalize_host
+from openpilot.selfdrive.turnpilot.maps.client import MapClient, MapError, cert_fingerprint, check_key, normalize_host
 from openpilot.selfdrive.turnpilot.maps.coverage import STATUS_PARAM, CoverageCache, refresh
 from openpilot.selfdrive.turnpilot.maps.tests.fakes import INDY, INDY_EAST, KEY, FakeParams, MapServer, coverage_doc, make_pack, self_signed
 
@@ -195,3 +195,36 @@ def test_a_download_that_cannot_be_saved_is_a_map_error(server, tmp_path):
   with pytest.raises(MapError) as e:
     client_for(server, tmp_path).corridor(INDY, INDY_EAST, tmp_path / 'out.tar')
   assert e.value.code == 'storage' and e.value.retry
+
+
+
+@pytest.mark.parametrize('host', ['https://1.2.3.4:abc', '1.2.3.4:99999', '1.2.3.4 8443', 'https://1.2.3.4/maps', 'https://u@1.2.3.4',
+                                  'https://1.2.3.4?x=1', 'https://1.2.3.4#x', 'https://'])
+def test_bad_hosts_are_map_errors(host):
+  with pytest.raises(MapError) as e:
+    normalize_host(host)
+  assert e.value.code == 'not_configured'
+
+
+def test_a_key_that_is_not_printable_ascii_is_refused():
+  for key in ('clé-ключ-12345678', 'has space 123456', 'tab\there12345'):
+    with pytest.raises(MapError) as e:
+      check_key(key)
+    assert e.value.code == 'not_configured'
+  assert check_key('  abc-123_XYZ.def  ') == 'abc-123_XYZ.def'
+
+
+def test_any_request_failure_is_a_map_error(server, tmp_path):
+  c = client_for(server, tmp_path)
+  for error in (requests.exceptions.InvalidURL('Failed to parse'), UnicodeEncodeError('latin-1', 'é', 0, 1, 'x'), requests.exceptions.TooManyRedirects()):
+    with patch.object(map_client.requests, 'request', side_effect=error), pytest.raises(MapError) as e:
+      c.coverage()
+    assert e.value.code == 'bad_request' and type(error).__name__ in e.value.message
+
+
+def test_refresh_records_any_failure(server, tmp_path):
+  params = server.params()
+  with patch.object(map_client.MapClient, 'coverage', side_effect=RuntimeError('surprise')), pytest.raises(MapError) as e:
+    refresh(params, tmp_path)
+  assert e.value.code == 'refresh_failed'
+  assert params.values[STATUS_PARAM]['ok'] is False and 'RuntimeError: surprise' in params.values[STATUS_PARAM]['error']

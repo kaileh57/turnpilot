@@ -134,7 +134,7 @@ class TestMapStatus:
     save(coverage_doc(), tmp_path)
     assert mapped_area_text(cache, (INDY[1], INDY[0])) == 'Indianapolis area'
     assert mapped_area_text(cache, (CHICAGO[1], CHICAGO[0])) == "Outside TurnPilot's mapped area"
-    assert mapped_area_text(cache, None) == 'car position unknown; mapped: Indianapolis and Seattle'
+    assert mapped_area_text(cache, None) == 'car position unknown'  # two lines at most in the button; the phone names the areas
     assert mapped_area_text(cache, None, '/sim/tiles') == 'local tiles (developer), no geofence'
     coverage_path(tmp_path).write_text('garbage')
     assert mapped_area_text(cache, (INDY[1], INDY[0])) == 'saved mapped area is unreadable'

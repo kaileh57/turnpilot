@@ -407,6 +407,38 @@ class TestMapSettings(WebTestCase):
     assert self.params.get("TurnPilotMapHost") == self.map_server.host
     assert self.params.get("TurnPilotMapCert").strip() == self.map_server.cert.strip()
 
+  def test_a_new_host_or_certificate_needs_the_key_again(self):
+    """The web token travels in the clear on the hotspot. Whoever has it must not be able to point the car at their own
+    server and certificate and have it send the real map key there."""
+    self.call("POST", "/api/map", {"host": self.map_server.host, "key": KEY, "cert": self.map_server.cert})
+    attacker = MapServer()
+    self.addCleanup(attacker.close)
+    for body in ({"host": attacker.host, "cert": attacker.cert}, {"host": attacker.host}, {"host": self.map_server.host, "cert": attacker.cert}):
+      code, reply, _ = self.call("POST", "/api/map", body)
+      assert code == 400 and "API key" in reply["error"], (body, reply)
+      assert self.params.get("TurnPilotMapHost") == self.map_server.host
+      assert self.params.get("TurnPilotMapCert").strip() == self.map_server.cert.strip()
+    assert not any(KEY in json.dumps(headers) for _, _, headers, _ in attacker.requests), "the key went to the new host"
+    # the page always sends the saved host back: unchanged settings with a new key are fine, and so is a move typed in full
+    assert self.call("POST", "/api/map", {"host": self.map_server.host, "key": KEY})[0] == 200
+    code, reply, _ = self.call("POST", "/api/map", {"host": attacker.host, "cert": attacker.cert, "key": "a-new-key-for-the-new-server"})
+    assert code == 200 and self.params.get("TurnPilotMapHost") == attacker.host
+
+  def test_settings_the_client_cannot_use_are_refused_before_saving(self):
+    for body in ({"host": "https://1.2.3.4:abc"}, {"host": "1.2.3.4 8443"}, {"key": "clé-ключ-12345678"}):
+      code, reply, _ = self.call("POST", "/api/map", body)
+      assert code == 400, reply
+      assert "Failed to parse" not in reply["error"] and "codec" not in reply["error"]  # a message for the driver, not Python's
+      assert self.params.get("TurnPilotMapHost") is None and self.params.get("TurnPilotMapKey") is None
+
+  def test_a_failed_refresh_is_on_the_status_for_the_page(self):
+    self.call("POST", "/api/map", {"host": self.map_server.host, "key": KEY, "cert": self.map_server.cert})
+    self.call("POST", "/api/map", {"key": "wrong-key-0000"})
+    m = self.call("GET", "/api/status")[1]["map"]
+    assert m["coverage"] is not None and m["refresh"]["ok"] is False and "API key" in m["refresh"]["error"]
+    script = server.INDEX.read_text().split("<script>")[1]
+    assert "m.refresh" in script.split("function renderMap")[1].split("\nfunction ")[0]  # renderMap shows it
+
   def test_bad_settings_are_refused(self):
     assert self.call("POST", "/api/map", {"host": "http://136.113.85.41"})[0] == 400
     assert self.call("POST", "/api/map", {"cert": "hello"})[0] == 400

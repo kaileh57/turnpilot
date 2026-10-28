@@ -97,7 +97,10 @@ def check_route_source(mode: str | None, override: str | None) -> Check:
   return Check(name, INFO, "TurnPilot map server, a corridor downloaded per drive")
 
 
-def check_map_server(missing: list[str], coverage_names: str | None, error: str | None, override: str | None) -> Check:
+def check_map_server(missing: list[str], coverage_names: str | None, error: str | None, override: str | None,
+                     refresh: dict | None = None) -> Check:
+  """refresh: TurnPilotMapCoverageStatus, how the last coverage fetch went. A cached area with a failing server (a
+  rotated key, a new certificate, the server down) would fail the drive's corridor download."""
   name = "map server"
   if override:
     return Check(name, INFO, "not used with TurnPilotValhallaTiles set")
@@ -107,6 +110,9 @@ def check_map_server(missing: list[str], coverage_names: str | None, error: str 
     return Check(name, FAIL, error, "check the web app's Map server section with the comma online")
   if not coverage_names:
     return Check(name, FAIL, "no mapped area downloaded yet", "open the web app with the comma online; it fetches the mapped area")
+  if isinstance(refresh, dict) and refresh.get("ok") is False:
+    return Check(name, FAIL, f"mapped area: {coverage_names}, but updating it failed: {refresh.get('error') or refresh.get('code')}",
+                 "check the web app's Map server section with the comma online")
   return Check(name, PASS, f"mapped area: {coverage_names}")
 
 
@@ -251,7 +257,7 @@ def collect(params) -> list[Check]:
   from openpilot.selfdrive.modeld.helpers import chestnut_compiled
   from openpilot.selfdrive.turnpilot.detector.graph import detector_pkl_path
   from openpilot.selfdrive.turnpilot.maps.client import MapError, missing_config
-  from openpilot.selfdrive.turnpilot.maps.coverage import CoverageCache
+  from openpilot.selfdrive.turnpilot.maps.coverage import STATUS_PARAM as COVERAGE_STATUS, CoverageCache
   from openpilot.selfdrive.turnpilot.routing.valhalla_source import ValhallaSource, import_valhalla, locate
   from openpilot.selfdrive.turnpilot.web.pairing import PORT, local_ip
 
@@ -282,7 +288,7 @@ def collect(params) -> list[Check]:
     check_toggle("TurnPilot", "TurnPilotEnabled", enabled, "preflight --set TurnPilotEnabled=1, then turn the car off and on"),
     check_shadow(enabled, shadow),
     check_route_source(mode, tiles),
-    check_map_server(missing_config(params), coverage.names() if coverage else None, coverage_error, tiles),
+    check_map_server(missing_config(params), coverage.names() if coverage else None, coverage_error, tiles, params.get(COVERAGE_STATUS)),
     check_pyvalhalla(getattr(valhalla, "__version__", "imported") if valhalla else None),
     check_tiles(tiles, where, needed),
   ]

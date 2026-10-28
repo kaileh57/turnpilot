@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import tempfile
 import time
 import zlib
@@ -31,18 +32,42 @@ class MapError(Exception):
     self.code, self.message, self.short, self.retry = code, message, short or message, retry
 
 
+def bad_host(host: str, why: str) -> MapError:
+  return MapError('not_configured', f"The map server address {host!r} {why}. Fix it in the TurnPilot web app.", 'Map server address is wrong')
+
+
 def normalize_host(host: str) -> str:
   """https://host[:port] from the TurnPilotMapHost param. Plain http is refused: the key would travel in the clear."""
   host = (host or '').strip().rstrip('/')
   if not host:
     return ''
+  if any(c.isspace() for c in host) or not host.isascii() or not host.isprintable():
+    raise bad_host(host, "has spaces or characters an address can't have")
   if '://' not in host:
+    if re.match(r'^[A-Za-z][A-Za-z0-9+.-]*:(?!\d)', host):  # 'https:' or 'http:/x': a scheme, not host:port
+      raise bad_host(host, "must be just https://host or https://host:port")
     host = 'https://' + host
   parts = urlsplit(host)
-  if parts.scheme != 'https' or not parts.hostname:
-    raise MapError('not_configured', f"The map server address must be https://, not {host!r}. Fix it in the TurnPilot web app.",
-                   'Map server address is wrong')
+  if parts.scheme != 'https':
+    raise bad_host(host, "must start with https://")
+  if not parts.hostname or parts.username is not None or parts.path or parts.query or parts.fragment or '#' in host or '?' in host:
+    raise bad_host(host, "must be just https://host or https://host:port")
+  try:
+    parts.port  # noqa: B018  # raises for a port that isn't a number from 0 to 65535
+  except ValueError:
+    raise bad_host(host, "has a port that isn't a number from 1 to 65535") from None
+  if parts.port == 0:
+    raise bad_host(host, "has a port that isn't a number from 1 to 65535")
   return f"https://{parts.netloc}"
+
+
+def check_key(key: str) -> str:
+  """The API key, which goes in an HTTP header: printable ASCII with no spaces."""
+  key = (key or '').strip()
+  if not key.isascii() or not key.isprintable() or any(c.isspace() for c in key):
+    raise MapError('not_configured', "The map server API key can only have letters, digits and punctuation, with no spaces. " +
+                   "Paste it again in the TurnPilot web app.", 'Map server key is wrong')
+  return key
 
 
 def check_cert(pem: str) -> str:
@@ -82,7 +107,7 @@ def write_atomic(path: Path, data: bytes):
 class MapClient:
   def __init__(self, host: str, key: str, cert_pem: str, directory: Path | None = None):
     self.host = normalize_host(host)
-    self.key = key.strip()
+    self.key = check_key(key)
     pem = check_cert(cert_pem)
     self.cert_path = (directory or maps_dir()) / CERT_FILE
     if not self.cert_path.is_file() or self.cert_path.read_text() != pem:
@@ -106,6 +131,9 @@ class MapClient:
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
       raise MapError('unreachable', f"Can't reach the TurnPilot map server at {self.host} ({type(e).__name__}). " +
                      "Check the phone hotspot or the server.", 'Map server unreachable', retry=True) from None
+    except (requests.exceptions.RequestException, ValueError) as e:  # an address or key requests can't send; UnicodeError is a ValueError
+      raise MapError('bad_request', f"TurnPilot can't send a request to the map server at {self.host} ({type(e).__name__}: {e}). " +
+                     "Check the map server settings in the TurnPilot web app.", 'Map server settings are wrong') from None
     if resp.status_code == 401:
       resp.close()
       raise MapError('unauthorized', "The map server refused the API key. Enter the right key in the TurnPilot web app.",
