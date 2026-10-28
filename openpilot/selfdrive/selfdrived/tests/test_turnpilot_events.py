@@ -34,9 +34,10 @@ def alerts(name, sm):
 
 
 def test_lane_change_warning_left_and_right():
-  for name, side in ((EventName.turnpilotLaneChangeLeft, 'left'), (EventName.turnpilotLaneChangeRight, 'right')):
+  for name, side, chime in ((EventName.turnpilotLaneChangeLeft, 'left', AudibleAlert.tpLaneChangeLeft),
+                            (EventName.turnpilotLaneChangeRight, 'right', AudibleAlert.tpLaneChangeRight)):
     a, = alerts(name, FakeSM(plan(laneChangeOffer=side, laneChangeCountdown=2.5)))
-    assert a.alert_text_1 == f'Lane Change {side.capitalize()} in 3' and a.audible_alert == AudibleAlert.prompt
+    assert a.alert_text_1 == f'Lane Change {side.capitalize()} in 3' and a.audible_alert == chime
     a, = alerts(name, FakeSM(plan(laneChangeOffer=side)))
     assert a.alert_text_1 == f'Signal {side.capitalize()} to Change Lanes'
     assert a.alert_type == f'turnpilotLaneChange{side.capitalize()}/warning'  # separate names: a chime per side later
@@ -45,6 +46,16 @@ def test_lane_change_warning_left_and_right():
 def test_lane_change_aborted():
   a, = alerts(EventName.turnpilotLaneChangeAborted, FakeSM(plan(laneChangeAbort='blindspot')))
   assert a.alert_text_1 == 'Lane Change Cancelled' and a.alert_text_2 == 'Car in blind spot'
-  assert a.audible_alert == AudibleAlert.refuse and a.duration >= 100  # 1 s at least, so it is seen
+  assert a.audible_alert == AudibleAlert.tpLaneChangeAbort and a.duration >= 100  # 1 s at least, so it is seen
   a, = alerts(EventName.turnpilotLaneChangeAborted, FakeSM(None, alive=False))
   assert a.alert_text_2 == 'TurnPilot not responding'
+
+
+def test_turnpilot_chimes_on_skip_and_handback():
+  a, = alerts(EventName.turnpilotTooFastToTurn, FakeSM(plan()))
+  assert a.audible_alert == AudibleAlert.tpTooFastTurn
+  for name in (EventName.turnpilotDetectorStopped, EventName.turnpilotModelFellBack):
+    events = Events()
+    events.add(name)
+    a, = events.create_alerts([ET.SOFT_DISABLE], [car.CarParams.new_message(), car.CarState.new_message(), FakeSM(plan()), False, 300, 0])
+    assert a.alert_text_1 == 'TAKE CONTROL IMMEDIATELY' and a.audible_alert == AudibleAlert.tpHandback

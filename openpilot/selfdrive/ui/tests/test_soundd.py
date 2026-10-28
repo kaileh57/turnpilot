@@ -54,3 +54,12 @@ class TestSoundd(OpenpilotTestCase):
     assert s.current_alert == AudibleAlert.none
     s.get_audible_alert(FakeSM(alert_size=AlertSize.mid, sound=AudibleAlert.prompt))
     assert s.current_alert == AudibleAlert.prompt
+
+
+def test_turnpilot_chimes_load_and_differ():
+  from openpilot.selfdrive.ui.soundd import Soundd, sound_list
+  s = Soundd()
+  tp = [name for name, value in AudibleAlert.schema.enumerants.items() if name.startswith('tp')]
+  assert len(tp) == 5 and all(AudibleAlert.schema.enumerants[name] in sound_list for name in tp)
+  left, right = s.loaded_sounds[AudibleAlert.tpLaneChangeLeft], s.loaded_sounds[AudibleAlert.tpLaneChangeRight]
+  assert len(left) == len(right) and not (left == right).all()

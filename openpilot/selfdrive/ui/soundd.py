@@ -48,6 +48,14 @@ sound_list: dict[int, tuple[str, int | None, float]] = {
 
   AudibleAlert.preAlert: ("pre_alert.wav", 1, MAX_VOLUME),
 
+  # TurnPilot: left and right lane changes are the same two notes in opposite order; the handback repeats through the
+  # soft disable like warningSoft does
+  AudibleAlert.tpLaneChangeLeft: ("tp_lane_change_left.wav", 1, MAX_VOLUME),
+  AudibleAlert.tpLaneChangeRight: ("tp_lane_change_right.wav", 1, MAX_VOLUME),
+  AudibleAlert.tpLaneChangeAbort: ("tp_lane_change_abort.wav", 1, MAX_VOLUME),
+  AudibleAlert.tpTooFastTurn: ("tp_too_fast_turn.wav", 1, MAX_VOLUME),
+  AudibleAlert.tpHandback: ("tp_handback.wav", None, MAX_VOLUME),
+
   AudibleAlert.warningSoft: ("critical.wav", None, MAX_VOLUME),
   AudibleAlert.warningImmediate: ("dm_critical.wav", None, MAX_VOLUME),
   CRITICAL_MAX: ("dm_critical_max.wav", None, MAX_VOLUME),

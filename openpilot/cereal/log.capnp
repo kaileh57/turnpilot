@@ -850,6 +850,13 @@ struct SelfdriveState {
 
     preAlert @9;
     complete @10;
+
+    # TurnPilot's chimes (selfdrive/assets/sounds/make_turnpilot_beeps.py)
+    tpLaneChangeLeft @11;
+    tpLaneChangeRight @12;
+    tpLaneChangeAbort @13;
+    tpTooFastTurn @14;
+    tpHandback @15;
   }
 
   enum OpenpilotState @0xdbe58b96d2d1ac61 {

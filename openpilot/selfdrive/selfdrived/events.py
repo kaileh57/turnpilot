@@ -236,6 +236,18 @@ def user_soft_disable_alert(alert_text_2: str) -> AlertCallbackType:
     return UserSoftDisableAlert(alert_text_2)
   return func
 
+def turnpilot_handback_alert(alert_text_2: str) -> AlertCallbackType:
+  """openpilot's soft disable, with TurnPilot's handback chime in place of warningSoft, so the driver can tell TurnPilot
+  handing back from openpilot's own faults. The last half second is the same immediate disable as any soft disable."""
+  def func(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
+    if soft_disable_time < int(0.5 / DT_CTRL):
+      return ImmediateDisableAlert(alert_text_2)
+    alert = SoftDisableAlert(alert_text_2)
+    alert.audible_alert = AudibleAlert.tpHandback
+    return alert
+  return func
+
+
 def turnpilot_unavailable_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
   return NormalPermanentAlert("TurnPilot Unavailable", sm['turnpilotPlan'].reason or "TurnPilot is doing nothing")
 
@@ -249,9 +261,10 @@ def turnpilot_wrong_lane_alert(CP: car.CarParams, CS: car.CarState, sm: messagin
 def turnpilot_lane_change_alert(side: str) -> AlertCallbackType:
   def func(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
     plan = shown_plan(sm)
+    sound = AudibleAlert.tpLaneChangeLeft if side == 'left' else AudibleAlert.tpLaneChangeRight
     return Alert(lane_change_text(plan, side), "TurnPilot, for the route",
                  AlertStatus.userPrompt, AlertSize.mid,
-                 Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1)
+                 Priority.LOW, VisualAlert.none, sound, .1)
   return func
 
 
@@ -261,7 +274,7 @@ def turnpilot_lane_change_aborted_alert(CP: car.CarParams, CS: car.CarState, sm:
   reason = ABORT_TEXT.get(str(plan.laneChangeAbort), '') if plan is not None else ABORT_TEXT['stale']
   return Alert("Lane Change Cancelled", reason,
                AlertStatus.userPrompt, AlertSize.mid,
-               Priority.LOW, VisualAlert.none, AudibleAlert.refuse, 2.)
+               Priority.LOW, VisualAlert.none, AudibleAlert.tpLaneChangeAbort, 2.)
 
 
 def startup_master_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
@@ -438,13 +451,12 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
     ET.PERMANENT: turnpilot_unavailable_alert,
   },
 
-  # its own event, so a chime of its own can replace the prompt sound later
   EventName.turnpilotTooFastToTurn: {
     ET.WARNING: Alert(
       "Too Fast to Turn",
       "Rerouting",
       AlertStatus.userPrompt, AlertSize.mid,
-      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 3.),
+      Priority.LOW, VisualAlert.none, AudibleAlert.tpTooFastTurn, 3.),
   },
 
   EventName.turnpilotWrongLane: {
@@ -460,17 +472,17 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
     ET.PERMANENT: NormalPermanentAlert("Big Model Failed ", "Restart the car to retry,\nsmall model is still available", duration=20.),
   },
 
-  # TurnPilot handing control back (selfdrive/turnpilot/handback.py): openpilot's standard soft disable, with the
-  # warningSoft chime until TurnPilot's own chimes exist. A stopped detector also blocks engaging while it stays stopped;
+  # TurnPilot handing control back (selfdrive/turnpilot/handback.py): openpilot's standard soft disable, with
+  # TurnPilot's handback chime. A stopped detector also blocks engaging while it stays stopped;
   # after a model fallback openpilot can be engaged again on the small model, without TurnPilot.
   EventName.turnpilotDetectorStopped: {
-    ET.SOFT_DISABLE: soft_disable_alert("TurnPilot unavailable: detector stopped"),
+    ET.SOFT_DISABLE: turnpilot_handback_alert("TurnPilot unavailable: detector stopped"),
     ET.NO_ENTRY: NoEntryAlert("TurnPilot unavailable: detector stopped"),
     ET.PERMANENT: NormalPermanentAlert("TurnPilot Unavailable", "Detector stopped: take control", duration=10.),
   },
 
   EventName.turnpilotModelFellBack: {
-    ET.SOFT_DISABLE: soft_disable_alert("TurnPilot unavailable: driving model fell back"),
+    ET.SOFT_DISABLE: turnpilot_handback_alert("TurnPilot unavailable: driving model fell back"),
     ET.PERMANENT: NormalPermanentAlert("TurnPilot Unavailable", "Driving model fell back: take control", duration=10.),
   },
 
@@ -670,7 +682,7 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   },
 
   # TurnPilot: a planned lane change, from its warning until DesireHelper starts it (countdown, signal prompt, waiting for
-  # the blind spot), and its abort. The chimes are existing sounds until TurnPilot's own are recorded.
+  # the blind spot), and its abort, each with its own chime.
   EventName.turnpilotLaneChangeLeft: {
     ET.WARNING: turnpilot_lane_change_alert('left'),
   },
