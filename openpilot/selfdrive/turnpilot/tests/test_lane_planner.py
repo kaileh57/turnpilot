@@ -634,6 +634,10 @@ def test_lane_not_confirmed_is_said_not_changed():
   m = maneuver("turn", "left", ((("left",), True), (("straight",), False), (("straight", "right"), False)))
   drive.run(m, 250., 3.)
   assert not drive.offers and drive.lp.lane_unknown and drive.decisions[-1].reason == LANE_UNKNOWN_REASON
+  # past the window too, to the junction: nothing else says the lane there
+  drive = Drive(lanes_left=1, lanes_right=1, curb_unpainted=True)
+  drive.run(m, 40., 1.)
+  assert drive.lp.lane_unknown
   # outside the window it says nothing
   drive = Drive(lanes_left=1, lanes_right=1, curb_unpainted=True)
   drive.run(m, 900., 1.)

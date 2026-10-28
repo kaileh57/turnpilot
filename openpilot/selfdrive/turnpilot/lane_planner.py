@@ -412,7 +412,7 @@ class LanePlanner:
     self.changes = 0                  # nav lane changes completed
     self.done: int | None = 0         # lane changes completed for this maneuver, ours or the driver's, positive left; None
                                       # once one went a way that wasn't seen
-    self.lane_unknown = False         # in the window, the car's lane in the maneuver's lane list can't be confirmed
+    self.lane_unknown = False         # in or past the window, the car's lane in the maneuver's lane list can't be confirmed
     self._done_id = None              # the maneuver done counts for
     self._start = None                # (lane, done) where our first change for it started: nav_lane_span
     self._from_lane: int | None = None  # the lane in the lane list the change wanted now is counted from
@@ -480,7 +480,7 @@ class LanePlanner:
       self._from_lane = lo if want_dir == LEFT else hi
     else:
       self._from_lane = None
-    self.lane_unknown = self.paint_rule and maneuver is not None and end < distance < start and \
+    self.lane_unknown = self.paint_rule and maneuver is not None and 0. < distance < start and \
       lane_unconfirmed(maneuver, lanes, right_hand_traffic, paint, self.done, self._start)
     idle_reason = LANE_UNKNOWN_REASON if self.lane_unknown else ""
 
