@@ -5,9 +5,10 @@ traffic in turns. It runs in modeld because the chestnut's USB interface is clai
 Nothing here runs unless TurnPilotEnabled is set and the compiled pkl for this device and camera size exists
 (compile_detector.py builds it; the pkls are not in git).
 
-Once it's on it stays on for the drive: turnpilotd holds before every unprotected turn while it's gone. So a slow spell
-only skips frames until a forced run measures the time again, a failed run is retried with a backoff, a mid-drive
-TurnPilotEnabled starts it, and a fallback to the small driving model switches to that model's detector, where one exists.
+Once it's on it stays on for the drive, and nothing here turns it off quietly: without fresh detections turnpilotd hands
+control back to the driver (a soft disable), so every gap is loud. A slow spell only skips frames until a forced run
+measures the time again, a failed run is retried with a backoff and logged, a mid-drive TurnPilotEnabled starts it, and a
+fallback to the small driving model switches to that model's detector, where one exists.
 """
 import time
 from collections import deque
@@ -72,7 +73,6 @@ class ModeldDetector:
       self.times.append(time.perf_counter() - t0)
     self.since_run = RUN_EVERY
     self.wide_until = -1.0
-    self.enabled = True
 
   def choose_camera(self, desired_curvature: float, desire: int, now: float) -> str:
     if abs(desired_curvature) >= WIDE_CURVATURE or desire in TURN_DESIRES:
@@ -95,13 +95,11 @@ class ModeldDetector:
     return True
 
   def step(self, pm, model_state, model_execution_time: float, desired_curvature: float, desire: int, metas: list) -> None:
-    """Called once per model frame after modelV2 is sent. metas: FrameMeta of packed frames 0 and 1."""
-    if not self.enabled:
-      return
+    """Called once per model frame after modelV2 is sent, with the driving model this detector was loaded for.
+    metas: FrameMeta of packed frames 0 and 1."""
     if model_state is not self.model_state:
-      cloudlog.warning("turnpilot detector: driving model switched devices, detector off for this drive")
-      self.enabled = False
-      return
+      # DetectorHost picks the detector by model, so this is a bug: raise for the host to log and retry, never a quiet off
+      raise ValueError("turnpilot detector stepped with a driving model it wasn't loaded for")
     self.since_run += 1
     if self.since_run < RUN_EVERY or time.monotonic() < self.retry_at or not self.room(model_execution_time):
       return
@@ -157,6 +155,7 @@ class DetectorHost:
     self.enabled = False
     self.next_check = 0.0
     self.missing = None  # the driving model last reported as having no detector
+    self.failures = 0    # host failures in a row
 
   def check_enabled(self, now: float) -> bool:
     if now >= self.next_check:
@@ -185,7 +184,11 @@ class DetectorHost:
           cloudlog.warning("turnpilot detector: none for the driving model modeld is running, detector off")
         return
       det.step(pm, model_state, model_execution_time, desired_curvature, desire, metas)
+      self.failures = 0
     except Exception:
-      # never take modeld down: try again on the next TurnPilotEnabled check after a long wait
-      cloudlog.exception("turnpilot detector host failed")
-      self.enabled, self.next_check = False, time.monotonic() + RETRY_MAX_S
+      # never take modeld down: off until the next TurnPilotEnabled check, after a wait doubling from RETRY_S. turnpilotd
+      # hands back to the driver if that outlasts its deadline
+      self.failures += 1
+      delay = min(RETRY_S * 2 ** (self.failures - 1), RETRY_MAX_S)
+      cloudlog.exception(f"turnpilot detector host failed ({self.failures} in a row), retrying in {delay:.0f} s")
+      self.enabled, self.next_check = False, time.monotonic() + delay

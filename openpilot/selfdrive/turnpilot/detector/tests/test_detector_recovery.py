@@ -1,4 +1,5 @@
 """The detector comes back: after slow runs, after failures, after TurnPilot is turned on mid-drive, after a model fallback."""
+import time
 from collections import deque
 
 from openpilot.cereal import log
@@ -61,7 +62,7 @@ class TestDetectorRecovery(OpenpilotTestCase):
     gaps = run_gaps(det, pm, 1200, STEP_BUDGET_S + 0.005)
     assert gaps[:5] == [FORCE_RUN_FRAMES - RUN_EVERY, 2 * FORCE_RUN_FRAMES, 4 * FORCE_RUN_FRAMES, FORCE_RUN_MAX_FRAMES,
                         FORCE_RUN_MAX_FRAMES]
-    assert det.enabled
+    assert det.failures == 0
 
   def test_failure_retries_with_backoff(self):
     det, pm = make_detector(), PM()
@@ -73,7 +74,7 @@ class TestDetectorRecovery(OpenpilotTestCase):
       delays.append(det.retry_at)
       for _ in range(3 * RUN_EVERY):  # nothing while it waits
         det.step(pm, det.model_state, 0.010, 0.0, log.Desire.none, METAS)
-      assert pm.sent == [] and det.enabled
+      assert pm.sent == []
     waits = [b - a for a, b in zip(delays, delays[1:], strict=False)]
     assert [round(w) for w in waits[:5]] == [RETRY_S, 2 * RETRY_S, 4 * RETRY_S, 8 * RETRY_S, 16 * RETRY_S]
     assert waits[-1] <= RETRY_MAX_S + 1 and det.failures == 8
@@ -125,5 +126,14 @@ class TestDetectorRecovery(OpenpilotTestCase):
     host.load()
     det = host.detectors[0][1]
     det.room = None  # a bug outside the detector's own try
+    t0 = time.monotonic()
     host.step(pm, model, 0.010, 0.0, log.Desire.none, METAS, False)
-    assert not host.enabled and host.next_check > 0.
+    assert not host.enabled and t0 + RETRY_S <= host.next_check < t0 + RETRY_S + 0.5  # retried after RETRY_S, not a minute
+    host.next_check = 0.0
+    host.step(pm, model, 0.010, 0.0, log.Desire.none, METAS, False)
+    assert host.failures == 2 and host.next_check >= time.monotonic() + 2 * RETRY_S - 0.5  # doubling
+    det.room = lambda _: True  # fixed: runs again, and the count starts over
+    host.next_check = 0.0
+    for _ in range(RUN_EVERY):
+      host.step(pm, model, 0.010, 0.0, log.Desire.none, METAS, False)
+    assert host.enabled and host.failures == 0 and len(pm.sent) == 1
