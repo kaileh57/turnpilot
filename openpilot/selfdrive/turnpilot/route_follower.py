@@ -25,15 +25,18 @@ new route.
 Where a junction is: no navd reading of it is trusted over another, however many agree. GPS bias lasts (urban multipath
 over a long approach, a fix off while the car stands in a queue, a reroute's snap), and every rule that let readings
 outvote each other let a biased track win somewhere and lifted a committed turn's cap short of its junction. So every
-reading of the maneuver's junction from JunctionSpan.FROM_M in is dead-reckoned on (JunctionSpan), and what is done
-with them holds whichever one is right:
+reading of the maneuver's junction is dead-reckoned on (JunctionSpan), and what is done with them holds whichever one
+is right:
 - RouteFollower.distance, and with it the turn's cap, its desire's lead and an unprotected turn's hold line, is the
-  NEAREST of them: slow early, never late. A jump up is never taken up for it, so it only ever runs down. Where the
+  NEAREST of them from JunctionSpan.FROM_M in: slow early, never late. A jump up is never taken up for it, so it only ever runs down. Where the
   furthest is more than UNCERTAIN_M beyond it while a committed unprotected turn's hold is ahead, turnpilotd says so out
   loud (controlAlert junctionUncertain) rather than guess, and a hold line read behind where the car can stop at the
   floor stops the car as soon as it can (map_controls.py);
 - the maneuver counts as passed (its cap lifted, its id bumped, CLEAR sent) on navd's distance only once the car is
-  dead-reckoned PASSED_DIST_M past the FURTHEST of them, never on a vote. The car having turned it is the other evidence
+  dead-reckoned PASSED_DIST_M past the FURTHEST of them, never on a vote: of every one since the approach began, however
+  far out, since a bias already there as the car comes in FROM_M can last past the commit, its true readings from before
+  it the only ones that hold the truth. A reading dead-reckoned that far can only hold the pass later than the rest would
+  (and widen the span, saying the junction is uncertain sooner), never earlier. The car having turned it is the other evidence
   (DesireTiming clears it at its angle).
 A committed turn (turnpilotd: its turn desire is out) is never dropped that way (Kellen: never cancel a turn once
 committed, and a car slowing for a turn must not speed up into it). The junction is where it was whatever navd says:
@@ -191,8 +194,11 @@ def same_junction(a: Maneuver, b: Maneuver) -> bool:
 
 
 class JunctionSpan:
-  """The nearest and the furthest navd's readings of one junction put it, each dead-reckoned on (module docstring)."""
-  FROM_M = 200.  # readings from further out are dropped once a nearer one comes: dead reckoning that far drifts meters
+  """The nearest and the furthest navd's readings of one junction put it, each dead-reckoned on (module docstring).
+  The furthest is over every reading since the span began, however far out: a bias already there as the car comes in
+  FROM_M can last past the commit, and the true readings from before it are the only ones that hold the truth."""
+  FROM_M = 200.  # for the nearest, readings from further out are dropped once a nearer one comes: dead reckoning that
+                 # far drifts meters, and the nearest only ever runs down (a drifted one would hold the car short)
 
   def __init__(self, distance: float | None = None):
     self.near = self.far = float('nan')
@@ -215,10 +221,12 @@ class JunctionSpan:
     return not self or self.near - SAME_TURN_M <= distance <= self.far + SAME_TURN_M
 
   def take(self, distance: float):
-    if not self or self.near > self.FROM_M:
-      self.near = self.far = distance  # still further out: the latest reading
-    else:
-      self.near, self.far = min(self.near, distance), max(self.far, distance)
+    if not self:
+      self.near = self.far = distance
+      return
+    # the nearest: still further out than FROM_M, the latest reading
+    self.near = distance if self.near > self.FROM_M else min(self.near, distance)
+    self.far = max(self.far, distance)
 
 
 class RouteFollower:

@@ -397,6 +397,18 @@ def test_a_long_early_bias_never_outvotes_the_truth_at_the_commit():
     assert_conservative(rows, passed_at, off)
 
 
+def test_a_bias_beyond_same_turn_already_there_from_far_out_never_passes_the_turn_short():
+  # navd true out to 230 m, then 45 m short (more than SAME_TURN_M) from before the car is FROM_M out, past the commit:
+  # the true readings from further out are some of the junction's too, so it is passed only past them
+  for off in (-45., -60., -41.):
+    # the bias clears after the commit (true from 80 m in)
+    rows, passed_at, _ = drive_readings([(0., 1, 6.)] * 5 + [(off, 1, 6.)] * 25, start=260., after_s=20.)
+    assert_conservative(rows, passed_at, ('clears', off))
+    # ...or never clears, to past the junction
+    rows, passed_at, _ = drive_readings([(0., 1, 6.)] * 5 + [(off, 1, 6.)] * 50, start=260., after_s=0.)
+    assert_conservative(rows, passed_at, ('lasts', off))
+
+
 def test_a_bias_while_the_car_stands_in_a_queue_never_outvotes_the_truth():
   # stood 60 s at a light 150 m out with the fix 15 m off, every reading the same: then true readings to the turn
   for off in (-15., -10., 15.):
