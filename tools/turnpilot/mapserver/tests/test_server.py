@@ -366,7 +366,7 @@ def run_swap(tmp_path, region):
   code = (f"import sys; sys.path.insert(0, '{MAPSERVER}'); from server import load_regions; " +
           f"print([r.id for r in load_regions(__import__('pathlib').Path('{tmp_path / 'regions'}'))])")
   check = f'{sys.executable} -c "{code}"'
-  env = {**os.environ, 'SUDO': '', 'RESTART': 'true', 'CHECK': check, 'SETTLE': '0'}
+  env = {**os.environ, 'SUDO': '', 'RESTART': 'true', 'CHECK': check, 'SETTLE': '0', 'WAIT': '3'}
   return subprocess.run(['bash', str(MAPSERVER / 'swap_region.sh'), str(tmp_path / 'regions'), str(tmp_path / 'staging'), region],
                         env=env, capture_output=True, text=True, timeout=60)
 

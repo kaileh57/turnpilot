@@ -19,6 +19,7 @@ SUDO="${SUDO-sudo}"
 RESTART="${RESTART:-systemctl restart turnpilot-maps}"
 CHECK="${CHECK:-curl -sfk --max-time 10 https://127.0.0.1/v1/health}"
 SETTLE="${SETTLE:-3}"
+WAIT="${WAIT:-90}"  # seconds to wait for the restarted server: it loads every region's Valhalla tiles before it listens
 
 case "$REGION" in
   ''|.*|*/*) echo "bad region name: $REGION" >&2; exit 1 ;;
@@ -36,7 +37,20 @@ if [ -e "$live" ]; then
 fi
 $SUDO mv "$new" "$live"
 
-if $SUDO $RESTART && sleep "$SETTLE" && health="$(bash -c "$CHECK")" && grep -q "'$REGION'\|\"$REGION\"" <<<"$health"; then
+serving() {
+  local waited=0
+  sleep "$SETTLE"
+  while [ "$waited" -lt "$WAIT" ]; do
+    if health="$(bash -c "$CHECK")" && grep -q "'$REGION'\|\"$REGION\"" <<<"$health"; then
+      return 0
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+  return 1
+}
+
+if $SUDO $RESTART && serving; then
   $SUDO rm -rf "$old"
   echo "$health"
 else
