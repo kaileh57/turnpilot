@@ -58,9 +58,10 @@ def botts_dots():
   return mark
 
 
-def render(marks, s, road=ASPHALT, gain=1., crosswalk=False, car=None, seed=0):
+def render(marks, s, road=ASPHALT, gain=1., crosswalk=False, car=None, seed=0, extra=(), shade=None, noise=2.):
   """NV12 frame with the car at s m along the road. marks: per modelV2 line, f(x, y about the line) -> (mask, yuv) or None.
-  car: (x0, x1, y0, y1) m of a dark box standing on the road, drawn as its pixel rectangle; returns (frame, its box)."""
+  car: (x0, x1, y0, y1) m of a dark box standing on the road, drawn as its pixel rectangle; returns (frame, its box).
+  extra: f(x, y) -> (mask, yuv) over the whole road, after the marks; shade: f(x, y) -> luma factor (shadows, glare)."""
   rng = np.random.default_rng(seed)
   img = np.empty((H, W, 3), np.float32)
   img[:] = road
@@ -69,6 +70,9 @@ def render(marks, s, road=ASPHALT, gain=1., crosswalk=False, car=None, seed=0):
     if mark is not None:
       m, color = mark(x, GY - y0)
       img[m] = color
+  for mark in extra:
+    m, color = mark(x, GY)
+    img[m] = color
   if crosswalk:  # continental bars along the lanes, 0.6 m wide and apart, 3 m deep, 12-15 m ahead of where the car starts
     img[(np.mod(GY, 1.2) < 0.6) & (np.abs(x - 13.5) < 1.5)] = WHITE
   box = None
@@ -78,9 +82,11 @@ def render(marks, s, road=ASPHALT, gain=1., crosswalk=False, car=None, seed=0):
     box = np.array([[max(u.min(), 0), max(v.min(), 0), min(u.max(), W - 1), min(v.max(), H - 1)]])
     x0, y0, x1, y1 = box[0].astype(int)
     img[y0:y1, x0:x1] = (30., 128., 128.)
+  if shade is not None:
+    img[..., 0] *= np.where(np.isnan(GX), 1., shade(np.nan_to_num(x), np.nan_to_num(GY)))
   img[np.isnan(GX)] = (170., 140., 120.)  # sky
   img[..., 0] *= gain
-  img[..., 0] += rng.normal(0., 2., (H, W))
+  img[..., 0] += rng.normal(0., noise, (H, W))
   img = np.clip(np.rint(img), 0, 255).astype(np.uint8)
   out = np.zeros((Y_HEIGHT + UV_HEIGHT, STRIDE), np.uint8)
   out[:H, :W] = img[..., 0]
@@ -95,6 +101,7 @@ def lines_xyz(ys=LINE_YS):
 
 
 def drive(marks, seconds=2., probs=(0.9,) * 4, calibrated=True, boxes_at=None, **kw):
+  """The classifier's answer after seconds of driving at V_EGO over the marks (as render's)."""
   clf = LanePaintClassifier(LENS)
   paint = [UNKNOWN] * 4
   for k in range(int(seconds / DT)):
@@ -187,3 +194,108 @@ class TestLanePaint(OpenpilotTestCase):
     for k in range(20):
       clf.update(k * DT, frame, STRIDE, Y_HEIGHT, RPY, True, lines, [0.9] * 4)
     assert (time.perf_counter() - t0) / 20 < 0.01  # ~1 ms on an M-series Mac; generous for CI
+
+
+def not_broken_white(p):
+  return not p.is_('broken', 'white', 0.)
+
+
+def worn(color, keep=0.6, seed=1):
+  """A solid line with paint gone in random 0.3-2 m stretches, keep of it left."""
+  rng = np.random.default_rng(seed)
+  edges = np.cumsum(rng.uniform(0.3, 2., 400))
+  painted = rng.uniform(size=400) < keep
+  def mark(x, y):
+    idx = np.clip(np.searchsorted(edges, x), 0, 399)
+    return (np.abs(y) < LINE_W / 2) & painted[idx], color
+  return mark
+
+
+class TestAdversarialFootage(OpenpilotTestCase):
+  """Hard cases synthesized on the road camera's projection: none of them may read broken white where there is no
+  broken white line, and a real broken white line may read unknown (no change), never solid or yellow-free broken elsewhere."""
+
+  def test_parking_t_marks(self):
+    # 0.9 m bars every 6.5 m along the right line, a parking strip beyond: not a lane line
+    def t_marks(x, y):
+      return ((np.abs(y) < LINE_W / 2) & (np.mod(x, 6.5) < 0.9), WHITE)
+    for _ in range(2):
+      paint = drive([None, dashed(WHITE), t_marks, None])
+      assert not_broken_white(paint[2]) and paint[1].is_('broken', 'white', 0.6), paint
+
+  def test_lane_drop_dotted_line(self):
+    # MUTCD's dotted line (0.9 m dashes, 2.7 m gaps) beside a lane that ends: not a lane to move into
+    paint = drive([None, None, dashed(WHITE, dash=0.9, cycle=3.6), None])
+    assert not_broken_white(paint[2]), paint
+
+  def test_shadows_over_a_solid_line(self):
+    # dappled shade from trees: 1-4 m patches across the whole road at 45% luma
+    rng = np.random.default_rng(3)
+    edges = np.cumsum(rng.uniform(1., 4., 200))
+    dark = rng.uniform(size=200) < 0.5
+    def dappled(x, y):
+      return np.where(dark[np.clip(np.searchsorted(edges, x), 0, 199)], 0.45, 1.)
+    paint = drive([None, None, solid(WHITE), None], shade=dappled)
+    assert not_broken_white(paint[2]), paint
+    # poles' shadows across the road every 8 m, 0.4 m wide
+    def poles(x, y):
+      return np.where(np.mod(x, 8.) < 0.4, 0.4, 1.)
+    paint = drive([None, None, solid(WHITE), double(YELLOW)], shade=poles)
+    assert not_broken_white(paint[2]) and not_broken_white(paint[3]), paint
+    # a hedge's shadow edge running along the solid line: one side dark
+    def hedge(x, y):
+      return np.where(y > LINE_YS[2] + 0.05, 0.5, 1.)
+    paint = drive([None, None, solid(WHITE), None], shade=hedge)
+    assert not_broken_white(paint[2]), paint
+
+  def test_worn_solid_line(self):
+    # lightly worn (a fifth of the paint gone in random stretches): never broken white
+    for seed in range(4):
+      paint = drive([None, worn(WHITE, keep=0.8, seed=seed), None, None])
+      assert not_broken_white(paint[1]), (seed, paint)
+    # KNOWN LIMIT: with most of the paint gone in random stretches a solid line looks like a broken one, and it can read
+    # broken white. What keeps that from a change into a shoulder is the lane planner's check that the model sees a lane
+    # there (test_lane_planner: a worn edge line beside a shoulder is no lane); between two travel lanes the driver confirms
+    heavily = [drive([None, worn(WHITE, keep=0.4, seed=seed), None, None])[1] for seed in range(4)]
+    assert any(p.is_('broken', 'white', 0.6) for p in heavily)  # if this fails, the limit is gone: update the docstring
+
+  def test_tar_seam_and_crack_sealant(self):
+    # a dark tar seam where the model puts a line: no paint
+    seam = solid((45., 128., 128.), width=0.05)
+    paint = drive([None, None, seam, None])
+    assert not_broken_white(paint[2]), paint
+    # light crack sealant in irregular streaks, a line the model is unsure of: never broken
+    sealant = worn((150., 128., 128.), keep=0.35, seed=7)
+    paint = drive([None, None, sealant, None], probs=(0.9, 0.9, 0.6, 0.9))
+    assert paint[2].kind != 'broken', paint
+    # and a real dashed line the model is unsure of reads unknown, not broken: costs a change, never adds one
+    paint = drive([None, dashed(WHITE), None, None], probs=(0.9, 0.6, 0.9, 0.9))
+    assert paint[1].kind == 'unknown', paint
+
+  def test_stop_bar_and_gore_chevrons(self):
+    # a stop bar across the lanes 13 m ahead of the start, crossed as the car drives up
+    for s0 in (0., 5.):
+      clf = LanePaintClassifier(LENS)
+      def bar(x, y, s0=s0):
+        return ((np.abs(x - 13.5 - s0) < 0.3) & (np.abs(y) < 6.), WHITE)
+      for k in range(15):
+        frame, _ = render([None, None, solid(WHITE), None], 1.0 * k, seed=k, extra=[bar])
+        paint = clf.update(k * DT, frame, STRIDE, Y_HEIGHT, RPY, True, lines_xyz(), [0.9] * 4)
+        assert not_broken_white(paint[2]), (s0, k, paint)
+    # a gore: chevrons between the right line and the far right one (a solid white edge each side of the hatched area)
+    def chevrons(x, y):
+      return ((y > LINE_YS[2] + 0.2) & (y < LINE_YS[3] - 0.2) & (np.mod(x + (y - LINE_YS[2]) * 2., 6.) < 0.45), WHITE)
+    paint = drive([None, dashed(WHITE), solid(WHITE), solid(WHITE)], extra=[chevrons])
+    assert not_broken_white(paint[2]) and not_broken_white(paint[3]), paint
+
+  def test_night_and_glare(self):
+    # night: a dim road and a noisy sensor. The dashes may still read; solid and yellow never read broken white
+    for gain, noise in ((0.3, 4.), (0.2, 6.)):
+      paint = drive([double(YELLOW), dashed(WHITE), solid(WHITE), None], gain=gain, noise=noise)
+      assert not_broken_white(paint[0]) and not_broken_white(paint[2]), (gain, paint)
+      assert paint[1].kind in ('broken', 'unknown'), (gain, paint)
+    # rain glare: a bright smear down the lane, the road near saturation where it is
+    def glare(x, y):
+      return np.where(np.abs(y - 0.5) < 2.5, 2.4, 1.)
+    paint = drive([None, dashed(WHITE), solid(WHITE), None], shade=glare)
+    assert not_broken_white(paint[2]), paint

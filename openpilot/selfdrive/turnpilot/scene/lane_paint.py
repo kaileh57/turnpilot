@@ -34,8 +34,9 @@ stills or the 36 tuning stills; 49% and 39% of broken white ones did, and the re
 reading of segments 1, 3 and 6-15 (verify_run.py), the four stretches the previous tuning read broken white wrongly (a solid
 edge line beside an exit gore, a ramp edge, crosswalk and stop bars inside an intersection, crack sealant with no lane line)
 read it 0 times. The misses that matter: on concrete freeways a light slab joint runs along some dashed lines and fills
-their gaps, so they read solid, which only costs a lane change; and one route is not every road, which is why the driver
-confirms each lane change (lane_planner.py).
+their gaps, so they read solid, which only costs a lane change; a solid line with most of its paint gone in random
+stretches looks broken and can read broken white (synthesized in test_lane_paint.py); and one route is not every road. So
+the lane planner also needs the model to see a lane beyond the line, and the driver confirms each change (lane_planner.py).
 
 Only the road (narrow) camera, a pinhole, is read; 8 m is the nearest ground clear of a comma four's view of the hood.
 """
