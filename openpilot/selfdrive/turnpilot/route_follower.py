@@ -124,8 +124,9 @@ class RouteFollower:
       self._on_instruction(instruction)
     elif self.valid:
       self._stale_t += dt
-      if self._stale_t > NAV_STALE_S:
-        self.reset()
+      if self._stale_t > NAV_STALE_S:  # navd went quiet: the maneuver is over, as when navd drops the route, but not
+        self.reset()                   # replaced (a turn under way finishes and its desire is cleared as for a pass)
+        self.maneuver_id += 1
         return
       travelled = max(v_ego, 0.) * dt
       self.distance -= travelled

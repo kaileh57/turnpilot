@@ -283,3 +283,23 @@ def test_new_route_clears_the_old_turn_at_once():
     after = [(d, desire) for s, d, desire in trace if s > switch]
     assert all(desire != Desire.turnLeft for d, desire in after if d > TURN_DESIRE_LEAD_M), marked
     assert any(desire == Desire.turnLeft for d, desire in after if d < TURN_DESIRE_LEAD_M), marked
+
+
+def test_navd_going_quiet_mid_turn_still_clears_the_desire():
+  # the pulse is out and the car is 20 degrees into the turn when navd stops publishing: the route is lost (no maneuver),
+  # but the turn's desire is still cleared once the car has turned CLEAR_MIN_DEG, not left in the model's queue
+  navd, rf, dt_ = FakeNavd([(100., "turn", "left"), (900., "turn", "right")]), RouteFollower(), DesireTiming()
+  s, v, out, quiet_at = 0., 4., [], None
+  for _ in range(int(40. / DT_MDL)):
+    instr = navd.update(s) if quiet_at is None else None
+    rf.update(instr, instr is not None, True, v, DT_MDL)
+    yaw = 0.25 if 100. - s < 8. else 0.  # 14 deg/s from 8 m out
+    if quiet_at is None and dt_.turned_deg >= 20.:
+      quiet_at = s
+    out.append((rf.valid, dt_.update(rf.upcoming, rf.distance, rf.maneuver_id, rf.passed, v, 0., True, True, DT_MDL, yaw,
+                                     replaced=rf.replaced)))
+    s += v * DT_MDL
+  assert quiet_at is not None and Desire.turnLeft in [d for _, d in out]
+  assert [d for _, d in out].count(CLEAR_DESIRE) == CLEAR_FRAMES
+  first_clear = [d for _, d in out].index(CLEAR_DESIRE)
+  assert not out[first_clear][0]  # after the route was lost
