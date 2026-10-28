@@ -7,6 +7,7 @@ A row is a dict:
   enabled            selfdriveState.enabled; alert, alert_text: its alertType and alertText1
   steer, gas, brake  carState steeringPressed, gasPressed, brakePressed
   state, reason      turnpilotPlan.state and .reason; lc, prompt: its laneChange and signalPrompt
+  control_prompt     turnpilotPlan.controlPrompt: the go TurnPilot asks the driver for ('none', 'stopSignGo', ...)
   lc_state           modelV2.meta.laneChangeState
   nav_valid, nav_type, nav_mod, nav_dist, nav_remaining   navInstruction; route: an id of the current navRoute
   dest_dist          m from the ego to the destination (None without one)
@@ -45,6 +46,7 @@ def msg_fields(ss, cs, tp, nav, model) -> dict:
     'steer': bool(cs.steeringPressed), 'gas': bool(cs.gasPressed), 'brake': bool(cs.brakePressed),
     'state': '' if tp is None else str(tp.state), 'reason': '' if tp is None else str(tp.reason),
     'lc': '' if tp is None else str(tp.laneChange), 'prompt': '' if tp is None else str(tp.signalPrompt),
+    'control_prompt': '' if tp is None else str(tp.controlPrompt),
     'lc_state': str(model.meta.laneChangeState),
     'nav_valid': nav is not None, 'nav_type': '' if nav is None else str(nav.maneuverType),
     'nav_mod': '' if nav is None else str(nav.maneuverModifier),
@@ -130,6 +132,18 @@ def holds(rows) -> list[dict]:
     h['stopped'] = h['min_v'] < STOPPED_V
     h['resumed'] = any(r['v'] > RESUMED_V for r in after)
   return spans
+
+
+def gas_taps(rows) -> list[dict]:
+  """Each press of the gas while engaged (an override: the driver's go at a hold), with the go TurnPilot asked for and
+  the hold's reason just before it, and how long the car had stood. Pressing it to engage is not one."""
+  out, stopped_t = [], None
+  for a, b in zip(rows, rows[1:], strict=False):
+    stopped_t = (a['t'] if stopped_t is None else stopped_t) if a['v'] < STOPPED_V else None
+    if b['enabled'] and b.get('gas') and not (a['enabled'] and a.get('gas')):
+      out.append({'t': b['t'], 'prompt': a.get('control_prompt', ''), 'reason': a.get('reason', ''),
+                  'stopped_s': 0. if stopped_t is None else round(b['t'] - stopped_t, 2)})
+  return out
 
 
 def maneuvers(rows) -> list[dict]:
@@ -239,6 +253,10 @@ def check(name: str, res: dict) -> list[str]:
       fails.append("did not go after the oncoming cars passed")
     if res['min_gap_car_m'] is not None and res['min_gap_car_m'] < CAR_MIN_GAP_M:
       fails.append(f"came within {res['min_gap_car_m']} m of an oncoming car")
+    if 'unprotectedTurnGo' not in res['stopped_for_go']:
+      fails.append("never stopped at the unprotected left's hold line for the driver's go")
+    if not any(x['prompt'] == 'unprotectedTurnGo' for x in res['gas_taps']):
+      fails.append("the driver never gave the go at the unprotected left's hold line")
   elif name == 'ped_in_path':
     g = res['stop_gap_m']
     if res['outcome'] != 'stopped' or g is None:
@@ -279,6 +297,9 @@ def summarize(name: str, rows, outcome: str) -> dict:
     'stop_gap_m': stop_gap(rows, outcome),
     'gap_reference': "camera mount (top of the windshield) to the mannequin, or to the other car's centre",
     'lane_changes': lane_changes(rows),
+    'gas_taps': gas_taps(rows),
+    # the gos TurnPilot asked for with the car standing (stopSignGo, unprotectedTurnGo, signalGo)
+    'stopped_for_go': sorted({r['control_prompt'] for r in rows if r.get('control_prompt', 'none') not in ('', 'none') and r['v'] < STOPPED_V}),
     'lane_blocked': any(r.get('reason') == 'car in target lane' for r in rows),
     'signal_prompts': sum(1 for a, b in zip(rows, rows[1:], strict=False) if b.get('blinker') and b['blinker'] != a.get('blinker')),
   }
@@ -289,8 +310,9 @@ def summarize(name: str, rows, outcome: str) -> dict:
 
 def report(label: str, res: dict) -> str:
   holds = [(h['reason'], h['duration_s']) for h in res['holds']]
+  taps = [(x['prompt'], x['stopped_s']) for x in res.get('gas_taps', [])]
   line = f"{label}: {'PASS' if res['passed'] else 'FAIL'} {res['outcome']}, {res['maneuvers_taken']}/{res['maneuvers_attempted']} maneuvers, " + \
-         f"{len(res['disengagements'])} disengagements, holds {holds}, min gap ped {res['min_gap_ped_m']} car {res['min_gap_car_m']}"
+         f"{len(res['disengagements'])} disengagements, holds {holds}, gas taps {taps}, min gap ped {res['min_gap_ped_m']} car {res['min_gap_car_m']}"
   return line + ''.join(f"\n  {f}" for f in res['failures'])
 
 

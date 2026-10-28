@@ -282,7 +282,8 @@ class Runner:
     failed = [f"{name}: {f.exception()!r}" for name, f in getattr(self, 'jobs', []) if f.done() and f.exception() is not None]
     detail = '; '.join([detail] * bool(detail) + failed)
     res = score.summarize(self.plan.name, self.rows, outcome)
-    res['gas_taps'] = getattr(self, 'taps', GasTaps()).log  # every go the driver gave, with its reason
+    # every go the sim driver gave, with its reason (the score's gas_taps are the presses openpilot saw, from the rows)
+    res['driver_taps'] = getattr(self, 'taps', GasTaps()).log
     res.update(run=self.run_idx + 1, detail=detail, t_start_wall=self.t0_wall, t_engaged_wall=self.t_engaged_wall, t_end_wall=end_wall,
                duration_s=round(end_wall - (self.t_engaged_wall or self.t0_wall), 1), rlog_segments=rlog_segments(self.t0_wall - 60.),
                rows=self.rows, pose_fields=POSE_FIELDS, poses=self.poses, actor_fields=ACTOR_FIELDS, actor_poses=self.actor_poses)

@@ -11,7 +11,7 @@ def row(t, **kw):
   r = {'t': t, 'x': 0.0, 'y': 0.0, 'v': 8.0, 'enabled': True, 'alert': '', 'alert_text': '', 'steer': False, 'gas': False, 'brake': False,
        'state': 'following', 'reason': '', 'lc': 'none', 'prompt': 'none', 'lc_state': 'off', 'nav_valid': True, 'nav_type': 'turn',
        'nav_mod': 'right', 'nav_dist': 100.0, 'nav_remaining': 300.0, 'route': 1, 'dest_dist': 200.0, 'ped_gap': None, 'car_gap': None,
-       'pacer_dx': None, 'blinker': ''}
+       'pacer_dx': None, 'blinker': '', 'control_prompt': 'none'}
   r.update(kw)
   return r
 
@@ -157,6 +157,43 @@ class TestChecks:
     res = score.summarize('occupied_lane', blocked + early, 'arrived')
     assert not res['passed'] and 'alongside' in res['failures'][0]
     assert not score.summarize('occupied_lane', drive([(1.0, {})]) + late, 'arrived')['passed']  # never blocked
+
+
+class TestGasTaps:
+  LINE = 'Stopped at unprotected left — tap gas to go'
+
+  def left_run(self, tap=True, stop=True):
+    """An unprotected left: stops at the hold line, the driver's go, the detector's oncoming hold, the turn, arrival."""
+    at_line = {'nav_dist': 9.0, 'nav_remaining': 69.0}
+    stand = {'state': 'holding', 'reason': self.LINE, 'control_prompt': 'unprotectedTurnGo', 'v': 0.0 if stop else 3.0, **at_line}
+    return drive(route([(120.0, 'turn', 'left'), (60.0, 'arrive', '')])[:1] +
+                 [(2.5, stand),
+                  (1.0, {'state': 'holding', 'reason': 'waiting for oncoming', 'v': 0.0, 'gas': tap, **at_line}),
+                  (3.0, {'state': 'holding', 'reason': 'waiting for oncoming', 'v': 0.0, **at_line}),
+                  (2.0, {'v': 5.0, 'nav_dist': lambda tau: round(9.0 - 10.0 * tau, 1), 'nav_remaining': lambda tau: round(69.0 - 10.0 * tau, 1)}),
+                  (4.0, {'v': 8.0, 'nav_type': 'arrive', 'nav_mod': '', 'nav_dist': lambda tau: round(50.0 - 10.0 * tau, 1),
+                         'nav_remaining': lambda tau: round(50.0 - 10.0 * tau, 1), 'dest_dist': lambda tau: 50.0 - 10.0 * tau})])
+
+  def test_the_score_records_each_tap_with_its_prompt_and_how_long_the_car_stood(self):
+    res = score.summarize('unprotected_left', self.left_run(), 'arrived')
+    assert res['passed'], res['failures']
+    assert len(res['gas_taps']) == 1
+    tap = res['gas_taps'][0]
+    assert tap['prompt'] == 'unprotectedTurnGo' and tap['reason'] == self.LINE
+    assert tap['stopped_s'] == pytest.approx(2.5, abs=0.06) and tap['t'] == pytest.approx(15.5, abs=0.06)
+
+  def test_engaging_on_the_gas_is_no_tap(self):
+    rows = drive([(1.0, {'enabled': False, 'gas': True}), (1.0, {})])
+    assert score.summarize('route_demo', rows, 'arrived')['gas_taps'] == []
+
+  def test_an_unprotected_left_without_the_go_fails(self):
+    for name in ('unprotected_left', 'unprotected_left_visible'):
+      res = score.summarize(name, self.left_run(tap=False), 'arrived')
+      assert "the driver never gave the go at the unprotected left's hold line" in res['failures'], name
+
+  def test_an_unprotected_left_that_never_stops_at_its_line_fails(self):
+    res = score.summarize('unprotected_left', self.left_run(stop=False), 'arrived')
+    assert "never stopped at the unprotected left's hold line for the driver's go" in res['failures']
 
 
 def msg(service, t, **fields):
