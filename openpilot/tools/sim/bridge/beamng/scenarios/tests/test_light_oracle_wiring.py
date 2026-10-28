@@ -1,6 +1,7 @@
 """--light-oracle starts the light oracle from the scenario runner and route_drive.py, as it does from run_bridge.py, and
 stops it when the drive ends: run_bridge.parse_args takes the flag for all three, so taking it and starting nothing would
 leave turnpilotd holding every signal for the driver's go with no word why."""
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -11,13 +12,18 @@ from openpilot.tools.sim.bridge.beamng.scenarios import run
 
 
 class FakeProc:
-  def __init__(self):
-    self.terminated = False
+  def __init__(self, hangs=False):
+    self.terminated, self.killed, self.hangs = False, False, hangs
 
   def terminate(self):
     self.terminated = True
 
+  def kill(self):
+    self.killed = True
+
   def wait(self, timeout=None):
+    if self.hangs:
+      raise subprocess.TimeoutExpired('light_oracle', timeout)
     return 0
 
 
@@ -80,3 +86,11 @@ def test_route_drive_starts_and_stops_the_oracle(monkeypatch, oracle):
   FakeBridge.joined = False
   drive_main(monkeypatch, [])
   assert FakeBridge.joined and oracle == []
+
+
+def test_an_oracle_that_wont_stop_is_killed_and_the_run_still_ends(monkeypatch):
+  proc = FakeProc(hangs=True)
+  monkeypatch.setattr(run_bridge, 'start_light_oracle', lambda args: proc)
+  with run_bridge.light_oracle(SimpleNamespace(light_oracle=True)):
+    pass
+  assert proc.terminated and proc.killed

@@ -4,6 +4,7 @@ Tesla Model 3. Start openpilot with ./launch_openpilot.sh next to this file, the
 tools/sim/run_bridge.py, which imports metadrive unconditionally."""
 import argparse
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -51,7 +52,6 @@ def parse_args(add_args=None):
 
 def start_light_oracle(args):
   """light_oracle.py in its own process, on its own BeamNGpy connection (never the bridge's world lock)."""
-  import subprocess
   return subprocess.Popen([sys.executable, '-m', 'openpilot.tools.sim.bridge.beamng.light_oracle', '--host', args.host,
                            '--port', str(args.port), '--light-latency', str(args.light_latency)])
 
@@ -66,7 +66,11 @@ def light_oracle(args):
   finally:
     if oracle is not None:
       oracle.terminate()
-      oracle.wait(timeout=10)
+      try:
+        oracle.wait(timeout=10)
+      except subprocess.TimeoutExpired:  # still up: killed, never a finished drive turned into a failed one
+        print("warning: the light oracle didn't stop on SIGTERM, killed", flush=True)
+        oracle.kill()
 
 
 def config_from_args(args) -> BeamNGConfig:
