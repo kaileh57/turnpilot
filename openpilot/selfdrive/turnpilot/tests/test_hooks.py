@@ -251,3 +251,56 @@ def test_lane_change_events_abort_when_the_plan_goes_away():
   ev = LaneChangeEvents()
   ev.update(lane_change_plan(), 0.01)
   assert ev.update(None, 0.01) == ()
+
+
+def test_plan_events_map_controls_by_priority():
+  # handback > fault > cannotStopComfortably > tooFastToTurn > controlPrompt > other controlAlerts > lane change >
+  # wrongLane > the map controls' status (unavailable, light source rejected)
+  Fault, Handback, LaneMismatch = custom.TurnpilotPlan.Fault, custom.TurnpilotPlan.Handback, custom.TurnpilotPlan.LaneMismatch
+  def events(handback=Handback.none, fault=Fault.none, too_fast=False, mismatch=LaneMismatch.none, offer='none', prompt='none',
+             alert='none'):
+    msg = messaging.new_message('turnpilotPlan')
+    p = msg.turnpilotPlan
+    p.state, p.handback, p.fault, p.tooFastToTurn, p.laneMismatch = State.holding, handback, fault, too_fast, mismatch
+    p.laneChangeOffer, p.controlPrompt, p.controlAlert = offer, prompt, alert
+    plan = msg.as_reader().turnpilotPlan
+    return plan_events(FakeSM({'turnpilotPlan': plan})) + list(lane_change_events(plan))
+  assert events(Handback.detectorStopped, alert='cannotStopComfortably') == []
+  assert events(fault=Fault.error, alert='cannotStopComfortably') == ['turnpilotUnavailable']
+  assert events(too_fast=True, alert='cannotStopComfortably') == ['turnpilotControlAlert']
+  assert events(too_fast=True, prompt='stopSignGo') == ['turnpilotTooFastToTurn']
+  assert events(prompt='signalGo', alert='stopOverrun', offer='left') == ['turnpilotControlPrompt']
+  assert events(alert='proceedingOnYellow', offer='left', mismatch=LaneMismatch.wrongLaneForTurn) == ['turnpilotControlAlert']
+  assert events(alert='mapControlsUnavailable', offer='left') == ['turnpilotLaneChangeLeft']
+  assert events(alert='mapControlsUnavailable', mismatch=LaneMismatch.wrongLaneForTurn) == ['turnpilotWrongLane']
+  assert events(alert='lightSourceRejected') == ['turnpilotControlAlert']
+  assert events(prompt='yieldAhead') == ['turnpilotControlPrompt']
+  # shadow: nothing acts, nothing is said
+  msg = messaging.new_message('turnpilotPlan')
+  msg.turnpilotPlan.shadow, msg.turnpilotPlan.controlPrompt = True, 'stopSignGo'
+  assert plan_events(FakeSM({'turnpilotPlan': msg.as_reader().turnpilotPlan})) == []
+
+
+def test_control_texts():
+  from openpilot.selfdrive.turnpilot.hooks import CONTROL_ALERT_TEXT, CONTROL_PROMPT_TEXT
+  assert all(p in CONTROL_PROMPT_TEXT for p in custom.TurnpilotPlan.ControlPrompt.schema.enumerants if p != 'none')
+  assert all(a in CONTROL_ALERT_TEXT for a in custom.TurnpilotPlan.ControlAlert.schema.enumerants if a != 'none')
+
+
+def test_stale_hold_is_loud():
+  # turnpilotd dies with the car held at a stop line: plannerd drops shouldStop at once (PLAN_MAX_AGE_S), and the driver is
+  # told at once, not when the manager notices the process is gone
+  from openpilot.selfdrive.turnpilot.hooks import StaleHoldEvents, limits_plan
+  held = turnpilot_plan(False, desire=0, lane_change='none', accel_cap=-0.5, speed_cap=0., should_stop=True, state=State.holding)
+  ev = StaleHoldEvents()
+  assert ev.update(limits_plan(FakeSM({'turnpilotPlan': held}))) == ()
+  stale = FakeSM({'turnpilotPlan': held}, age=PLAN_MAX_AGE_S + 0.05)
+  assert limits_plan(stale) is None
+  assert ev.update(limits_plan(stale)) == ('turnpilotControlAlert',)
+  assert ev.update(limits_plan(stale)) == ('turnpilotControlAlert',)  # until it is back
+  assert ev.update(limits_plan(FakeSM({'turnpilotPlan': held}))) == ()
+  # a plan that wasn't holding going stale is processNotRunning's alone
+  free = turnpilot_plan(False, should_stop=False, accel_cap=10., speed_cap=100.)
+  ev = StaleHoldEvents()
+  ev.update(limits_plan(FakeSM({'turnpilotPlan': free})))
+  assert ev.update(None) == ()

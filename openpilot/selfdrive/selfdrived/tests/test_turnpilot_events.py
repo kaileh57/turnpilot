@@ -139,3 +139,40 @@ def test_lane_not_confirmed_is_said_with_a_chime():
   assert a.alert_text_1 == "Can't Confirm Lane" and a.audible_alert == AudibleAlert.prompt
   a, = alerts(EventName.turnpilotWrongLane, FakeSM(plan(laneMismatch='wrongLaneForTurn')))
   assert a.alert_text_1 == "Wrong Lane" and a.audible_alert == AudibleAlert.none
+
+
+def test_map_control_prompts_chime_and_yield_is_silent():
+  a, = alerts(EventName.turnpilotControlPrompt, FakeSM(plan(controlPrompt='stopSignGo', reason='Stopped at stop sign — tap gas to go')))
+  assert a.alert_text_1 == 'Stopped at stop sign — tap gas to go' and 'press accelerator to go' in a.alert_text_2
+  assert a.audible_alert == AudibleAlert.prompt
+  a, = alerts(EventName.turnpilotControlPrompt, FakeSM(plan(controlPrompt='signalGo', reason='Signal ahead: light not checked')))
+  assert 'press accelerator to proceed' in a.alert_text_2 and a.audible_alert == AudibleAlert.prompt
+  a, = alerts(EventName.turnpilotControlPrompt, FakeSM(plan(controlPrompt='yieldAhead')))
+  assert a.audible_alert == AudibleAlert.none
+
+
+def test_map_control_alerts():
+  a, = alerts(EventName.turnpilotControlAlert, FakeSM(plan(controlAlert='cannotStopComfortably')))
+  assert a.alert_text_1 == 'Take Control' and a.audible_alert == AudibleAlert.tpHandback
+  for kind in ('stopOverrun', 'proceedingOnYellow', 'goingOnRed'):
+    a, = alerts(EventName.turnpilotControlAlert, FakeSM(plan(controlAlert=kind)))
+    assert a.audible_alert == AudibleAlert.prompt and a.duration >= 200, kind
+  for kind in ('mapControlsUnavailable', 'lightSourceRejected'):
+    a, = alerts(EventName.turnpilotControlAlert, FakeSM(plan(controlAlert=kind, reason='Map stops/signals: unsupported')))
+    assert a.audible_alert == AudibleAlert.prompt, kind
+  # turnpilotd gone while holding: the hold is lost, said as take control
+  a, = alerts(EventName.turnpilotControlAlert, FakeSM(None, alive=False))
+  assert a.alert_text_1 == 'TAKE CONTROL' and a.audible_alert == AudibleAlert.tpHandback
+
+
+def test_cannot_stop_outranks_and_the_prompt_chimes_once():
+  slot = AlertSlot()
+  a = slot.step(plan(controlAlert='cannotStopComfortably', tooFastToTurn=True))
+  assert a.alert_type == 'turnpilotControlAlert/warning'
+  sounds = []
+  for _ in range(300):
+    a = slot.step(plan(controlPrompt='stopSignGo', reason='Stopped at stop sign — tap gas to go'))
+    sounds.append(a.audible_alert)
+  assert a.alert_type == 'turnpilotControlPrompt/warning'
+  # once the take-control alert's own short hold is over, one prompt alert held up: soundd plays its one-shot sound once
+  assert all(s == AudibleAlert.prompt for s in sounds[20:])

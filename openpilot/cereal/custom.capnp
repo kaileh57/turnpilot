@@ -38,6 +38,7 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
     none @0;
     error @1;           # turnpilotd failed this frame (logged); TurnPilot does nothing until it recovers
     noLongitudinal @2;  # openpilot doesn't control speed on this car, so TurnPilot does nothing
+    disengageOnAccelerator @3;  # DisengageOnAccelerator is on: a gas tap can't mean "go" at a map stop, so TurnPilot refuses
   }
   enum LaneMismatch {
     none @0;
@@ -92,6 +93,74 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
   laneChangeOffer @21 :LaneChange;      # the change warned of, from the warning until it starts or aborts
   laneChangeCountdown @22 :Float32;     # s of the warning left; 0 once the change may go
   laneChangeAbort @23 :LaneChangeAbort; # why the last change was aborted, held about 2 s; none otherwise
+
+  # Map stop control (selfdrive/turnpilot/map_controls.py): stop signs, yields and traffic signals on the route, from
+  # navInstruction.controls. The enums mirror log.capnp's NavInstruction.ControlKind / ControlsStatus and
+  # TurnpilotLights' State / Source, which this file can't import.
+  struct MapControlStatus {
+    enum Kind {
+      none @0;
+      stop @1;
+      yield @2;
+      signal @3;
+    }
+    enum Action {
+      none @0;
+      approaching @1;        # engaged: on the braking curve to the stop line
+      braking @2;            # the curve bites (or the infeasible floor)
+      held @3;               # stopped at the line: the latch holds the car (shouldStop)
+      awaitingDriver @4;     # held, and only the driver's gas tap releases it
+      released @5;           # released by its rule (a steady green, the driver's go)
+      proceedingOnYellow @6; # a yellow too late to stop for: committed, no cap
+      overrun @7;            # passed the line moving, never released: dropped (logged, alerted)
+      infeasible @8;         # can't stop at -2.0 m/s^2: braking at the floor, alert
+    }
+    enum LightState {
+      unknown @0;
+      red @1;
+      yellow @2;
+      green @3;
+    }
+    enum LightSource {
+      none @0;
+      simOracle @1;
+      camera @2;
+    }
+    enum ControlsStatus {
+      none @0;
+      ok @1;
+      walkOrSnap @2;
+      partial @3;
+      failed @4;
+      unsupported @5;
+    }
+    id @0 :UInt16;                   # the control's index along its route; (routeCount, id) is its identity
+    kind @1 :Kind;
+    distance @2 :Float32;            # m to the stop point (filtered, dead-reckoned)
+    action @3 :Action;
+    lightState @4 :LightState;
+    lightSource @5 :LightSource;
+    controlsStatus @6 :ControlsStatus;
+    lineMapped @7 :Bool;             # the stop line came from mapped data (the sim sidecar), not the junction less 10 m
+  }
+  enum ControlPrompt {
+    none @0;
+    stopSignGo @1;   # held at a stop sign past its dwell: check cross traffic, press the accelerator to go
+    signalGo @2;     # a signal ahead with the light not checked: press the accelerator to proceed
+    yieldAhead @3;   # visual only
+  }
+  enum ControlAlert {
+    none @0;
+    cannotStopComfortably @1;   # the stop needs more than -2.0 m/s^2: braking at -2.0, take control
+    stopOverrun @2;             # passed a stop line moving, never released
+    proceedingOnYellow @3;      # a yellow too late to stop for
+    goingOnRed @4;              # the driver released a red-light hold with the gas
+    mapControlsUnavailable @5;  # navInstruction.controlsStatus isn't ok: stops and signals may be missing
+    lightSourceRejected @6;     # a light-state source that isn't accepted here (the sim oracle outside the sim)
+  }
+  mapControl @24 :MapControlStatus;
+  controlPrompt @25 :ControlPrompt;
+  controlAlert @26 :ControlAlert;   # held about 2 s (ABORT_HOLD_S), like laneChangeAbort; permanent ones while they last
 }
 
 struct TurnpilotDetections @0xaedffd8f31e7b55d {
@@ -170,7 +239,28 @@ struct TurnpilotScene @0xf35cc4560bbf6ec2 {
   objects @1 :List(TrackedObject);
 }
 
-struct CustomReserved3 @0xda96579883444c35 {
+struct TurnpilotLights @0xda96579883444c35 {
+  # Traffic light states ahead, for TurnPilot's map signal holds (selfdrive/turnpilot/map_controls.py). Only the BeamNG
+  # bridge's oracle publishes it today (simOracle), and turnpilotd takes that only with SIMULATION=1 and
+  # TurnPilotSimLightOracle set: never on the car.
+  enum Source {
+    none @0;
+    simOracle @1;
+    camera @2;
+  }
+  enum State {
+    unknown @0;
+    red @1;
+    yellow @2;
+    green @3;
+  }
+  struct Light {
+    state @0 :State;
+    distance @1 :Float32;  # m ahead to its stop line
+    instance @2 :Text;     # the sim's signal instance, for logs
+  }
+  source @0 :Source;
+  lights @1 :List(Light);
 }
 
 struct CustomReserved4 @0x80ae746ee2596b11 {

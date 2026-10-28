@@ -100,6 +100,7 @@ _services: dict[str, tuple] = {
   "turnpilotPlan": (True, 20., 5),
   "turnpilotDetections": (True, 10.),
   "turnpilotScene": (True, 20., 5),
+  "turnpilotLights": (True, 4.),
 }
 SERVICE_LIST = {name: Service(*vals) for
                 idx, (name, vals) in enumerate(_services.items())}

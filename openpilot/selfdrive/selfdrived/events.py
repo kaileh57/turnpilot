@@ -13,7 +13,8 @@ from openpilot.common.git import get_short_branch
 from openpilot.common.realtime import DT_CTRL
 from openpilot.selfdrive.locationd.calibrationd import MIN_SPEED_FILTER
 from openpilot.common.hardware import HARDWARE
-from openpilot.selfdrive.turnpilot.hooks import ABORT_TEXT, lane_change_text, shown_plan
+from openpilot.selfdrive.turnpilot.hooks import (ABORT_TEXT, CONTROL_ALERT_TEXT, CONTROL_PROMPT_TEXT, CONTROL_STATUS_ALERTS, fresh_plan,
+                                               lane_change_text, shown_plan)
 
 AlertSize = log.SelfdriveState.AlertSize
 AlertStatus = log.SelfdriveState.AlertStatus
@@ -291,6 +292,50 @@ def turnpilot_lane_change_aborted_alert(CP: car.CarParams, CS: car.CarState, sm:
   return Alert("Lane Change Cancelled", reason,
                AlertStatus.userPrompt, AlertSize.mid,
                Priority.LOW, VisualAlert.none, AudibleAlert.tpLaneChangeAbort, 2.)
+
+
+CONTROL_PROMPT_TITLE = {'stopSignGo': "Stop Sign", 'signalGo': "Signal Ahead", 'yieldAhead': "Yield Ahead"}
+CONTROL_ALERT_TITLE = {'cannotStopComfortably': "Take Control", 'stopOverrun': "Stop Line Passed",
+                       'proceedingOnYellow': "Proceeding on Yellow", 'goingOnRed': "Going on Red",
+                       'mapControlsUnavailable': "Map Stops Unavailable", 'lightSourceRejected': "Light Source Rejected"}
+TURNPILOT_CONTROL_ALERT_S = 3.  # an overrun, a yellow or a red go is held up this long
+
+
+def turnpilot_control_prompt_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int,
+                                   personality) -> Alert:
+  """TurnPilot's map stop control needs the driver (turnpilotPlan.controlPrompt): held at a stop sign past its dwell, or a
+  signal whose light isn't checked. One alert held up while it lasts, so its chime plays once; a yield is visual only."""
+  plan = shown_plan(sm)
+  prompt = str(plan.controlPrompt) if plan is not None else 'none'
+  return Alert(plan.reason if plan is not None and plan.reason else CONTROL_PROMPT_TITLE.get(prompt, "TurnPilot"),
+               CONTROL_PROMPT_TEXT.get(prompt, ''), AlertStatus.userPrompt, AlertSize.mid, Priority.LOW, VisualAlert.none,
+               AudibleAlert.none if prompt in ('yieldAhead', 'none') else AudibleAlert.prompt, .1)
+
+
+def turnpilot_control_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int,
+                            personality) -> Alert:
+  """turnpilotPlan.controlAlert. A stop TurnPilot can't make at -2.0 m/s^2 is take control, with the handback's repeating
+  chime while it lasts. A plan gone stale while it held the car (hooks.StaleHoldEvents) is the same: the hold is gone."""
+  plan = fresh_plan(sm)
+  if plan is None:
+    return Alert("TAKE CONTROL", "TurnPilot stopped responding while holding the car", AlertStatus.critical, AlertSize.mid,
+                 Priority.MID, VisualAlert.steerRequired, AudibleAlert.tpHandback, .1)
+  kind = str(plan.controlAlert)
+  if kind == 'cannotStopComfortably':
+    return Alert(CONTROL_ALERT_TITLE[kind], CONTROL_ALERT_TEXT[kind], AlertStatus.critical, AlertSize.mid, Priority.MID,
+                 VisualAlert.steerRequired, AudibleAlert.tpHandback, .1)
+  if kind in CONTROL_STATUS_ALERTS:
+    return Alert(CONTROL_ALERT_TITLE[kind], plan.reason or CONTROL_ALERT_TEXT[kind], AlertStatus.normal, AlertSize.mid,
+                 Priority.LOWER, VisualAlert.none, AudibleAlert.prompt, .2)
+  return Alert(CONTROL_ALERT_TITLE.get(kind, "TurnPilot"), CONTROL_ALERT_TEXT.get(kind, ''), AlertStatus.userPrompt, AlertSize.mid,
+               Priority.LOW, VisualAlert.none, AudibleAlert.prompt, TURNPILOT_CONTROL_ALERT_S)
+
+
+def turnpilot_control_permanent_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int,
+                                      personality) -> Alert:
+  plan = fresh_plan(sm)
+  kind = str(plan.controlAlert) if plan is not None else 'none'
+  return NormalPermanentAlert(CONTROL_ALERT_TITLE.get(kind, "TurnPilot"), CONTROL_ALERT_TEXT.get(kind, "TurnPilot stopped responding"))
 
 
 def startup_master_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
@@ -716,6 +761,17 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
 
   EventName.turnpilotLaneChangeAborted: {
     ET.WARNING: turnpilot_lane_change_aborted_alert,
+  },
+
+  # TurnPilot's map stop control (selfdrive/turnpilot/map_controls.py): the driver's go at a stop sign or an unchecked
+  # signal, and what it can't do there (hooks.plan_events has the order)
+  EventName.turnpilotControlPrompt: {
+    ET.WARNING: turnpilot_control_prompt_alert,
+  },
+
+  EventName.turnpilotControlAlert: {
+    ET.WARNING: turnpilot_control_alert,
+    ET.PERMANENT: turnpilot_control_permanent_alert,
   },
 
   EventName.laneChange: {

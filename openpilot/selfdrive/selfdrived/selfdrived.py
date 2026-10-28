@@ -23,7 +23,8 @@ from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
 from openpilot.selfdrive.turnpilot.handback import HandbackEvents
-from openpilot.selfdrive.turnpilot.hooks import LaneChangeEvents, fresh_plan, hides_stock_lane_change, plan_events, shown_plan
+from openpilot.selfdrive.turnpilot.hooks import (LaneChangeEvents, StaleHoldEvents, fresh_plan, hides_stock_lane_change, limits_plan,
+                                               plan_events, shown_plan)
 
 from openpilot.common.version import get_build_metadata
 from openpilot.common.hardware import HARDWARE
@@ -101,6 +102,7 @@ class SelfdriveD:
                                   ignore_valid=ignore, frequency=int(1/DT_CTRL))
 
     self.turnpilot_events = LaneChangeEvents()
+    self.turnpilot_stale_hold = StaleHoldEvents()
 
     # read params
     self.is_metric = self.params.get_bool("IsMetric")
@@ -212,6 +214,9 @@ class SelfdriveD:
 
     # TurnPilot: what it can't do, or is skipping, is never silent
     for name in plan_events(self.sm):
+      self.events.add(getattr(EventName, name))
+    # TurnPilot: a plan gone stale while it held the car (a map stop, a pedestrian) lost the hold: said at once
+    for name in self.turnpilot_stale_hold.update(limits_plan(self.sm)):
       self.events.add(getattr(EventName, name))
 
     # Block resume if cruise never previously enabled

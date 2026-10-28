@@ -51,19 +51,35 @@ def limits_plan(sm, now: float | None = None):
   return plan if plan.state != custom.TurnpilotPlan.State.disabled or plan.fault != custom.TurnpilotPlan.Fault.none else None
 
 
+CONTROL_ALERT_FIRST = ('cannotStopComfortably',)                          # above too fast to turn
+CONTROL_ALERT_EVENTS = ('stopOverrun', 'proceedingOnYellow', 'goingOnRed')  # below the prompt, above a lane change
+CONTROL_STATUS_ALERTS = ('mapControlsUnavailable', 'lightSourceRejected')  # last of all, a status line
+
+
+def control_outranks_lane_change(plan) -> bool:
+  """A map control's prompt or alert that outranks a lane change (plan_events' order)."""
+  return str(plan.controlPrompt) != 'none' or str(plan.controlAlert) in CONTROL_ALERT_FIRST + CONTROL_ALERT_EVENTS
+
+
 def plan_events(sm, now: float | None = None) -> list[str]:
   """selfdrived's onroad event names from a fresh, valid turnpilotPlan (none while it is stale: a dead turnpilotd is
-  processNotRunning already). sm is a SubMaster subscribed to turnpilotPlan.
+  processNotRunning already, and StaleHoldEvents' while it was holding the car). sm is a SubMaster subscribed to
+  turnpilotPlan.
   TurnPilot's alerts share one slot, at most one of them a frame, by this priority:
   1. a handback (turnpilotDetectorStopped, turnpilotNoDetector, turnpilotModelFellBack; handback.py): nothing here while one is set;
   2. a fault (turnpilotUnavailable);
-  3. too fast to turn (turnpilotTooFastToTurn);
-  4. a planned lane change, offered or just aborted (turnpilotLaneChangeLeft/Right/Aborted, LaneChangeEvents);
-  5. the wrong lane, or a lane it can't confirm (turnpilotWrongLane).
-  The alerts of 3 to 5 are all Priority.LOW, where AlertManager shows the newest, so the order is kept by not raising the
-  lower ones: the wrong lane isn't raised while a lane change is offered or its abort holds (the car is in a turn-only
-  lane at an intersection before the turn the change is for), and lane_change_events raises nothing while the plan is
-  too fast to turn or faulted (the skip drops the maneuver, so its offer aborts that same frame, and the skip says why).
+  3. a map stop it can't make gently (turnpilotControlAlert, cannotStopComfortably: take control);
+  4. too fast to turn (turnpilotTooFastToTurn);
+  5. a map control's prompt to the driver (turnpilotControlPrompt: stop sign or signal go, yield ahead);
+  6. a map control's other alerts (turnpilotControlAlert: a stop line overrun, going on a yellow or a red);
+  7. a planned lane change, offered or just aborted (turnpilotLaneChangeLeft/Right/Aborted, LaneChangeEvents);
+  8. the wrong lane, or a lane it can't confirm (turnpilotWrongLane);
+  9. the map controls' status (turnpilotControlAlert: map stops unavailable, light source rejected).
+  The alerts of 4 to 9 are all Priority.LOW or lower, where AlertManager shows the newest, so the order is kept by not
+  raising the lower ones: the wrong lane isn't raised while a lane change is offered or its abort holds (the car is in a
+  turn-only lane at an intersection before the turn the change is for), and lane_change_events raises nothing while the
+  plan is too fast to turn, faulted or has a map control's prompt or alert up (the skip drops the maneuver, so its offer
+  aborts that same frame, and the skip says why).
   turnpilotd keeps the lower ones unset while it isn't acting or is faulted (turnpilotd.py). A handback cancels an
   offered lane change with its abort (turnpilotLaneChangeAborted, reason handedBack), raised with it: on screen the
   engaged handback's soft disable (Priority.MID) outranks it, and while disengaged the abort (a WARNING) isn't shown.
@@ -78,13 +94,53 @@ def plan_events(sm, now: float | None = None) -> list[str]:
     return ['turnpilotUnavailable']
   if plan.shadow:  # in shadow mode the driver drives, and TurnPilot acts on nothing
     return []
+  alert = str(plan.controlAlert)
+  if alert in CONTROL_ALERT_FIRST:
+    return ['turnpilotControlAlert']
   if plan.tooFastToTurn:
     return ['turnpilotTooFastToTurn']
+  if str(plan.controlPrompt) != 'none':
+    return ['turnpilotControlPrompt']
+  if alert in CONTROL_ALERT_EVENTS:
+    return ['turnpilotControlAlert']
   if lane_change_events(plan):
     return []  # the lane change outranks the wrong lane
   if plan.laneMismatch != custom.TurnpilotPlan.LaneMismatch.none:
     return ['turnpilotWrongLane']
+  if alert in CONTROL_STATUS_ALERTS:
+    return ['turnpilotControlAlert']
   return []
+
+
+# turnpilotPlan.controlPrompt / controlAlert -> what the driver is told (selfdrived/events.py)
+CONTROL_PROMPT_TEXT = {
+  'stopSignGo': 'Stop sign: check cross traffic, press accelerator to go',
+  'signalGo': 'Signal ahead: light not checked, press accelerator to proceed',
+  'yieldAhead': 'Yield ahead',
+}
+CONTROL_ALERT_TEXT = {
+  'cannotStopComfortably': 'Cannot stop gently for the stop/signal',
+  'stopOverrun': 'Passed the stop line without stopping',
+  'proceedingOnYellow': 'Too close to stop for the yellow',
+  'goingOnRed': 'Going on red: your go',
+  'mapControlsUnavailable': 'Map stops and signals unavailable',
+  'lightSourceRejected': 'Light source not accepted: lights unknown',
+}
+
+
+class StaleHoldEvents:
+  """turnpilotd stopped while its plan held the car (shouldStop): plannerd dropped the hold with the stale plan
+  (limits_plan), so the driver is told at once and for as long as it lasts (turnpilotControlAlert, which says take
+  control while there is no fresh plan), not only once the manager sees the process gone."""
+  def __init__(self):
+    self.holding = False
+
+  def update(self, plan) -> tuple[str, ...]:
+    """plan: limits_plan's, None while stale."""
+    if plan is not None:
+      self.holding = bool(plan.shouldStop)
+      return ()
+    return ('turnpilotControlAlert',) if self.holding else ()
 
 
 ABORT_HOLD_S = 2.             # turnpilotPlan.laneChangeAbort holds its reason this long, for selfdrived's alert
@@ -102,8 +158,9 @@ ABORT_TEXT = {
 def lane_change_events(plan) -> tuple[str, ...]:
   """The onroad event names (log.OnroadEvent.EventName) a turnpilotPlan raises: the coming lane change, left or right,
   from its warning until it starts, and an abort while laneChangeAbort holds its reason. Nothing while the plan is too
-  fast to turn or faulted: those outrank it (plan_events). plan: shown_plan's, or None."""
-  if plan is None or plan.tooFastToTurn or plan.fault != custom.TurnpilotPlan.Fault.none:
+  fast to turn, faulted, or has a map control's prompt or alert above it: those outrank it (plan_events). plan:
+  shown_plan's, or None."""
+  if plan is None or plan.tooFastToTurn or plan.fault != custom.TurnpilotPlan.Fault.none or control_outranks_lane_change(plan):
     return ()
   offer = str(plan.laneChangeOffer)
   events = ('turnpilotLaneChangeLeft',) if offer == 'left' else ('turnpilotLaneChangeRight',) if offer == 'right' else ()

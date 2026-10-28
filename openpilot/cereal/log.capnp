@@ -138,6 +138,8 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     turnpilotDetectorStopped @108;  # TurnPilot: the detector stopped, hand back to the driver
     turnpilotModelFellBack @109;    # TurnPilot: modeld fell back to the small model, which TurnPilot can't navigate on
     turnpilotNoDetector @113;       # TurnPilot: the detector never started (no pkl, a failed load), hand back to the driver
+    turnpilotControlPrompt @114;    # TurnPilot map stop control: turnpilotPlan.controlPrompt (stop sign / signal go)
+    turnpilotControlAlert @115;     # TurnPilot map stop control: turnpilotPlan.controlAlert
 
     # TurnPilot: a planned lane change is coming (chime, countdown), and one was aborted before it started
     turnpilotLaneChangeLeft @110;
@@ -2470,6 +2472,33 @@ struct NavInstruction {
   # TurnPilot: navd's count of routes calculated, on every message, valid or not: a new number is a new route (a new
   # destination, or a reroute), and an invalid message with the same number is a gap in this one (off it for a fix)
   routeCount @19 :UInt32;
+  # TurnPilot: stop signs, yields and traffic signals on the route ahead (-15 m to 400 m, nearest first, at most 8), in
+  # maneuverDistance's frame, from Valhalla's trace_attributes and locate (selfdrive/turnpilot/routing/controls.py).
+  # controlsStatus is set on every valid message: zero controls with a status other than ok is never "clear".
+  controls @20 :List(MapControl);
+  controlsStatus @21 :ControlsStatus;
+
+  struct MapControl {
+    id @0 :UInt16;            # index along the route; the identity is (routeCount, id)
+    kind @1 :ControlKind;
+    distance @2 :Float32;     # m to the stop point (the line less a margin)
+    lineMapped @3 :Bool;      # the line came from mapped data (the sim sidecar), not the junction less 10 m
+    junction @4 :Bool;        # other roads meet the route at its node
+    crossSuspect @5 :Bool;    # the route's road outranks every crossing one: a stop/yield likely for the cross road
+  }
+  enum ControlKind {
+    stop @0;
+    yield @1;
+    signal @2;
+  }
+  enum ControlsStatus {
+    none @0;         # no route, or an old navd
+    ok @1;
+    walkOrSnap @2;   # the route didn't edge_walk, matched by walk_or_snap
+    partial @3;      # over 10% of the route's edges unmatched by locate
+    failed @4;       # no controls: trace_attributes failed, or an exception (the route still publishes)
+    unsupported @5;  # the tiles carry no control data (no controls_built marker)
+  }
 
   struct Lane {
     directions @0 :List(Direction);
@@ -2676,7 +2705,7 @@ struct Event {
     turnpilotPlan @107 :Custom.TurnpilotPlan;
     turnpilotDetections @108 :Custom.TurnpilotDetections;
     turnpilotScene @109 :Custom.TurnpilotScene;
-    customReserved3 @110 :Custom.CustomReserved3;
+    turnpilotLights @110 :Custom.TurnpilotLights;
     customReserved4 @111 :Custom.CustomReserved4;
     customReserved5 @112 :Custom.CustomReserved5;
     customReserved6 @113 :Custom.CustomReserved6;
