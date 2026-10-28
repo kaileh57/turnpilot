@@ -133,6 +133,8 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     bigModelLoading @100;
     bigModelFailed @102;
     turnpilotUnavailable @105;  # TurnPilot on but doing nothing: turnpilotPlan.fault
+    turnpilotTooFastToTurn @106;  # turnpilotPlan.tooFastToTurn: the turn is skipped and navd reroutes
+    turnpilotWrongLane @107;  # turnpilotPlan.laneMismatch
 
     lowBatteryDEPRECATED @40;
     soundsUnavailableDEPRECATED @47;

@@ -5,6 +5,7 @@ from openpilot.selfdrive.turnpilot.desire_timing import (CLEAR_FRAMES, CLEAR_MAR
                                                          DesireTiming, keep_lead)
 from openpilot.selfdrive.turnpilot.hooks import CLEAR_DESIRE
 from openpilot.selfdrive.turnpilot.route_follower import RouteFollower, maneuver_from_instruction
+from openpilot.selfdrive.turnpilot.turn_skip import TurnSkip
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, nav_instruction
 
 Desire = log.Desire
@@ -13,7 +14,7 @@ Desire = log.Desire
 def drive(maneuvers, v=8., seconds=40., lines=(True, True), turns_at=8., speed_profile=None, noise=None, steer_sign=1.):
   """Drive along a route; the car steers into a turn once it is turns_at m from it (None: never turns).
   noise(i) m is added to the position navd sees on frame i. Returns [(s, distance, desire)] per frame."""
-  navd, rf, dt_ = FakeNavd(maneuvers), RouteFollower(), DesireTiming()
+  navd, rf, dt_, skip = FakeNavd(maneuvers), RouteFollower(), DesireTiming(), TurnSkip()
   s, out = 0., []
   for i in range(int(seconds / DT_MDL)):
     v_now = speed_profile(i * DT_MDL) if speed_profile else v
@@ -22,7 +23,10 @@ def drive(maneuvers, v=8., seconds=40., lines=(True, True), turns_at=8., speed_p
     steer, yaw = 0., 0.
     if turns_at is not None and rf.upcoming is not None and rf.distance < turns_at:
       steer, yaw = 90. * steer_sign, v_now / 8. * steer_sign  # an 8 m radius
-    desire = dt_.update(rf.upcoming, rf.distance, rf.maneuver_id, rf.passed, v_now, steer, *lines, DT_MDL, yaw)
+    # as turnpilotd: a turn the car is too fast for is skipped, and no pulse starts while it can't make it
+    state = skip.update(rf.upcoming, rf.distance, rf.maneuver_id, v_now, dt_.maneuver_id == rf.maneuver_id and dt_.started)
+    desire = dt_.update(None if state.skipped else rf.upcoming, rf.distance, rf.maneuver_id, rf.passed, v_now, steer, *lines,
+                        DT_MDL, yaw, may_start=state.feasible_now)
     out.append((s, rf.distance, desire))
     s += v_now * DT_MDL
   return out
@@ -38,15 +42,17 @@ def rising_edges(trace, desire):
 
 
 def test_left_turn_desire_from_the_lead():
-  trace = drive([(200., "turn", "left"), (900., "turn", "right")], v=9.)
+  # at 5.5 m/s, about what the turn cap leaves the car at by then (at 9 m/s the entry pulse waits: turn_skip.py)
+  v = 5.5
+  trace = drive([(200., "turn", "left"), (900., "turn", "right")], v=v)
   edges = rising_edges(trace, Desire.turnLeft)
-  assert len(edges) == 2 and 0. < edges[1][1] < ENTRY_M  # the pulse at the lead, and the one for the turn itself
+  assert len(edges) == 3 and 0. < edges[-1][1] < ENTRY_M  # the pulse at the lead, a repeat, and one for the turn itself
   s, d = edges[0]
-  assert TURN_DESIRE_LEAD_M - 9. * DT_MDL - 1. < d < TURN_DESIRE_LEAD_M  # within a frame of the lead, dead-reckoned
+  assert TURN_DESIRE_LEAD_M - v * DT_MDL - 1. < d < TURN_DESIRE_LEAD_M  # within a frame of the lead, dead-reckoned
   assert all(desire == Desire.none for s, d, desire in trace if s < 200. - TURN_DESIRE_LEAD_M - 1.)
   # held into the junction (the car turns 8 m out, at 64 deg/s), cleared once it has turned 80 degrees
   held = [desire for s, d, desire in trace if 200. - TURN_DESIRE_LEAD_M + 1. < s < 202.]
-  assert held.count(Desire.turnLeft) == len(held) - PULSE_GAP_FRAMES  # but for the drop before the entry pulse
+  assert held.count(Desire.turnLeft) == len(held) - 2 * PULSE_GAP_FRAMES  # but for the drops before the repeat pulses
   assert [desire for s, d, desire in trace if 202. < s < 210.].count(CLEAR_DESIRE) == CLEAR_FRAMES
   assert all(desire != Desire.turnLeft for s, d, desire in trace if s > 230.)
   assert not rising_edges(trace, Desire.turnRight)  # the next turn, 700 m on, isn't reached
@@ -81,11 +87,12 @@ def test_slight_right_exit_sends_keep_right():
 
 
 def test_no_turn_pulse_at_road_speed():
-  # 12 m/s to 25 m out, then 8: the pulse waits for the car to slow, and goes at once when it has
+  # 12 m/s to 25 m out, then 8: too fast for the left at its lead, so the turn is skipped, and no pulse goes even once the
+  # car has slowed (turn_skip.py; the old fixed 10 m/s gate waited and pulsed 25 m out)
   def slower(t):
     return 12. if t < 175. / 12. else 8.
-  edges = rising_edges(drive([(200., "turn", "left"), (900., "turn", "right")], seconds=30., speed_profile=slower), Desire.turnLeft)
-  assert edges and 24. < edges[0][1] < 25.5
+  assert not rising_edges(drive([(200., "turn", "left"), (900., "turn", "right")], seconds=30., speed_profile=slower),
+                          Desire.turnLeft)
   # a pulse already out is held when the car speeds up, rather than dropped and sent again
   def faster(t):
     return 8. if t < 165. / 8. else 12.

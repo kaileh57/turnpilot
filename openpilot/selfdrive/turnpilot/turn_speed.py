@@ -2,7 +2,7 @@
 
 At a junction nothing in openpilot knows which way the route goes, so the car would reach a turn at road
 speed. The target speed comes from a lateral accel limit on the corner's radius, estimated from the turn angle
-(navInstruction has no bearings, so the angle is the modifier's nominal one unless a caller has better), but never
+(the junction's real one from Valhalla's bearings, else the modifier's nominal one; route_follower.py), but never
 under 25 km/h, with a braking curve back to where the turn desire goes out. That is the speed the big model took
 gate 1's turns from (a pulse 40 m out at 6.9 m/s, after which the model slows itself to about 4.5 m/s for the turn).
 Braking on to a geometric 4-5 m/s before the pulse put the car at the junction 6 s after it, by which time the
@@ -12,7 +12,8 @@ model planned the turn but held 7 m/s, it gave the turn up or stopped at the cor
 an accel with a 1 s time constant, so the car trails the curve; the curve leads the car by 2 s.
 A keep (a slight turn at a junction) is capped only from town speeds: above KEEP_CAP_SPEED_MAX it is a road bearing
 off, and the cap would brake the car at 2 m/s^2 from highway speed for a bend it takes as it is. Ramps and forks are
-never capped.
+never capped. Only junction maneuvers are capped at all: a road that bends is the model's (route_follower.py), and a
+turn the car is too fast for is skipped, cap and all (turn_skip.py).
 """
 import math
 

@@ -40,6 +40,11 @@ def plan_events(sm, now: float | None = None) -> list[str]:
   events = []
   if plan.fault != custom.TurnpilotPlan.Fault.none:
     events.append('turnpilotUnavailable')
+  if not plan.shadow:  # in shadow mode the driver drives, and TurnPilot acts on nothing
+    if plan.tooFastToTurn:
+      events.append('turnpilotTooFastToTurn')
+    if plan.laneMismatch != custom.TurnpilotPlan.LaneMismatch.none:
+      events.append('turnpilotWrongLane')
   return events
 
 

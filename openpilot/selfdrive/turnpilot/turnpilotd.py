@@ -16,14 +16,17 @@ from openpilot.common.realtime import DT_MDL, Ratekeeper
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.desire_timing import DesireTiming
-from openpilot.selfdrive.turnpilot.lane_planner import OPENPILOT_SIGNALS_BRANDS, LanePlanner, lane_change_window, model_lanes_from_msg
+from openpilot.selfdrive.turnpilot.lane_planner import (OPENPILOT_SIGNALS_BRANDS, LanePlanner, lane_change_window, lane_mismatch,
+                                                         model_lanes_from_msg)
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, TURN, RouteFollower
 from openpilot.selfdrive.turnpilot.scene.tracker import SceneTracker, default_yaw_rate
 from openpilot.selfdrive.turnpilot.scene_policy import NO_ACCEL_CAP, scene_policy
+from openpilot.selfdrive.turnpilot.turn_skip import TurnSkip
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, turn_speed_cap
 
 State = custom.TurnpilotPlan.State
 Fault = custom.TurnpilotPlan.Fault
+LaneMismatch = custom.TurnpilotPlan.LaneMismatch
 
 APPROACH_M = 150.  # a turn or keep this close (or inside its lane change window) is being approached
 NO_LONG_REASON = "openpilot longitudinal is off"
@@ -34,6 +37,8 @@ ERROR_LOG_PERIOD_S = 10.  # s between logged exceptions from one place, so one t
 # hooks.PLAN_MAX_AGE_S), not at the first: a plan invalid for one frame drops its desire for that frame, and modeld takes
 # the desire coming back as a new pulse
 PLAN_INPUT_GRACE_FRAMES = 10
+MISMATCH_CONFIRM_FRAMES = 20  # a lane mismatch this many frames in a row (1 s) is flagged: the model's lane count flickers
+NO_JUNCTION_DATA_REASON = "no junction data: nominal turn angle"
 
 
 class ErrorLog:
@@ -59,6 +64,21 @@ class TurnPilot:
     self.follower = RouteFollower()
     self.desires = DesireTiming()
     self.lanes = LanePlanner()
+    self.skip = TurnSkip()
+    self.mismatch = LaneMismatch.none
+    self._mismatch_candidate, self._mismatch_frames = LaneMismatch.none, 0
+
+  def _lane_mismatch(self, found) -> int:
+    """found, once it has held MISMATCH_CONFIRM_FRAMES; logged when it changes."""
+    self._mismatch_frames = self._mismatch_frames + 1 if found == self._mismatch_candidate else 1
+    self._mismatch_candidate = found
+    if (found == LaneMismatch.none or self._mismatch_frames >= MISMATCH_CONFIRM_FRAMES) and found != self.mismatch:
+      if found != LaneMismatch.none:
+        rf = self.follower
+        cloudlog.event("turnpilot_lane_mismatch", error=True, mismatch=str(found), maneuver_distance=round(rf.distance, 1),
+                       through_distance=round(rf.through_distance, 1))
+      self.mismatch = found
+    return self.mismatch
 
   def update(self, sm, scene, enabled: bool, shadow: bool, driver_signals: bool = True, right_hand_traffic: bool = True):
     """A turnpilotPlan message from sm's carState, navInstruction and modelV2, and a TurnpilotScene."""
@@ -76,7 +96,12 @@ class TurnPilot:
     v_ego = max(cs.vEgo, 0.)
     rf = self.follower
     rf.update(sm['navInstruction'], sm.updated['navInstruction'], sm.valid['navInstruction'], v_ego, DT_MDL)
-    maneuver = None if rf.arrived else rf.upcoming
+    upcoming = None if rf.arrived else rf.upcoming
+    # too fast to make the turn: skipped, so nothing below acts on it (no desire, no cap, no turn holds or lane changes)
+    desire_out = self.desires.maneuver_id == rf.maneuver_id and self.desires.started
+    skip = self.skip.update(upcoming, rf.distance, rf.maneuver_id, v_ego, desire_out, right_hand_traffic)
+    maneuver = None if skip.skipped else upcoming
+    plan.tooFastToTurn = skip.skipped
 
     available = scene.available
     objects = list(scene.objects) if available else []
@@ -84,21 +109,27 @@ class TurnPilot:
     lanes = model_lanes_from_msg(model)
     plan.desire = self.desires.update(maneuver, rf.distance, rf.maneuver_id, rf.passed, v_ego, cs.steeringAngleDeg,
                                       lanes.keep_left_ok, lanes.keep_right_ok, DT_MDL, default_yaw_rate(cs, model),
-                                      lat_active=sm['carControl'].latActive, replaced=rf.replaced)
+                                      lat_active=sm['carControl'].latActive, replaced=rf.replaced, may_start=skip.feasible_now)
     plan.laneChange, plan.signalPrompt, lane_reason = self.lanes.update(
       maneuver, rf.distance, lanes, model.meta.laneChangeState, v_ego, cs.leftBlinker, cs.rightBlinker, objects,
       driver_signals, right_hand_traffic, DT_MDL)
+    plan.laneMismatch = self._lane_mismatch(lane_mismatch(maneuver, rf.distance, rf.through_lanes, rf.through_distance, lanes,
+                                                          v_ego, right_hand_traffic))
     decision = scene_policy(objects, available, maneuver, rf.distance, v_ego, right_hand_traffic)
     plan.accelCap = decision.accel_cap
     plan.speedCap = min(decision.speed_cap, turn_speed_cap(maneuver, rf.distance, v_ego, right_hand_traffic))
     plan.shouldStop = decision.should_stop
-    plan.reason = decision.reason or lane_reason
+    no_junction_data = maneuver is not None and maneuver.kind in (TURN, KEEP) and not maneuver.geometry
+    plan.reason = decision.reason or lane_reason or (NO_JUNCTION_DATA_REASON if no_junction_data else "")
 
     plan.routeValid = rf.valid
     if rf.valid and rf.maneuver is not None:
       plan.maneuverDistance = rf.distance
       plan.maneuverType = rf.maneuver.type
       plan.maneuverModifier = rf.maneuver.modifier
+      plan.maneuverAngle = rf.maneuver.angle_deg
+      plan.maneuverGeometryValid = rf.maneuver.geometry
+      plan.maneuverBend = rf.maneuver.bend
 
     if decision.holding:
       plan.state = State.holding

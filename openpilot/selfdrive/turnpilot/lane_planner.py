@@ -14,13 +14,14 @@ the change starts, or DesireHelper would chain a second one. On cars where openp
 is prompted to signal and the request waits for that blinker.
 """
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from openpilot.cereal import custom, log
 from openpilot.selfdrive.controls.lib.desire_helper import LANE_CHANGE_SPEED_MIN
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, LEFT, RIGHT, TURN
 
 LaneChange = custom.TurnpilotPlan.LaneChange
+LaneMismatch = custom.TurnpilotPlan.LaneMismatch
 LaneChangeState = log.LaneChangeState
 
 LANE_WIDTH = 3.6
@@ -52,6 +53,7 @@ class ModelLanes:
   keep_left_ok: bool = False  # a keep desire that way has a lane line and road beside it
   keep_right_ok: bool = False
   width: float = LANE_WIDTH
+  measured: bool = field(default=False, compare=False)  # the model reads both ego lane lines: the counts mean something
 
 
 def _side(ego_y, ego_prob, outer_y, outer_prob, edge_y, edge_std, sign, width):
@@ -73,7 +75,8 @@ def model_lanes(line_ys, line_probs, edge_ys, edge_stds) -> ModelLanes:
   width = measured if min(line_probs[1], line_probs[2]) > LINE_PROB_MIN and 2.5 <= measured <= 4.8 else LANE_WIDTH
   left, keep_left = _side(line_ys[1], line_probs[1], line_ys[0], line_probs[0], edge_ys[0], edge_stds[0], -1., width)
   right, keep_right = _side(line_ys[2], line_probs[2], line_ys[3], line_probs[3], edge_ys[1], edge_stds[1], 1., width)
-  return ModelLanes(left, right, keep_left, keep_right, width)
+  measured = min(line_probs[1], line_probs[2]) > LINE_PROB_MIN
+  return ModelLanes(left, right, keep_left, keep_right, width, measured)
 
 
 def model_lanes_from_msg(model) -> ModelLanes:
@@ -83,6 +86,33 @@ def model_lanes_from_msg(model) -> ModelLanes:
     return ModelLanes()
   return model_lanes([ln.y[SAMPLE_IDX] for ln in lines], list(model.laneLineProbs),
                      [e.y[SAMPLE_IDX] for e in edges], list(model.roadEdgeStds))
+
+
+def ego_lane_index(lane_count: int, lanes: ModelLanes, right_hand_traffic: bool) -> int:
+  """The car's lane in a nav lane list of lane_count, from the left, counted from the curb side (always its own
+  direction's): modelV2's far road edge on an undivided road lies beyond the oncoming lanes."""
+  idx = lane_count - 1 - lanes.right if right_hand_traffic else lanes.left
+  return min(max(idx, 0), lane_count - 1)
+
+
+def lane_mismatch(maneuver, distance: float, through_lanes: tuple, through_distance: float, lanes: ModelLanes, v_ego: float,
+                  right_hand_traffic: bool = True):
+  """The car is in a turn-only lane where the route goes straight through, or not in a lane that turns where the route
+  turns, closer than the lane planner still changes lanes (lane_change_window's end). Only flagged, never acted on:
+  LaneMismatch.none without the map's lane list or without the model reading the ego lane's lines."""
+  if not lanes.measured:
+    return LaneMismatch.none
+  near = lane_change_window(v_ego)[1]
+  turn = maneuver is not None and maneuver.kind == TURN
+  if len(through_lanes) >= 2 and 0. < through_distance < near and not (turn and distance < through_distance):
+    directions, active = through_lanes[ego_lane_index(len(through_lanes), lanes, right_hand_traffic)]
+    if not active and directions and "straight" not in directions:
+      return LaneMismatch.turnOnlyGoingStraight
+  if turn and len(maneuver.lanes) >= 2 and 0. < distance < near:
+    directions, active = maneuver.lanes[ego_lane_index(len(maneuver.lanes), lanes, right_hand_traffic)]
+    if not active and not any(d in SIDE_DIRECTIONS[maneuver.side] for d in directions):
+      return LaneMismatch.wrongLaneForTurn
+  return LaneMismatch.none
 
 
 def lane_changes_needed(maneuver, lanes: ModelLanes, right_hand_traffic: bool = True) -> int:
@@ -95,8 +125,7 @@ def lane_changes_needed(maneuver, lanes: ModelLanes, right_hand_traffic: bool = 
     valid = ([i for i, (_, active) in enumerate(nav) if active] or
              [i for i, (dirs, _) in enumerate(nav) if any(d in SIDE_DIRECTIONS[maneuver.side] for d in dirs)] or
              [0 if maneuver.side == LEFT else len(nav) - 1])
-    idx = len(nav) - 1 - lanes.right if curb == RIGHT else lanes.left  # from the left, counted from the curb
-    idx = min(max(idx, 0), len(nav) - 1)
+    idx = ego_lane_index(len(nav), lanes, right_hand_traffic)
     need = idx - max(valid) if idx > max(valid) else idx - min(valid) if idx < min(valid) else 0
   elif maneuver.side == curb and maneuver.kind == KEEP:
     need = lanes.left if curb == LEFT else -lanes.right

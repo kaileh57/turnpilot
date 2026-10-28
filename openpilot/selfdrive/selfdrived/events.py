@@ -5,7 +5,7 @@ import os
 from enum import IntEnum
 from collections.abc import Callable
 
-from openpilot.cereal import log
+from openpilot.cereal import custom, log
 from opendbc.car.structs import car
 import openpilot.cereal.messaging as messaging
 from openpilot.common.constants import CV
@@ -239,6 +239,12 @@ def turnpilot_unavailable_alert(CP: car.CarParams, CS: car.CarState, sm: messagi
   return NormalPermanentAlert("TurnPilot Unavailable", sm['turnpilotPlan'].reason or "TurnPilot is doing nothing")
 
 
+def turnpilot_wrong_lane_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
+  straight = sm['turnpilotPlan'].laneMismatch == custom.TurnpilotPlan.LaneMismatch.turnOnlyGoingStraight
+  return Alert("Wrong Lane", "In a turn-only lane, route goes straight" if straight else "This lane doesn't turn with the route",
+               AlertStatus.userPrompt, AlertSize.mid, Priority.LOW, VisualAlert.none, AudibleAlert.none, .2)
+
+
 def startup_master_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
   branch = get_short_branch()  # Ensure get_short_branch is cached to avoid lags on startup
   if "REPLAY" in os.environ:
@@ -411,6 +417,19 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   # TurnPilot
   EventName.turnpilotUnavailable: {
     ET.PERMANENT: turnpilot_unavailable_alert,
+  },
+
+  # its own event, so a chime of its own can replace the prompt sound later
+  EventName.turnpilotTooFastToTurn: {
+    ET.WARNING: Alert(
+      "Too Fast to Turn",
+      "Rerouting",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 3.),
+  },
+
+  EventName.turnpilotWrongLane: {
+    ET.WARNING: turnpilot_wrong_lane_alert,
   },
 
   EventName.bigModelLoading: {
