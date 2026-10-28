@@ -25,7 +25,7 @@ Desire = log.Desire
 THREE_LANES_LEFT_TURN = ((("left",), True), (("straight",), False), (("straight", "right"), False))
 
 
-GO_TAP_S = 1.  # driver.PROMPT_TAP_S
+GO_TAP_S = 1.  # the BeamNG driver taps 2 s after the stop (driver.STOPPED_TAP_S); 1 s here keeps these runs short
 # a left from a T's stem (no road ahead): no unprotected-turn stop (map_controls.py), for the tests of everything else
 T_LEFT = junction_of("left", opposing='none')
 

@@ -1,4 +1,6 @@
 """The sim's driver waits out TurnPilot's lane change countdown before working the stalk."""
+import pytest
+
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal import custom, log
 from openpilot.tools.sim.bridge.beamng.driver import PromptedDriver
@@ -56,20 +58,44 @@ def run_taps(taps, plan, seconds, v=0., engaged=True, green=None, t0=0.):
   return out
 
 
-def test_stop_sign_go_is_tapped_after_a_second():
+def test_stop_sign_go_is_tapped_once_the_car_has_stood_2_s():
   from openpilot.tools.sim.bridge.beamng.driver import TAP_GAS, GasTaps
   taps = GasTaps()
-  out = run_taps(taps, plan_msg('stopSignGo', 'holding', True), 3.)
+  out = run_taps(taps, plan_msg('stopSignGo', 'holding', True), 4.)
   first = out.index(TAP_GAS)
-  assert abs(first * 0.05 - 1.0) < 0.06 and taps.log[0]['reason'] == 'stopSignGo'
+  assert abs(first * 0.05 - 2.0) < 0.06 and taps.log[0]['reason'] == 'stopSignGo'
+  assert taps.log[0]['stopped_s'] >= 2.0 - 1e-6
 
 
-def test_unprotected_turn_go_is_tapped_after_a_second():
+def test_unprotected_turn_go_is_tapped_once_the_car_has_stood_2_s():
   from openpilot.tools.sim.bridge.beamng.driver import TAP_GAS, GasTaps
   taps = GasTaps()
-  out = run_taps(taps, plan_msg('unprotectedTurnGo', 'holding', True), 3.)
+  out = run_taps(taps, plan_msg('unprotectedTurnGo', 'holding', True), 4.)
   first = out.index(TAP_GAS)
-  assert abs(first * 0.05 - 1.0) < 0.06 and taps.log[0]['reason'] == 'unprotectedTurnGo'
+  assert abs(first * 0.05 - 2.0) < 0.06 and taps.log[0]['reason'] == 'unprotectedTurnGo'
+
+
+def test_the_2_s_count_from_when_the_car_stopped_not_from_the_prompt():
+  from openpilot.tools.sim.bridge.beamng.driver import TAP_GAS, GasTaps
+  # the prompt comes up while the car still rolls to its stop: no tap until it has stood 2 s
+  taps = GasTaps()
+  out = run_taps(taps, plan_msg('unprotectedTurnGo', 'holding', True), 1., v=1.)
+  out += run_taps(taps, plan_msg('unprotectedTurnGo', 'holding', True), 4., t0=1.)
+  first = out.index(TAP_GAS)
+  assert abs(first * 0.05 - 3.0) < 0.06
+  # the car stands 1 s in the stop sign's dwell before the prompt: the tap comes 2 s after the stop, 1 s after the prompt
+  taps = GasTaps()
+  out = run_taps(taps, plan_msg('none', 'holding', True), 1.)
+  out += run_taps(taps, plan_msg('stopSignGo', 'holding', True), 4., t0=1.)
+  first = out.index(TAP_GAS)
+  assert abs(first * 0.05 - 2.0) < 0.06 and taps.log[0]['stopped_s'] == pytest.approx(2.0, abs=0.06)
+  # a creep in the hold restarts the count
+  taps = GasTaps()
+  out = run_taps(taps, plan_msg('stopSignGo', 'holding', True), 1.5)
+  out += run_taps(taps, plan_msg('stopSignGo', 'holding', True), 0.1, v=1., t0=1.5)
+  out += run_taps(taps, plan_msg('stopSignGo', 'holding', True), 4., t0=1.6)
+  first = out.index(TAP_GAS)
+  assert abs(first * 0.05 - 3.6) < 0.06
 
 
 def test_signal_go_only_on_a_ground_truth_green():

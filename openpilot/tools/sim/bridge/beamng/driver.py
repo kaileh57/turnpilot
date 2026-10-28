@@ -36,20 +36,23 @@ class PromptedDriver:
 
 
 TAP_GAS, TAP_S = 0.25, 1.0  # the driver's go: this much gas for this long, an override (DisengageOnAccelerator off)
-PROMPT_TAP_S = 1.0          # TurnPilot asks for a go (controlPrompt): the driver looks for a second, then taps
+STOPPED_TAP_S = 2.0         # TurnPilot asks for a go (controlPrompt): the driver taps once the car has stood this long
 STALL_S = 4.0               # standing engaged this long with nothing held (the model stopped on its own): a tap to go on
 TAP_GAP_S = 2.0             # s after a tap ends before another
 STANDING = 0.3              # m/s
 
 
 class GasTaps:
-  """The sim driver's gas taps, where a driver would give one, each logged with its reason:
-  - stopSignGo: TurnPilot holds the car at a stop sign past its dwell and asks for the driver's go: after PROMPT_TAP_S;
-  - unprotectedTurnGo: held at an unprotected turn's hold line for the driver's go: after PROMPT_TAP_S, as a driver
-    who has looked across (this driver doesn't look: the detector's oncoming hold after the go is what it exercises);
+  """The sim driver's gas taps, where a driver would give one, each logged with its reason and how long the car had
+  stood ('stopped_s'):
+  - stopSignGo: TurnPilot holds the car at a stop sign past its dwell and asks for the driver's go: once the car has
+    stood STOPPED_TAP_S (counted from the stop, not the prompt: a dwell longer than that gets its tap with the prompt);
+  - unprotectedTurnGo: held at an unprotected turn's hold line for the driver's go: once the car has stood
+    STOPPED_TAP_S, as a driver who has looked across (this driver doesn't look: the detector's oncoming hold after the
+    go is what it exercises);
   - signalGo: a signal whose light TurnPilot hasn't checked: only when the ground-truth light (the bridge's own reading
-    of the game) is green, after PROMPT_TAP_S, never on red, yellow or a light it can't read; signal_tap False never taps
-    it (the stop-at-the-line runs);
+    of the game) is green, once the car has stood STOPPED_TAP_S, never on red, yellow or a light it can't read;
+    signal_tap False never taps it (the stop-at-the-line runs);
   - stall: standing engaged STALL_S with nothing held and no prompt (plan not holding, no shouldStop): the model stopped
     on its own (a stop sign it saw, or no pull-away after a hold let go, as BeamNG ped_crosswalk_right did).
   Never while TurnPilot holds the car for anything else: a pedestrian, the stop sign's dwell."""
@@ -58,6 +61,7 @@ class GasTaps:
     self.signal_tap = signal_tap
     self.log: list[dict] = []
     self._since = None      # (reason, t) the current reason to tap began
+    self._stopped = None    # t the car came to a stand, engaged (None: moving or not engaged)
     self._tap_until = -1.
     self._next_ok = -1.
 
@@ -66,8 +70,10 @@ class GasTaps:
     (None: unknown)."""
     if t < self._tap_until:
       return TAP_GAS
+    standing = engaged and v < STANDING
+    self._stopped = (t if self._stopped is None else self._stopped) if standing else None
     reason = None
-    if engaged and v < STANDING and plan is not None:
+    if standing and plan is not None:
       prompt = str(plan.controlPrompt)
       if prompt in ('stopSignGo', 'unprotectedTurnGo'):
         reason = prompt
@@ -80,11 +86,11 @@ class GasTaps:
       return 0.
     if self._since is None or self._since[0] != reason:
       self._since = (reason, t)
-    wait = STALL_S if reason == 'stall' else PROMPT_TAP_S
-    if t - self._since[1] + 1e-6 >= wait and t >= self._next_ok:
+    waited = t - self._since[1] >= STALL_S - 1e-6 if reason == 'stall' else t - self._stopped >= STOPPED_TAP_S - 1e-6
+    if waited and t >= self._next_ok:
       self._tap_until, self._next_ok, self._since = t + TAP_S, t + TAP_S + TAP_GAP_S, None
-      self.log.append({'t': round(t, 2), 'reason': reason})
-      print(f"driver: gas tap ({reason})", flush=True)
+      self.log.append({'t': round(t, 2), 'reason': reason, 'stopped_s': round(t - self._stopped, 2)})
+      print(f"driver: gas tap ({reason}, stood {t - self._stopped:.1f} s)", flush=True)
       return TAP_GAS
     return 0.
 
