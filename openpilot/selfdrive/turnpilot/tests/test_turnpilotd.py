@@ -14,7 +14,7 @@ from openpilot.selfdrive.turnpilot.desire_timing import TURN_DESIRE_LEAD_M
 from openpilot.selfdrive.turnpilot.turn_skip import MIN_FIRST_PULSE_M
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, V_TURN_MIN
 from openpilot.selfdrive.turnpilot.turnpilotd import (CAR_UNKNOWN_REASON, DETECTOR_DEADLINE_S, DETECTOR_START_DEADLINE_S, NO_LONG_REASON,
-                                                       STOPPED_PROMPT_S, STOPPED_REASON, WAITING_REASON, TurnPilot, long_control_for)
+                                                       STOPPED_LEAD_M, STOPPED_PROMPT_S, STOPPED_REASON, WAITING_REASON, TurnPilot, long_control_for)
 from openpilot.selfdrive.turnpilot.handback import Handback
 from openpilot.selfdrive.turnpilot.scene.tracker import STALE_S
 
@@ -1819,10 +1819,10 @@ def test_stood_engaged_with_nothing_holding_it_asks_for_the_drivers_go_and_never
   and the car stood 470 s. Standing engaged STOPPED_PROMPT_S with no TurnPilot hold, no lead and no map control within
   30 m, TurnPilot asks for the driver's go, with a chime (carStoppedGo). It never goes itself."""
   def stand(sim, seconds, **kw):
-    lead = kw.pop('lead_prob', None)
+    lead, lead_x = kw.pop('lead_prob', None), kw.pop('lead_x', 30.)
     plans = []
     for _ in range(int(round(seconds / DT_MDL))):
-      sim.model_kw = {} if lead is None else {'lead_prob': lead}
+      sim.model_kw = {} if lead is None else {'lead_prob': lead, 'lead_x': lead_x}
       sim.v = 0.  # the model holds the car: nothing in the plan does
       plans.append(sim.step(engaged=True, **kw))
     return plans
@@ -1848,10 +1848,26 @@ def test_stood_engaged_with_nothing_holding_it_asks_for_the_drivers_go_and_never
     sim.v = 0.
     plans.append(sim.step(engaged=False))
   assert all(p.controlPrompt == 'none' for p in plans)
-  assert all(p.controlPrompt == 'none' for p in stand(sim, STOPPED_PROMPT_S + 1., lead_prob=0.9))
+  assert all(p.controlPrompt == 'none' for p in stand(sim, STOPPED_PROMPT_S + 1., lead_prob=0.9, lead_x=7.))  # queued behind it
+  assert all(p.controlPrompt == 'none' for p in stand(sim, STOPPED_PROMPT_S + 1., lead_prob=0.6, lead_x=STOPPED_LEAD_M - 1.))
   sim = Sim([(2000., 'turn', 'left', T_LEFT)], controls=[(28., 'stop')])
   sim.run(0.2)
   assert all(p.controlPrompt == 'none' for p in stand(sim, STOPPED_PROMPT_S + 1.))  # a stop sign 25 m on: the queue for it
+
+
+def test_a_lead_too_far_ahead_to_hold_the_car_doesnt_keep_it_standing_silently():
+  """The same route_demo stand: the model saw a lead of prob ~0.6 at 21-28 m the whole 470 s (radarState too), standing.
+  openpilot stands STOP_DISTANCE (6 m) behind a lead it is queued for: one that far ahead is not what holds the car, so
+  the driver is still asked for the go."""
+  sim = Sim([(2000., 'turn', 'left', T_LEFT)])
+  sim.run(1.)
+  plans = []
+  for _ in range(int(round((STOPPED_PROMPT_S + 0.2) / DT_MDL))):
+    sim.model_kw = {'lead_prob': 0.6, 'lead_x': 25.}
+    sim.v = 0.
+    plans.append(sim.step(engaged=True))
+  assert plans[-1].controlPrompt == 'carStoppedGo' and plans[-1].reason == STOPPED_REASON
+  assert 6. < STOPPED_LEAD_M < 21.  # past long_mpc.STOP_DISTANCE, short of the recorded lead
 
 
 def test_a_turn_lane_a_map_stop_leaves_no_room_for_is_skipped_out_loud_never_turned_from_the_wrong_lane():

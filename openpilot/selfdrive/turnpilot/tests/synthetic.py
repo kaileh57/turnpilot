@@ -116,9 +116,9 @@ def road(lanes_left, lanes_right, line_prob=0.9, edge_std=0.3, lane_width=LANE_W
   return line_ys, line_probs, edge_ys, [edge_std, edge_std]
 
 
-def model_v2(lanes_left=0, lanes_right=0, lane_change_state='off', big=False, lead_prob=None, **kwargs):
+def model_v2(lanes_left=0, lanes_right=0, lane_change_state='off', big=False, lead_prob=None, lead_x=30., **kwargs):
   """A modelV2 reader with flat lane lines and road edges from road(); big: from the big (chestnut) driving model;
-  lead_prob: leadsV3[0].prob, 30 m ahead (no leads without it)."""
+  lead_prob: leadsV3[0].prob, lead_x m ahead (no leads without it)."""
   line_ys, line_probs, edge_ys, edge_stds = road(lanes_left, lanes_right, **kwargs)
   msg = messaging.new_message('modelV2')
   m = msg.modelV2
@@ -138,7 +138,7 @@ def model_v2(lanes_left=0, lanes_right=0, lane_change_state='off', big=False, le
   if lead_prob is not None:
     m.init('leadsV3', 3)
     for lead in m.leadsV3:
-      lead.prob, lead.x = float(lead_prob), [30.] * 6
+      lead.prob, lead.x = float(lead_prob), [float(lead_x)] * 6
   return msg.as_reader().modelV2
 
 

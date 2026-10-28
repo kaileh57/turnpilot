@@ -47,9 +47,9 @@ drives the car on through a pedestrian. Its desire and lane change are never act
 Once the detector is back and TurnPilot acts again, the dropped maneuver is taken up or skipped out loud, never left
 half driven (_take_up_dropped).
 Standing engaged STOPPED_PROMPT_S with nothing of TurnPilot's holding the car (no shouldStop, no cap biting), no lead from
-the model, no map control within STOPPED_CONTROL_M, gas and brake off, the model stopped on its own: the plan asks for the
-driver's go (controlPrompt carStoppedGo, "Car stopped — tap gas to continue", a chime). TurnPilot never goes itself: the
-driver's tap does, and the wait starts over.
+the model within STOPPED_LEAD_M (one further on doesn't hold a standing car), no map control within STOPPED_CONTROL_M,
+gas and brake off, the model stopped on its own: the plan asks for the driver's go (controlPrompt carStoppedGo, "Car
+stopped — tap gas to continue", a chime). TurnPilot never goes itself: the driver's tap does, and the wait starts over.
 A lane change a map stop leaves no room for, before it or after its go, with the map's lane list placing the car in a lane
 the maneuver doesn't leave from (lane_planner.py: unreachable), skips the maneuver as too fast to turn does: said
 (turnpilotTooFastToTurn, "Can't Reach Turn Lane" by laneChangeWait unreachable) and rerouted, unless its desire went out.
@@ -122,6 +122,8 @@ STANDSTILL_SPEED = 0.3  # m/s: a hold let go slower than this pulls the car away
 STOPPED_PROMPT_S = 5.
 STOPPED_CONTROL_M = 30.
 STOPPED_LEAD_PROB = 0.5  # modelV2.leadsV3[0].prob over this is a lead (plannerd's own threshold)
+STOPPED_LEAD_M = 15.  # ...and it holds the car only this close: openpilot stands long_mpc.STOP_DISTANCE (6 m) behind a
+                      # lead it is queued for, and closes up to one further on (route_demo: a ~0.6 lead at 21-28 m, 470 s)
 STOPPED_REASON = "Car stopped — tap gas to continue"
 
 
@@ -483,7 +485,8 @@ class TurnPilot:
   def stopped_unheld(self, sm, cs, v_ego: float, acting: bool, decision, mapd) -> bool:
     """The car has stood engaged STOPPED_PROMPT_S with nothing holding it (module docstring): ask for the driver's go."""
     model = sm['modelV2']
-    lead = len(model.leadsV3) > 0 and model.leadsV3[0].prob > STOPPED_LEAD_PROB
+    lead = len(model.leadsV3) > 0 and model.leadsV3[0].prob > STOPPED_LEAD_PROB and len(model.leadsV3[0].x) > 0 and \
+      model.leadsV3[0].x[0] < STOPPED_LEAD_M
     near = [c for c in list(self.map_controls.tracker.controls.values()) + [self.map_controls.turn]
             if c is not None and abs(c.d) < STOPPED_CONTROL_M]
     unheld = acting and sm['carControl'].enabled and v_ego < STANDSTILL_SPEED and not decision.should_stop and \
