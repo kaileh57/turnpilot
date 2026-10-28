@@ -206,6 +206,50 @@ def test_committed_turn_survives_a_jump_close_in():
     assert passed == 1 and rf.maneuver_id != first and rf.distance == 200. and not rf.replaced, (close, then)
 
 
+def test_an_outlier_that_committed_the_turn_is_corrected_back_to_the_track_before_it():
+  # navd's distance to a left reads 20 m short in one update 64 m out, and that reading brings the turn's first pulse
+  # out (the turn is committed from the next frame). The next reading, back on the track before it, corrects the
+  # junction: not held where the outlier put it, where the turn would be read as passed 20 m short and its cap lifted
+  def second_on(rf, committed):  # navd's next update a second (6 m) on
+    for _ in range(19):
+      rf.update(None, False, True, 6., DT_MDL, committed=committed)
+  rf = RouteFollower()
+  rf.update(nav_instruction(70., junction=LEFT_90, route_count=1), True, True, 6., DT_MDL)
+  first = rf.maneuver_id
+  second_on(rf, False)
+  rf.update(nav_instruction(64. - 20., junction=LEFT_90, route_count=1), True, True, 6., DT_MDL)  # taken up
+  assert abs(rf.distance - 44.) < 1e-3
+  second_on(rf, True)
+  rf.update(nav_instruction(57., junction=LEFT_90, route_count=1), True, True, 6., DT_MDL, committed=True)
+  assert rf.maneuver_id == first and not rf.passed and not rf.replaced and abs(rf.distance - 58.) < 1e-3
+  # from then on it is held as any committed turn is: a reroute reading 25 m off doesn't move it
+  rf.update(nav_instruction(82.7, junction=LEFT_90, route_count=2), True, True, 6., DT_MDL, committed=True)
+  assert rf.maneuver_id == first and not rf.replaced and abs(rf.distance - 57.7) < 1e-3
+  # a second reading off both tracks (the outlier lasting two fixes) doesn't settle it: the next one back on the track
+  # before the outlier still corrects the junction
+  rf = RouteFollower()
+  rf.update(nav_instruction(70., junction=LEFT_90, route_count=1), True, True, 6., DT_MDL)
+  second_on(rf, False)
+  rf.update(nav_instruction(64. - 20., junction=LEFT_90, route_count=1), True, True, 6., DT_MDL)
+  second_on(rf, True)
+  rf.update(nav_instruction(58. - 10., junction=LEFT_90, route_count=1), True, True, 6., DT_MDL, committed=True)
+  assert abs(rf.distance - 38.) < 1e-3
+  second_on(rf, True)
+  rf.update(nav_instruction(52., junction=LEFT_90, route_count=1), True, True, 6., DT_MDL, committed=True)
+  assert not rf.passed and abs(rf.distance - 52.) < 1e-3
+  # a jump after the commit, from a track the readings agreed on, is held through and never taken up after: the track
+  # before the last reading taken up is that one's, so a reading back on the jump's is no correction
+  rf = RouteFollower()
+  rf.update(nav_instruction(70., junction=LEFT_90, route_count=1), True, True, 6., DT_MDL)
+  second_on(rf, False)
+  rf.update(nav_instruction(64., junction=LEFT_90, route_count=1), True, True, 6., DT_MDL)
+  second_on(rf, True)
+  for jumped, track in ((38., 58.), (32., 52.)):
+    rf.update(nav_instruction(jumped, junction=LEFT_90, route_count=1), True, True, 6., DT_MDL, committed=True)
+    assert abs(rf.distance - track) < 1e-3
+    second_on(rf, True)
+
+
 def test_reroute_onto_the_same_committed_turn_from_further_off():
   # navd reroutes 25 m off the route: the new route's first left reads up to that much off where it was dead-reckoned
   rf = RouteFollower()
