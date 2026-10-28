@@ -53,12 +53,15 @@ class GasTaps:
   - signalGo: a signal whose light TurnPilot hasn't checked: only when the ground-truth light (the bridge's own reading
     of the game) is green, once the car has stood STOPPED_TAP_S, never on red, yellow or a light it can't read;
     signal_tap False never taps it (the stop-at-the-line runs);
-  - stall: standing engaged STALL_S with nothing held and no prompt (plan not holding, no shouldStop): the model stopped
-    on its own (a stop sign it saw, or no pull-away after a hold let go, as BeamNG ped_crosswalk_right did).
+  - stall, only with stall_tap (exploring by hand, never a scored run): standing engaged STALL_S with nothing held and no
+    prompt (plan not holding, no shouldStop): the model stopped on its own. Off, a car left standing (no pull-away after a
+    hold let go, as BeamNG ped_crosswalk_right did) is the run's failure to see, not the driver's to push on, and a push
+    in a queue would drive the car at the lead (scenarios/score.py fails a press TurnPilot asked no go for).
   Never while TurnPilot holds the car for anything else: a pedestrian, the stop sign's dwell."""
 
-  def __init__(self, signal_tap: bool = True):
+  def __init__(self, signal_tap: bool = True, stall_tap: bool = False):
     self.signal_tap = signal_tap
+    self.stall_tap = stall_tap
     self.log: list[dict] = []
     self._since = None      # (reason, t) the current reason to tap began
     self._stopped = None    # t the car came to a stand, engaged (None: moving or not engaged)
@@ -79,7 +82,7 @@ class GasTaps:
         reason = prompt
       elif prompt == 'signalGo':
         reason = 'signalGo' if self.signal_tap and green is True else None
-      elif str(plan.state) != 'holding' and not plan.shouldStop:
+      elif self.stall_tap and str(plan.state) != 'holding' and not plan.shouldStop:
         reason = 'stall'
     if reason is None:
       self._since = None

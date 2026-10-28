@@ -223,6 +223,18 @@ class TestGasTaps:
     assert tap['prompt'] == 'unprotectedTurnGo' and tap['reason'] == self.LINE
     assert tap['stopped_s'] == pytest.approx(2.5, abs=0.06) and tap['t'] == pytest.approx(15.5, abs=0.06)
 
+  def test_a_press_turnpilot_never_asked_for_fails_the_run(self):
+    # standing with nothing held and no prompt, the gas pressed: no go was asked for (a stall push would hide a hold let
+    # go with no pull-away, or push the car at a lead)
+    rows = self.left_run()
+    stand = {'state': 'following', 'reason': '', 'control_prompt': 'none', 'v': 0.0, 'nav_dist': 9.0, 'nav_remaining': 69.0}
+    rows = rows[:40] + drive([(4.5, stand), (1.0, {**stand, 'gas': True})]) + rows[40:]
+    t = 0.
+    for r in rows:
+      r['t'], t = round(t, 3), t + DT
+    res = score.summarize('unprotected_left', rows, 'arrived')
+    assert any('no go' in f for f in res['failures']), res['failures']
+
   def test_engaging_on_the_gas_is_no_tap(self):
     rows = drive([(1.0, {'enabled': False, 'gas': True}), (1.0, {})])
     assert score.summarize('route_demo', rows, 'arrived')['gas_taps'] == []

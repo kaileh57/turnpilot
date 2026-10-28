@@ -109,9 +109,13 @@ def test_signal_go_only_on_a_ground_truth_green():
   assert max(run_taps(taps, plan_msg('signalGo', 'holding', True), 5., green=True)) == 0.
 
 
-def test_standing_with_nothing_held_is_tapped_but_a_hold_never_is():
+def test_standing_with_nothing_held_is_never_tapped_unless_asked_and_a_hold_never_is():
+  # the driver taps only where TurnPilot asks for a go: a car the model stopped on its own (a queue, a hold let go with no
+  # pull-away) is the run's to fail, not the driver's to push on. Only with stall_tap on (exploring by hand) does it
   from openpilot.tools.sim.bridge.beamng.driver import STALL_S, GasTaps
   taps = GasTaps()
+  assert max(run_taps(taps, plan_msg('none', 'turning'), STALL_S + 10.)) == 0. and not taps.log
+  taps = GasTaps(stall_tap=True)
   out = run_taps(taps, plan_msg('none', 'turning'), STALL_S + 1.)
   assert max(out) > 0. and taps.log[0]['reason'] == 'stall'
   # a pedestrian hold, or a stop sign's dwell before its prompt: the car waits, no tap

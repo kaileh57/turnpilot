@@ -354,6 +354,9 @@ def _hold_with(hs, word):
   return [h for h in hs if word in h['reason']]
 
 
+GO_PROMPTS = ('stopSignGo', 'signalGo', 'unprotectedTurnGo')  # turnpilotPlan.controlPrompt values that ask for the driver's go
+
+
 def check(name: str, res: dict) -> list[str]:
   """Why a scored run fails its scenario (empty: it passes)."""
   fails = []
@@ -365,6 +368,11 @@ def check(name: str, res: dict) -> list[str]:
     w = res['wrong_side'][0]
     fails.append(f"drove {res['wrong_side_m']:.0f} m in the oncoming lane outside the junctions, first at t={w['t']:.1f} s " +
                  f"({w['x']:.0f}, {w['y']:.0f}), up to {max(x['max_past_m'] for x in res['wrong_side']):.1f} m past the divider")
+  asked = [x for x in res.get('gas_taps', []) if x['prompt'] not in GO_PROMPTS]
+  if asked:
+    x = asked[0]
+    fails.append(f"{len(asked)} gas press(es) with no go asked for, first at t={x['t']:.1f} s ({x['reason'] or 'no hold'}, " +
+                 f"stood {x['stopped_s']} s)")
   taken, attempted = res['maneuvers_taken'], res['maneuvers_attempted']
   hs = res['holds']
   if name == 'ped_crosswalk_right':
