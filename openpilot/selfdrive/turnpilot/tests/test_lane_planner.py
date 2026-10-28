@@ -3,7 +3,7 @@ from openpilot.cereal import custom, log
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S
-from openpilot.selfdrive.turnpilot.lane_planner import (LC_ABORT_COOLDOWN_S, LC_CONFIRM_FRAMES, LC_REQUEST_TIMEOUT_S,
+from openpilot.selfdrive.turnpilot.lane_planner import (LC_ABORT_COOLDOWN_S, LC_ABORT_SETTLE_S, LC_CONFIRM_FRAMES, LC_REQUEST_TIMEOUT_S,
                                                         LC_SIGNAL_TIMEOUT_S, LC_WARN_S, YELLOW_HOLD_S, LanePlanner, ModelLanes, Phase,
                                                         YellowHold, change_blocker, desired_changes, lane_change_window, lane_mismatch,
                                                         lane_changes_needed, model_lanes, model_lanes_from_msg, stopped_in_lane,
@@ -176,9 +176,11 @@ def test_target_lane_blocked_and_stopped_sides():
 
 class Drive:
   """A car on a road of lanes, with the real DesireHelper executing nav lane change requests."""
-  def __init__(self, lanes_left, lanes_right, v=15., driver_signals=False, paint=striped, paint_rule=True):
-    """paint: (lanes left, lanes right) -> the four lines' paint where the car is now, or None for none read."""
+  def __init__(self, lanes_left, lanes_right, v=15., driver_signals=False, paint=striped, paint_rule=True, lag=0):
+    """paint: (lanes left, lanes right) -> the four lines' paint where the car is now, or None for none read. lag: frames
+    the planner sees DesireHelper's state late by (turnpilotd isn't synced to modeld, whose modelV2 carries it)."""
     self.lanes_left, self.lanes_right, self.v = lanes_left, lanes_right, v
+    self.lag, self._lc_seen = lag, []
     self.paint = paint
     self.lp, self.dh = LanePlanner(paint_rule), DesireHelper()
     self.driver_signals = driver_signals
@@ -188,7 +190,9 @@ class Drive:
   def step(self, m, distance, objects=(), blinker=None, blindspot=None, maneuver_id=0, inputs_valid=True):
     lanes = model_lanes(*road(self.lanes_left, self.lanes_right))
     left_blinker, right_blinker = blinker == LaneChange.left, blinker == LaneChange.right
-    d = self.lp.update(m, distance, lanes, self.dh.lane_change_state, self.v, left_blinker, right_blinker, objects,
+    lc_state = self.dh.lane_change_state if not self.lag else \
+      (self._lc_seen[-self.lag] if len(self._lc_seen) >= self.lag else LaneChangeState.off)
+    d = self.lp.update(m, distance, lanes, lc_state, self.v, left_blinker, right_blinker, objects,
                        self.driver_signals, True, DT_MDL, self.paint(self.lanes_left, self.lanes_right) if self.paint else (),
                        blindspot == LaneChange.left, blindspot == LaneChange.right, maneuver_id, inputs_valid)
     prev = self.decisions[-1] if self.decisions else None
@@ -208,6 +212,7 @@ class Drive:
       k = 1 if self.dh.lane_change_direction == log.LaneChangeDirection.left else -1
       self.lanes_left, self.lanes_right = self.lanes_left - k, self.lanes_right + k
     cs = car_state(self.v, left_blinker=left_blinker, right_blinker=right_blinker)
+    self._lc_seen.append(self.dh.lane_change_state)
     self.dh.update(cs, True, prob, d.lane_change)
     self.t += DT_MDL
     return d
@@ -308,7 +313,9 @@ def test_tesla_blinker_off_before_the_change_starts_aborts():
   assert drive.lp.phase == Phase.REQUEST
   drive.dh.lane_change_state = LaneChangeState.preLaneChange
   drive.step(m, distance)
-  assert drive.aborts[-1][0] == 'noSignal' and drive.decisions[-1].lane_change == LaneChange.none
+  assert drive.decisions[-1].lane_change == LaneChange.none  # withdrawn at once; said once DesireHelper is seen not to start
+  drive.run(m, distance, LC_ABORT_SETTLE_S + DT_MDL)
+  assert drive.aborts[-1][0] == 'noSignal' and drive.lp.phase == Phase.IDLE
 
 
 def test_aborts_before_the_change_starts():
@@ -406,6 +413,52 @@ def test_never_cancelled_once_started():
   drive.paint = lambda left, right: paint(right=SY)
   drive.run(None, distance, 1., blindspot=LaneChange.right, maneuver_id=7)
   assert not drive.aborts and drive.dh.lane_change_state in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing)
+
+
+def requested_with_lag(fail=None, cancel=None):
+  """A Tesla's change left with turnpilotd seeing DesireHelper a frame late: on the frame after the request a check fails
+  (fail: update() keywords), or TurnPilot is cancelled (cancel: the reason; with fail too, a frame later still)."""
+  drive = Drive(lanes_left=1, lanes_right=0, driver_signals=True, lag=1)
+  m, distance, requested = maneuver("turn", "left"), 310., None
+  for i in range(int(12. / DT_MDL)):
+    if cancel and requested is not None and i == requested + (2 if fail else 1):
+      drive.lp.cancel(cancel)
+    kw = fail if fail and requested is not None and i == requested + 1 else {}
+    d = drive.step(m, distance, blinker=LaneChange.left, **kw)
+    if d.lane_change != LaneChange.none and requested is None:
+      requested = i
+    distance -= drive.v * DT_MDL
+  return drive
+
+
+def test_no_abort_announced_once_desire_helper_may_have_started():
+  # DesireHelper starts the change on the request's first frame; turnpilotd only sees it a frame later. A check failing in
+  # between must not say "Lane Change Cancelled" while the car moves over: the change is ours, and it goes on
+  for kw in ({'fail': {'inputs_valid': False}}, {'fail': {'objects': scene([{'cls': 'car', 'x': 60., 'y': 3.6, 'vx': 0.}]).objects}},
+             {'cancel': 'handedBack'}, {'cancel': 'handedBack', 'fail': {'inputs_valid': False}}):
+    drive = requested_with_lag(**kw)
+    assert not drive.aborts and drive.lp.changes == 1 and (drive.lanes_left, drive.lanes_right) == (0, 1), kw
+
+
+def test_an_abort_before_desire_helper_started_still_goes_out():
+  # the blind spot fills in the request: the request is withdrawn at once, the abort said once turnpilotd has seen that
+  # DesireHelper didn't start
+  drive = Drive(lanes_left=0, lanes_right=1, driver_signals=True, lag=1)
+  m = maneuver("turn", "right", TWO_LANES_RIGHT_TURN)
+  distance = drive.run(m, 290., 1.5)
+  drive.dh.lane_change_state = LaneChangeState.preLaneChange  # held by the blind spot: never starts
+  drive.lp.update(m, distance, model_lanes(*road(0, 1)), LaneChangeState.preLaneChange, 15., False, True, (), True, True, DT_MDL,
+                  paint(right=BW), maneuver_id=0)
+  assert drive.lp.phase == Phase.REQUEST
+  d = drive.step(m, distance, blindspot=LaneChange.right)
+  assert d.lane_change == LaneChange.none and d.abort == 'none'
+  drive.run(m, distance, 1., blindspot=LaneChange.right)
+  assert [a for a, _ in drive.aborts] == ['blindspot'] and drive.aborts[0][1] - d_time(drive, d) < LC_ABORT_SETTLE_S + DT_MDL / 2
+  assert drive.lp.changes == 0 and (drive.lanes_left, drive.lanes_right) == (0, 1)
+
+
+def d_time(drive, d):
+  return next(k * DT_MDL for k, x in enumerate(drive.decisions) if x is d)
 
 
 def test_blind_spot_or_car_at_the_offer_holds_it_back():

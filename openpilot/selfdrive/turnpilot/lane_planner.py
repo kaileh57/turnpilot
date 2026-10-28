@@ -81,6 +81,9 @@ LC_SIGNAL_TIMEOUT_S = 8.    # after the countdown, the driver has this long to s
 LC_COOLDOWN_S = 3.          # after any lane change, ours or the driver's, for the model's lane lines to settle
 LC_ABORT_COOLDOWN_S = 6.    # after an abort, before the same change is offered again
 LC_REQUEST_TIMEOUT_S = 8.   # DesireHelper waiting this long (blindspot) aborts the request
+# an abort once the request is out waits this long, the request withdrawn, to see whether DesireHelper started the change
+# already: modeld runs it on the plan it last had, and turnpilotd sees its state a modelV2 or two later
+LC_ABORT_SETTLE_S = 0.2
 LC_BLOCK_X_M = 15.          # a vehicle in the target lane within this, ahead or behind, blocks a request...
 LC_CLOSING_T_S = 3.         # ...as does one that closes to that distance within this
 LC_LANE_MARGIN_M = 0.5
@@ -334,6 +337,8 @@ class LanePlanner:
     self._confirm = 0
     self._wait_t = 0.
     self._pre_t = 0.
+    self._pending = ''                # an abort in REQUEST, said once DesireHelper is seen not to have started
+    self._pending_t = 0.
 
   @property
   def active(self) -> bool:
@@ -373,6 +378,13 @@ class LanePlanner:
     start, end = lane_change_window(v_ego, abs(want))
     want_dir = LEFT if want > 0 else RIGHT if want < 0 else 0
 
+    if self._pending:  # the request is withdrawn; DesireHelper didn't start the change (else `changing` above): abort
+      self._pending_t -= dt
+      if self._pending_t > 1e-6:
+        return self._decision(ABORT_TEXT[self._pending])
+      reason = self._pending
+      self._reset()
+      return self._abort(reason)
     if self.phase != Phase.IDLE:
       return self._follow_up(maneuver, maneuver_id, distance, end, want_dir, fast, lanes, paint, objects, lc_state, v_ego,
                              left_blinker, right_blinker, left_blindspot, right_blindspot, driver_signals, right_hand_traffic, dt,
@@ -452,7 +464,8 @@ class LanePlanner:
 
   def cancel(self, reason: str) -> bool:
     """TurnPilot stopped acting (reason 'handedBack' or 'fault'): an offered change that DesireHelper hasn't started is
-    aborted with reason, held ABORT_HOLD_S as any abort. A change under way goes on: nothing cancels it once started.
+    aborted with reason, held ABORT_HOLD_S as any abort. A change under way goes on: nothing cancels it once started, and
+    one DesireHelper may have started on the request already isn't announced as aborted (_abort).
     True when there was an offer."""
     if self.phase == Phase.IDLE:
       return False
@@ -460,6 +473,13 @@ class LanePlanner:
     return True
 
   def _abort(self, reason: str) -> LaneDecision:
+    """Abort the offered change. Once the request is out, DesireHelper may have started it in modeld's last step, which
+    turnpilotd sees a modelV2 or two later: the request is withdrawn at once, and the abort said only after
+    LC_ABORT_SETTLE_S with no change starting. One that does start is ours, and goes on: no abort contradicts it."""
+    if self.phase == Phase.REQUEST:  # (a second abort while one waits, a handback's say, keeps the first reason)
+      if not self._pending:
+        self._pending, self._pending_t = reason, LC_ABORT_SETTLE_S
+      return self._decision(ABORT_TEXT[self._pending])
     self._reset()
     self.abort, self._abort_t = reason, ABORT_HOLD_S
     self._cooldown = max(self._cooldown, LC_ABORT_COOLDOWN_S)
@@ -468,6 +488,7 @@ class LanePlanner:
   def _reset(self) -> None:
     self.phase, self.offer, self.countdown = Phase.IDLE, LaneChange.none, 0.
     self._confirm, self._candidate, self._wait_t, self._pre_t = 0, LaneChange.none, 0., 0.
+    self._pending, self._pending_t = '', 0.
 
   def _decision(self, reason: str = "", request: bool = False, prompt: bool = False) -> LaneDecision:
     return LaneDecision(self.offer if request else LaneChange.none, self.offer if prompt else LaneChange.none,
