@@ -16,11 +16,15 @@ The rules (Kellen, 2026-10-27; /private/tmp/claude-501/stop_design.md):
 - The latch (HELD): slower than LATCH_SPEED within LATCH_NEAR_M of the stop point (LATCH_PAST_M past it), the car is held:
   shouldStop, speed cap 0. The latch is the policy's and position-free: GPS fixes, nav gaps, reroutes, a skipped turn,
   a handback and a fault leave it be (turnpilotd keeps this policy through a fault). Only its release rule lets go, and
-  only TurnPilot turned off clears it. A car stopped further out (a queue) isn't latched: the MPC holds it behind the lead.
+  only TurnPilot turned off, or DisengageOnAccelerator turned on (no stop control at all, its fault said), clears it. A
+  reroute's same control takes the latch over under its own key. A held car gone more than DRIVE_OFF_M at more than
+  COMMIT_SPEED with no go (the plan not applied: shadow mode turned on) is let go, as an overrun: the latch is never
+  replayed down the road. A car stopped further out (a queue) isn't latched: the MPC holds it behind the lead.
 - Positive go only. A stop sign is released by a gas tap after DWELL_S held (no auto-go: no cross traffic sensing), and
   the driver is prompted then (stopSignGo). A signal is held at whatever the light, unless an accepted light source says
   green, steadily, for GREEN_STEADY_S: unknown, stale, absent, conflicting or unassociated lights all hold. The driver's
-  gas tap releases it any time after it engages (seen it green while rolling up), and it prompts for that at once
+  gas tap releases it any time after it engages (seen it green while rolling up: faster than COMMIT_SPEED, or at the line,
+  within LATCH_NEAR_M; a nudge creeping in a queue further out isn't a go), and it prompts for that at once
   (signalGo) while the light is unknown. On the car tonight there is no light source, so every mapped signal is held.
   A tap on a red (the sim oracle's) still goes, with goingOnRed: the driver's right on red. Releasing one releases the
   controls RELEASE_SPAN_M past it too (the far side of a divided road).
@@ -30,9 +34,11 @@ The rules (Kellen, 2026-10-27; /private/tmp/claude-501/stop_design.md):
 - A yield caps the speed to YIELD_SPEED at its line, never stops the car, and goes once passed or on a gas tap. One whose
   road outranks every crossing one (crossSuspect: likely mapped for the cross road) is dropped and logged. Such a stop
   sign still stops, and says the approach is unverified.
-- The driver's gas before a stop sign is an override; when it comes off past the line moving, the stop is dropped
-  (stopOverrun), else the curve resumes from there (re-seeded, checked for feasibility). Past the line moving with no
-  release is an overrun: dropped, logged, alerted. Driven off a held stop under the driver's foot is the same.
+- The driver's gas before a stop sign is an override; when it comes off past the line moving faster than COMMIT_SPEED,
+  or past where the latch reaches (LATCH_PAST_M) at any speed, the stop is dropped (stopOverrun), else the curve resumes
+  from there (re-seeded, checked for feasibility). Past the line beyond the latch's reach with no release, at any speed,
+  is an overrun: dropped, logged, alerted, never a stop in the junction with nothing to release it. Driven off a held stop
+  under the driver's foot is the same.
 - An unprotected turn (Kellen, 2026-10-27: the same rule as stop signs and lights) is a routed far-side turn (a left on the
   right) across an oncoming approach (navInstruction.maneuverOpposing present, or unknown: no junction data is never
   clear) with no stop sign or signal of its own at the junction (one within PROTECT_BEFORE_M before it to PROTECT_PAST_M
@@ -213,6 +219,18 @@ class MapControlPolicy:
     tc = self.turn
     return tc is not None and tc.key == (UNPROTECTED_ROUTE, int(maneuver_id)) and tc.engaged
 
+  def drop_latch(self, why: str) -> None:
+    """Let go of the latch for good (turnpilotd: DisengageOnAccelerator turned on, so no stop control runs at all, out
+    loud as its fault). The control it held is done with, so nothing replays the hold once stop control runs again,
+    wherever the car has gone meanwhile."""
+    for c in list(self.tracker.controls.values()) + ([self.turn] if self.turn is not None else []):
+      if c.held or c.key == self.held:
+        c.held = False
+        c.state = c.state or ControlState()
+        c.state.done, c.state.action = 'dropped', 'none'
+        cloudlog.event("turnpilot.map_stop_latch_dropped", kind=c.kind, key=list(c.key), why=why)
+    self.held = None
+
   def held_stops(self) -> list:
     """The latch alone, for a faulted plan whose map update failed: a held car stays held."""
     return [Stop(HOLD_ACCEL, 0., True, "Stopped at a map stop", 0.)] if self.held is not None else []
@@ -288,6 +306,12 @@ class MapControlPolicy:
     unprotected_turn() the car is taking, or None."""
     v = max(v_ego, 0.)
     controls = self.tracker.update(nav, updated, valid, v, dt)
+    if self.held is not None and all(c.key != self.held for c in controls) and \
+       not (self.turn is not None and self.turn.key == self.held):
+      # a reroute's same control took over the held one under its own key (control_tracker.py): the latch follows it
+      moved = next((c for c in controls if c.held), None)
+      cloudlog.event("turnpilot.map_stop_latch_moved", key=list(self.held), to=list(moved.key) if moved else None)
+      self.held = moved.key if moved is not None else None
     tc = self._turn_control(turn, controls, v, dt)
     if tc is not None:
       controls = sorted(controls + [tc], key=lambda c: c.d)
@@ -368,13 +392,14 @@ class MapControlPolicy:
           self._transient('goingOnRed')
       reason = f"Red light (sim oracle){'' if c.junction else ' (crossing)'}" if st.light == 'red' else \
         f"Stopped at {what} — tap gas to go"
-    if cause is None and gas_pressed and st.moved_m > DRIVE_OFF_M and v > COMMIT_SPEED:
-      # driven off under the driver's foot: lifting must not stop the car in the junction
-      if c.kind == 'stop' and st.gas_in_dwell:
+    if cause is None and st.moved_m > DRIVE_OFF_M and v > COMMIT_SPEED:
+      # driven off under the driver's foot: lifting must not stop the car in the junction. Or gone with no go at all, the
+      # plan not applied (shadow mode turned on): the latch must not stop the car wherever the plan applies again
+      if not gas_pressed or (c.kind == 'stop' and st.gas_in_dwell):
         self._transient('stopOverrun')
       elif c.kind == 'signal' and st.light == 'red':
         self._transient('goingOnRed')
-      cause = 'drivenOff'
+      cause = 'drivenOff' if gas_pressed else 'movedOff'
     if cause == 'green':  # a stop decided on a yellow is undone by the next steady green: back to going on it
       st.mode, st.yellow, st.action = 'go', False, 'released'
       self.held, c.held = None, False
@@ -440,7 +465,9 @@ class MapControlPolicy:
         if c.d < -OVERRUN_PAST_M:
           st.done = 'passed'
         return False
-      if gas_edge:  # the driver's go: seen it green while rolling up, or going on the red
+      if gas_edge and (v > COMMIT_SPEED or c.d < LATCH_NEAR_M):
+        # the driver's go: seen it green while rolling up, or going on the red at the line. A nudge standing or creeping in
+        # a queue short of the line isn't one: the car still stops at the line for it
         if st.light == 'red':
           self._transient('goingOnRed')
         st.action = 'released'
@@ -459,14 +486,17 @@ class MapControlPolicy:
         st.override = True
       elif st.override and gas_lift:
         st.override = False
-        if c.d < 0. and v > COMMIT_SPEED:
+        if c.d < -LATCH_PAST_M or (c.d < 0. and v > COMMIT_SPEED):
+          # past the line under the driver's foot, beyond where the latch can hold it: the driver went. Stopping the car
+          # in the junction with nothing to release it would be worse
           st.action = 'overrun'
           self._overrun(c, v)
           return False
         st.cap = curve(v, c.d)
         self._check(c, v, 'gasLifted')
 
-    if c.d < -OVERRUN_PAST_M and v > COMMIT_SPEED and not gas_pressed:
+    if c.d < -OVERRUN_PAST_M and not gas_pressed:
+      # past the line and not held, however slow: never a stop in the junction with no hold and no go to release it
       st.action = 'overrun'
       self._overrun(c, v)
       return False

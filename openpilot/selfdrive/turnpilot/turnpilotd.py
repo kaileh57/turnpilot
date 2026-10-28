@@ -493,6 +493,8 @@ class TurnPilot:
       # refuses to run (Kellen: never stop control silently). The holds in force stay on the faulted plan
       self.fault_track(sm)
       self.stop('fault')
+      # nor a latch to replay once it is off again, wherever the car has rolled meanwhile (the fault says so)
+      self.map_controls.drop_latch('disengageOnAccelerator')
       self.watch_model(sm['modelV2'], enabled)
       msg = disabled_plan(shadow, DISENGAGE_ON_ACCEL_REASON, Fault.disengageOnAccelerator,
                           Handback.modelFellBack if self.fell_back else Handback.none)

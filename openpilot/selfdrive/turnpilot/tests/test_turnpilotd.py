@@ -1235,6 +1235,20 @@ def test_disengage_on_accelerator_refuses_out_loud():
   assert sim.tp.map_controls.held is None
 
 
+
+def test_disengage_on_accelerator_turned_on_at_a_hold_never_replays_it():
+  # held at a stop sign, DisengageOnAccelerator goes on for 1.5 s (out loud: no stop control at all) and the car rolls
+  # on; with it off again, the car isn't held anew past the line
+  sim = Sim([(1000., "turn", "right"), (2000., "turn", "left")], controls=[(200., 'stop')], cruise=6.)
+  stop_at(sim, 200.)
+  sim.disengage_on_accel = True
+  plans = [sim.step() for _ in range(int(1.5 / DT_MDL))]
+  assert all(p.fault == Fault.disengageOnAccelerator for p in plans)
+  assert sim.s > 200. and sim.tp.map_controls.held is None
+  sim.disengage_on_accel = False
+  plans = [sim.step() for _ in range(int(4. / DT_MDL))]
+  assert not any(p.shouldStop for p in plans) and sim.v > 2.
+
 def test_fault_keeps_the_map_stop_latch_and_turning_off_clears_it():
   sim = Sim([(1000., "turn", "right"), (2000., "turn", "left")], controls=[(200., 'stop')])
   stop_at(sim, 200.)

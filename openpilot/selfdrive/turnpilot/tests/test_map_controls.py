@@ -495,3 +495,79 @@ def test_unprotected_turn_texts():
   assert hold_text(UNPROTECTED, 'awaitingDriver') == ('Stopped at unprotected turn', 'tap gas to go')
   assert hold_text(UNPROTECTED, 'held') == ('Stopped at unprotected turn', '')
   assert is_map_reason("Unprotected left ahead") and is_map_reason("Stopped at unprotected left — tap gas to go")
+
+
+# --- found in review: the car never left stuck, never let go of a light by a nudge, never re-held where it isn't ---
+
+@pytest.mark.parametrize("v_creep,past", [(1.5, 3.), (1.9, 6.), (1.0, 12.)])
+def test_creeping_over_the_line_under_the_drivers_foot_is_never_stopped_in_the_junction(v_creep, past):
+  # the driver's foot takes the car over the stop sign's line slower than COMMIT_SPEED and lifts past it: the car isn't
+  # held there, so it is an overrun, said out loud, and the stop is dropped. Never a speed cap of 0 in the junction with no
+  # hold, no prompt and no way out
+  car = Car([(200., 'stop')], v=v_creep, cruise=v_creep)
+  car.s = 180.
+  car.run_until(lambda out, dec: out.stops)
+  car.run_until(lambda out, dec: car.s > 200. + past, gas=True, accel=0.)
+  alerts = [car.step()[0].alert]
+  for _ in range(int(10. / DT_MDL)):
+    out, dec, _ = car.step()
+    alerts.append(out.alert)
+  assert 'stopOverrun' in alerts
+  assert not out.stops and dec.speed_cap > 5. and car.v > v_creep - 0.05
+
+
+def test_a_gas_nudge_in_a_queue_short_of_a_signal_doesnt_let_go_of_it():
+  # queued behind a lead 22 m short of an unchecked signal, the driver creeps up a little under the gas: that isn't the
+  # go. Once the lead leaves the car still stops at the line and is held there for the tap
+  car = Car([(200., 'signal')])
+  car.run_until(lambda out, dec: out.stops)
+  car.lead_stop = 178.
+  car.run_until(lambda out, dec: car.v < 0.01 and car.s > 150.)
+  assert 200. - car.s > 20.
+  car.run(0.5, gas=True, accel=0.4)
+  car.run(2.)
+  car.lead_stop = None
+  out, dec = car.run_until(held, max_s=40.)
+  assert -2. < 200. - car.s < 5.
+
+
+def test_a_reroute_that_adopts_the_held_stop_keeps_its_latch_and_the_next_stop_holds_too():
+  # held at a stop sign, a reroute lists the same sign under a new key: the gas tap releases it, and the next stop sign
+  # latches the car with its own prompt, never a cap of 0 with no hold
+  car = Car([(120., 'stop'), (300., 'stop')])
+  car.run_until(held)
+  car.route_count = 2
+  car.run(3.)
+  out, dec, _ = car.step(gas=True, accel=0.)
+  assert not dec.should_stop and car.policy.held is None
+  out, dec = car.run_until(held, max_s=60.)
+  assert -2. < 300. - car.s < 5.
+  out, dec, _ = car.run(DWELL_S + 0.5)
+  assert out.prompt == 'stopSignGo'
+
+
+def test_a_held_car_that_moved_off_without_the_plan_is_let_go_never_re_held_down_the_road():
+  # held at a stop sign, the plan stops being applied (shadow mode turned on) and openpilot drives on with no gas: the
+  # latch lets go once the car is moving off, out loud, so it isn't replayed when the plan applies again further on
+  car = Car([(120., 'stop')])
+  car.run_until(held)
+  car.run(1.)
+  alerts = []
+  for _ in range(int(20. / DT_MDL)):
+    out, dec, _ = car.step(accel=1.0 if car.v < 14. else 0.)  # the plan not applied: the car drives on regardless
+    alerts.append(out.alert)
+  assert car.s > 300.
+  assert 'stopOverrun' in alerts and car.policy.held is None
+  out, dec, _ = car.step()
+  assert not dec.should_stop and not out.stops
+
+
+def test_dropping_the_latch_for_disengage_on_accelerator_never_replays_it():
+  car = Car([(120., 'stop')])
+  car.run_until(held)
+  car.policy.drop_latch('disengageOnAccelerator')
+  assert car.policy.held is None and car.policy.held_stops() == []
+  car.v, car.cruise = 2.2, 2.2
+  car.s += 1.7
+  out, dec, _ = car.step()
+  assert not dec.should_stop
