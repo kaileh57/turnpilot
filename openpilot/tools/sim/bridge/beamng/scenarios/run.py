@@ -370,6 +370,10 @@ def main():
     ap.error("name a scenario")
 
   plan = build(args.name, data_path=args.data, entry=args.entry)
+  moved = plan.notes.get('approach_m')
+  if moved is not None and moved != SCENARIOS[args.name].approach_m:
+    print(f"scenario {args.name}: spawn moved to {moved:.0f} m before the junction (from {SCENARIOS[args.name].approach_m:.0f}), " +
+          f"clear of the mapped controls {plan.notes['controls_from_spawn']} (m from the spawn)", flush=True)
   run_dir = os.path.join(os.path.expanduser(args.record or args.out), f"{args.name}-{time.strftime('%Y%m%d-%H%M%S')}")
   os.makedirs(run_dir, exist_ok=True)
 
