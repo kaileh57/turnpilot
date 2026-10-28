@@ -82,11 +82,19 @@ def travel_time(s: float, v: float, accel: float) -> float:
   return profile_times([s], v, accel)[0]
 
 
+def stop_eta(dist: float, v: float, v_min: float = 1.0) -> float:
+  """Seconds to come to a stop dist m ahead, braking evenly from v to 0 there: 2 dist / v. Exact once the car is braking
+  for it, whatever its rate; while it still cruises, later than it will be (the release waits for the braking)."""
+  return 2.0 * max(dist, 0.0) / max(v, v_min)
+
+
 def oncoming_should_release(d_ego_hold: float, v_ego: float, s_car: float, v_car: float, accel: float,
                             arrive_after_s: float) -> bool:
   """True once oncoming cars standing s_car m before the junction must go so the first arrives there arrive_after_s
-  after the ego, at its current speed, reaches its hold line d_ego_hold m ahead. Already late releases at once."""
-  return eta(d_ego_hold, v_ego) + arrive_after_s <= travel_time(s_car, v_car, accel)
+  after the ego has stopped at its hold line d_ego_hold m ahead (an unprotected left stops there for the driver's go).
+  At its current speed it would get there sooner: the cars arrived before the go, not after it. Already late releases at
+  once."""
+  return stop_eta(d_ego_hold, v_ego) + arrive_after_s <= travel_time(s_car, v_car, accel)
 
 
 def pacer_drop_s(s_start: float, s_junction: float, window_start_m: float, v: float, block_s: float) -> float:

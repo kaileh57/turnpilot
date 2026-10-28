@@ -50,7 +50,7 @@ class Entry:
   oncoming_spacing_m: float = 25.
   oncoming_speed: float = 11.     # m/s
   oncoming_accel: float = 2.5     # m/s^2
-  arrive_after_s: float = 1.5     # the first oncoming car reaches the junction this long after the car reaches its hold line
+  arrive_after_s: float = 1.5     # the first oncoming car reaches the junction this long after the car stops at its hold line
   pace_block_s: float = 6.        # the pacer keeps the target lane occupied this long into the lane change window
   end_on_stop_s: float = 0.       # end the run once the car has stood this long after moving
   spawn: tuple = ()               # route: (x, y, z), heading_deg, destination (x, y, z)

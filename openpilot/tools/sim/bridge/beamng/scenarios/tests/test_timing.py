@@ -70,17 +70,23 @@ class TestProfiles:
 
 
 class TestOncoming:
-  @pytest.mark.parametrize("v_ego", [5.0, 8.0, 12.0])
-  def test_first_car_arrives_just_after_the_car_reaches_the_hold_line(self, v_ego):
-    # a car holding its speed toward the hold line, checked at 20 Hz like the runner; the oncoming car stands 60 m out
-    s_car, v_car, a_car, after, dt = 60.0, 11.0, 2.5, 1.5, 0.05
-    d, t = 150.0, 0.0
-    while not oncoming_should_release(d, v_ego, s_car, v_car, a_car, after):
-      d -= v_ego * dt
+  @pytest.mark.parametrize("v_ego,decel", [(12.0, 1.0), (12.0, 1.5), (12.0, 2.0), (8.0, 1.5), (5.0, 1.5)])
+  def test_first_car_arrives_arrive_after_s_after_the_car_stops_at_the_hold_line(self, v_ego, decel):
+    # the car cruises, then brakes to a stop at its hold line (an unprotected left stops there), checked at 20 Hz like the
+    # runner; the oncoming car stands 60 m out. It reaches the junction arrive_after_s after the car has stopped, give or
+    # take half a second, whatever the car's braking: after the driver's go (2 s after the stop), as the car creeps out
+    s_car, v_car, a_car, after, dt = 60.0, 11.0, 2.5, 3.5, 0.05
+    d, v, t, released = 150.0, v_ego, 0.0, None
+    while v > 0.:
+      if released is None and oncoming_should_release(d, v, s_car, v_car, a_car, after):
+        released = t
+      if d <= v * v / (2. * decel):
+        v = max(v - decel * dt, 0.)
+      d -= v * dt
       t += dt
-    ego_at_hold = t + d / v_ego
-    car_at_junction = t + travel_time(s_car, v_car, a_car)
-    assert after <= car_at_junction - ego_at_hold <= after + dt * 1.01
+    assert released is not None and abs(d) < 0.5
+    car_at_junction = released + travel_time(s_car, v_car, a_car)
+    assert after - 0.5 <= car_at_junction - t <= after + 0.5, car_at_junction - t
 
   def test_late_releases_at_once(self):
     assert oncoming_should_release(2.0, 8.0, 60.0, 11.0, 2.5, 1.5)
