@@ -212,9 +212,9 @@ def test_detector_stops_hand_back_without_a_hold():
   assert sim.step().handback == Handback.none and sim.trace[-1][2].state != State.unavailable
 
 
-def test_handback_mid_turn_keeps_the_turn_cap_and_clears_the_desire():
+def test_handback_mid_turn_keeps_the_turn_cap_and_sends_no_new_pulse():
   # the turn desire went out and the car is slowing for the turn when the detector stops: the cap stays (a handback must
-  # not speed the car up), no new pulse goes out, and the turn desire is still cleared from the model once it has turned
+  # not speed the car up) and no new pulse goes out (test_desire_timing.py has the clear once the car has turned)
   sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
   while sim.distance() > 15.:
     sim.step()
@@ -245,7 +245,9 @@ def test_model_fallback_hands_back_and_cancels_the_route():
 
 
 def test_small_model_from_the_start_is_not_a_fallback():
-  # no chestnut: modeld runs the small model from the start, and there is no detector pkl for it, so TurnPilot waits
+  # no chestnut: modeld runs the small model from the start. That is no fallback; with no detector pkl for the small
+  # model there are no detections, so TurnPilot waits for them
   sim = Sim([(400., "turn", "left")])
-  sim.run(5.)
-  assert sim.trace[-1][2].handback == Handback.none and not sim.tp.cancel_route
+  for _ in range(int(5. / DT_MDL)):
+    plan = sim.step(available=False)
+  assert plan.handback == Handback.none and plan.reason == WAITING_REASON and not sim.tp.cancel_route
