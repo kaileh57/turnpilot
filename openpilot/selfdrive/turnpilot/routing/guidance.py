@@ -101,12 +101,16 @@ def through_lanes(steps, step_idx, distance_to_maneuver) -> tuple[list[dict], fl
 
 
 def upcoming_maneuvers(steps, step_idx, distance_to_maneuver) -> list[dict]:
-  """The next MAX_MANEUVERS maneuvers ahead, with their distance from the ego: the one that ends the current step first."""
+  """The next MAX_MANEUVERS maneuvers ahead, with their distance from the ego: the one that ends the current step first.
+  Each carries its junction (maneuver_junction), so TurnPilot can look past a bend to the turn after it."""
   maneuvers = []
   distance = distance_to_maneuver
-  for ahead in steps[step_idx + 1:step_idx + 1 + MAX_MANEUVERS]:
+  for i, ahead in enumerate(steps[step_idx + 1:step_idx + 1 + MAX_MANEUVERS]):
     maneuver = ahead.get('maneuver') or {}
-    maneuvers.append({'distance': distance, 'type': maneuver.get('type') or '', 'modifier': maneuver.get('modifier') or ''})
+    junction = maneuver_junction(steps, step_idx + i)
+    maneuvers.append({'distance': distance, 'type': maneuver.get('type') or '', 'modifier': maneuver.get('modifier') or '',
+                      'geometryValid': junction is not None, 'bearingBefore': junction['before'] if junction else 0.,
+                      'bearingAfter': junction['after'] if junction else 0., 'branches': min(junction['branches'], 255) if junction else 0})
     distance += ahead['distance']
   return maneuvers
 

@@ -11,9 +11,18 @@ TurnPilot sends no desire and no speed cap there. The angle is the real one, bea
 without intersection data (maneuverGeometryValid false; Valhalla always has it) leaves every turn a junction at the
 modifier's nominal angle, which is logged once per maneuver and shown in the plan's reason.
 A new route (a destination set from the phone, a reroute) can start with a maneuver of the same type and modifier as
-the old one, so it is told apart by navd marking it (one invalid navInstruction between the two routes) or by the
-distance jumping up by more than GPS noise or dead reckoning explain. Either way the old maneuver was dropped, not
-passed, and RouteFollower.replaced says so for the one update: its turn pulse must not carry over to the new route.
+the old one, so it is told apart by navd marking it (one invalid navInstruction between the two routes, and a new
+routeCount) or by the distance jumping up by more than GPS noise or dead reckoning explain. Either way the old maneuver
+was dropped, not passed, and RouteFollower.replaced says so for the one update: its turn pulse must not carry over to the
+new route.
+A committed turn (turnpilotd: its turn desire is out) is never dropped that way (Kellen: never cancel a turn once
+committed, and a car slowing for a turn must not speed up into it). The junction is where it was whatever navd says:
+- an invalid navInstruction for the same route (navd off the step for a fix, rerouting, the destination removed) or navd
+  going quiet past NAV_STALE_S is a gap: the maneuver stays, dead-reckoned, under the same id, until navd's next valid
+  update carries on with it or the turn is over (cleared at its angle, or dead-reckoned PASSED_DIST_M past it);
+- a jump in the distance from further than REPLACED_FROM_M is GPS noise: the dead-reckoned distance stands;
+- a new route (a new routeCount) whose first maneuver is the same turn within SAME_TURN_M of the dead-reckoned one is
+  the same maneuver (a reroute onto the road the car is on). Only a new route that doesn't turn there replaces it.
 """
 from dataclasses import dataclass
 
@@ -50,6 +59,7 @@ REPLACED_FROM_M = 15.      # ...and from further out than this, where navd never
 PASSED_NEAR_M = 30.        # a new maneuver means the last one was passed if it was this close
 PASSED_DIST_M = 15.        # dead-reckoned this far past a maneuver navd hasn't advanced from, it counts as passed
 NAV_STALE_S = 3.           # no navInstruction for this long, the route is lost
+SAME_TURN_M = 20.          # a committed turn is the first maneuver of a new route this close to where it was dead-reckoned
 ARRIVE_DIST_M = 15.
 
 
@@ -117,6 +127,7 @@ def maneuver_from_instruction(instruction) -> Maneuver:
 class RouteFollower:
   def __init__(self):
     self.maneuver_id = 0
+    self.route_count = 0  # navInstruction.routeCount of the last valid update
     self.reset()
 
   def reset(self):
@@ -140,23 +151,27 @@ class RouteFollower:
   def arrived(self) -> bool:
     return self.valid and self.maneuver is not None and self.maneuver.kind == ARRIVE and self.distance < ARRIVE_DIST_M
 
-  def update(self, instruction, updated: bool, valid: bool, v_ego: float, dt: float):
-    """instruction: the latest navInstruction; updated: it arrived since the last call; valid: its valid flag."""
+  def update(self, instruction, updated: bool, valid: bool, v_ego: float, dt: float, committed: bool = False):
+    """instruction: the latest navInstruction; updated: it arrived since the last call; valid: its valid flag;
+    committed: the current maneuver's turn desire is out, so it is held through a gap in the route (module docstring)."""
     self.passed = self.replaced = False
     if updated and not valid:
-      dropped = self.valid
-      self.reset()
-      if dropped:  # navd dropped the route: a new one comes next, or the car is off it
-        self.maneuver_id += 1
-        self.replaced = True
-      return
+      if committed and self.valid:
+        updated = False  # a gap: dead-reckoned on as between updates
+      else:
+        dropped = self.valid
+        self.reset()
+        if dropped:  # navd dropped the route: a new one comes next, or the car is off it
+          self.maneuver_id += 1
+          self.replaced = True
+        return
     if updated:
       self._stale_t = 0.
-      self._on_instruction(instruction)
+      self._on_instruction(instruction, committed, max(v_ego, 0.) * dt)
     elif self.valid:
       self._stale_t += dt
-      if self._stale_t > NAV_STALE_S:  # navd went quiet: the maneuver is over, as when navd drops the route, but not
-        self.reset()                   # replaced (a turn under way finishes and its desire is cleared as for a pass)
+      if self._stale_t > NAV_STALE_S and not committed:  # navd went quiet: the maneuver is over, as when navd drops the
+        self.reset()  # route, but not replaced (a turn under way finishes and its desire is cleared as for a pass)
         self.maneuver_id += 1
         return
       travelled = max(v_ego, 0.) * dt
@@ -181,16 +196,24 @@ class RouteFollower:
       cloudlog.warning(f"turnpilot: {maneuver.type} {maneuver.modifier} {distance:.0f} m ahead, but its bearings turn " +
                        f"{maneuver.angle_deg:.0f} deg the other way")
 
-  def _on_instruction(self, instruction):
+  def _on_instruction(self, instruction, committed: bool, travelled: float):
     distance = float(instruction.maneuverDistance)
     maneuver = maneuver_from_instruction(instruction)
     prev = self.maneuver
+    route_count, new_route = int(instruction.routeCount), self.valid and int(instruction.routeCount) != self.route_count
+    self.route_count = route_count
     advanced = self.distance < ADVANCE_NEAR_M and distance > self.distance + NEW_MANEUVER_JUMP_M
     jumped = distance > self.distance + ROUTE_JUMP_M
-    new = not self.valid or prev is None or advanced or jumped or (maneuver.type, maneuver.modifier) != (prev.type, prev.modifier)
+    same = self.valid and prev is not None and (maneuver.type, maneuver.modifier) == (prev.type, prev.modifier)
+    if committed and same and not advanced:
+      if new_route:  # a reroute onto the road the car is on keeps the turn; one that doesn't turn there replaces it
+        jumped = abs(distance - self.distance) > SAME_TURN_M
+      elif jumped and self.distance > REPLACED_FROM_M:  # GPS noise: the junction is where it was
+        jumped, distance = False, self.distance - travelled
+    new = not same or advanced or jumped or (new_route and not committed)
     if new:
       self._log_new(maneuver, distance)
-      self.replaced = self.valid and jumped and self.distance > REPLACED_FROM_M
+      self.replaced = self.valid and (new_route or (jumped and self.distance > REPLACED_FROM_M))
       if self.valid and not self.replaced and self.distance < PASSED_NEAR_M and self._passed_id != self.maneuver_id:
         self.passed = True
       self.maneuver_id += 1

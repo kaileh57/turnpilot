@@ -2466,6 +2466,9 @@ struct NavInstruction {
   # the lanes of the next intersection the route goes straight through before the maneuver, empty if it has none listed
   throughLanes @17 :List(Lane);
   throughLanesDistance @18 :Float32;   # m to that intersection
+  # TurnPilot: navd's count of routes calculated, on every message, valid or not: a new number is a new route (a new
+  # destination, or a reroute), and an invalid message with the same number is a gap in this one (off it for a fix)
+  routeCount @19 :UInt32;
 
   struct Lane {
     directions @0 :List(Direction);
@@ -2491,6 +2494,11 @@ struct NavInstruction {
     distance @0 :Float32;
     type @1 :Text;
     modifier @2 :Text;
+    # TurnPilot: its junction, as maneuverGeometryValid and the three after it give the current maneuver's
+    geometryValid @3 :Bool;
+    bearingBefore @4 :Float32;
+    bearingAfter @5 :Float32;
+    branches @6 :UInt8;
   }
 }
 

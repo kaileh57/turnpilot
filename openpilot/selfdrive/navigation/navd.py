@@ -106,7 +106,9 @@ class RouteEngine:
       if route is not None and self.route is not None and self.route_count != route_count:
         # TurnPilot: one invalid instruction between two routes, so no maneuver (and its turn desire) carries over to
         # a new route that starts with one of the same type
-        self.pm.send('navInstruction', messaging.new_message('navInstruction', valid=False))
+        msg = messaging.new_message('navInstruction', valid=False)
+        msg.navInstruction.routeCount = self.route_count
+        self.pm.send('navInstruction', msg)
       else:
         self.send_instruction()
     except Exception:
@@ -209,6 +211,9 @@ class RouteEngine:
 
   def send_instruction(self):
     msg = messaging.new_message('navInstruction', valid=True)
+    # TurnPilot: on every message, so an invalid one for this route (off it for a fix, rerouting) is told apart from a
+    # new route, which a turn under way isn't held through (turnpilot/route_follower.py)
+    msg.navInstruction.routeCount = self.route_count
 
     # TurnPilot: a job while there is a route is a reroute for the same destination (a new one clears the route), as when
     # the car left the corridor and a new one downloads for minutes. The car is off this route meanwhile: its distances

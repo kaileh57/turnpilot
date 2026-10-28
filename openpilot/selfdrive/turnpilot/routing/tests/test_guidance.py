@@ -119,6 +119,17 @@ class TestGuidance(unittest.TestCase):
     fill_guidance(instruction, steps, 2, 0)
     self.assertFalse(instruction.maneuverGeometryValid)
 
+  def test_maneuvers_ahead_carry_their_junctions(self):
+    # the lookahead past a bend runs the same junction test as the current maneuver (turnpilot/route_follower.py)
+    steps = steps_of('valhalla_left_then_right.json')
+    maneuvers = upcoming_maneuvers(steps, 0, 500)
+    self.assertEqual([(m['geometryValid'], m['bearingBefore'], m['bearingAfter'], m['branches']) for m in maneuvers],
+                     [(True, 90., 0., 2), (True, 0., 90., 0), (False, 0., 0., 0)])
+    instruction = messaging.new_message('navInstruction').navInstruction
+    fill_guidance(instruction, steps, 0, 300)
+    ahead = instruction.allManeuvers[1]
+    self.assertEqual((ahead.geometryValid, ahead.bearingBefore, ahead.bearingAfter, ahead.branches), (True, 0., 90., 0))
+
   def test_one_way_road_in_counts_as_a_branch(self):
     # a T where the other road is one-way toward the junction (entry false): still a road the model could take
     step = {'maneuver': {'type': 'end of road', 'modifier': 'left', 'bearing_before': 114, 'bearing_after': 24},

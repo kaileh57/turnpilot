@@ -8,7 +8,7 @@ from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S, CLEAR_DESIRE, lane
 from openpilot.selfdrive.turnpilot.lane_planner import LC_WARN_S, lane_change_window
 from openpilot.selfdrive.turnpilot.scene.lane_paint import UNKNOWN, LinePaint
 from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP, ONCOMING_TTA_S, PED_STOP_GAP_M
-from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_control, car_state, model_v2, nav_instruction, scene
+from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_control, car_state, junction_of, model_v2, nav_instruction, scene
 from openpilot.selfdrive.turnpilot.desire_timing import TURN_DESIRE_LEAD_M
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, V_TURN_MIN
 from openpilot.selfdrive.turnpilot.turnpilotd import (CAR_UNKNOWN_REASON, DETECTOR_DEADLINE_S, NO_LONG_REASON, WAITING_REASON,
@@ -46,13 +46,15 @@ class Sim:
     self.s, self.v, self.cruise, self.t = 0., cruise, cruise, 0.
     self.model_lanes, self.shadow, self.driver_signals, self.long_control = model_lanes, shadow, driver_signals, long_control
     self.big = False
+    self.nav_filter = None  # (sim, instruction) -> (instruction, valid): what navd sends instead
     self.trace = []
 
   def step(self, objects=(), available=True, steer=0., blinker=False, lat_active=True, yaw_rate=0.):
     self.sm.updated = dict.fromkeys(self.sm.data, False)
     instr = self.navd.update(self.s)
     if instr is not None:
-      self.sm.put('navInstruction', instr)
+      instr, valid = self.nav_filter(self, instr) if self.nav_filter is not None else (instr, True)
+      self.sm.put('navInstruction', instr, valid)
     self.sm.put('carState', car_state(self.v, steer, left_blinker=blinker, yaw_rate=yaw_rate))
     self.sm.put('carControl', car_control(lat_active))
     self.sm.put('modelV2', model_v2(*self.model_lanes, big=self.big))
@@ -151,14 +153,15 @@ def test_turn_desire_waits_for_openpilot_to_steer():
 
 
 def test_destination_change_drops_the_old_turn():
-  # a new destination from the phone 25 m before a left, whose route starts with a left 284 m on: the old pulse is
-  # cleared at once, the car speeds up again, and the next pulse waits for the new left's lead
+  # a new destination from the phone 25 m before a left, whose route starts with a left 284 m on (navd's next route,
+  # routeCount 1): the old pulse is cleared at once, the car speeds up again, and the next pulse waits for the new left's
+  # lead
   sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
   switch = None
   for _ in range(int(80. / DT_MDL)):
     if switch is None and sim.distance() < 25.:
       switch = sim.s
-      sim.navd = FakeNavd([(switch + 284., "turn", "left"), (switch + 1500., "turn", "right")])
+      sim.navd = FakeNavd([(switch + 284., "turn", "left"), (switch + 1500., "turn", "right")], route_count=1)
     sim.step()
   after = [(s, v, plan) for s, v, plan in sim.trace if s > switch]
   assert next(s for s, _, plan in after if plan.desire == CLEAR_DESIRE) < switch + 2.
@@ -469,3 +472,98 @@ def test_fault_or_turning_off_cancels_an_offered_lane_change_out_loud():
     assert plans[0].laneChangeAbort == reason and abs(len(held) * DT_MDL - ABORT_HOLD_S) < 2 * DT_MDL, stop
     # selfdrived raises the abort from the disabled plan
     assert lane_change_events(plans[0]) == ('turnpilotLaneChangeAborted',), stop
+
+
+def invalid_nav(sim):
+  """What navd sends off the route or rerouting: an invalid instruction for the same route."""
+  return nav_instruction(0., valid=False, route_count=sim.navd.route_count), False
+
+
+def approach_with_desire_out(cruise=13., to=25.):
+  sim = Sim([(300., "turn", "left", junction_of("left")), (1500., "turn", "right", junction_of("right"))], cruise=cruise)
+  while sim.distance() > to or sim.s < 10.:
+    sim.step()
+  assert Desire.turnLeft in [p.desire for _, _, p in sim.trace] and sim.trace[-1][2].speedCap < NO_SPEED_CAP
+  return sim
+
+
+def assert_turn_held(sim, n):
+  """From trace index n on: the turn's desire never cancelled or skipped, its cap kept, the car not sped up before the
+  junction at s=300."""
+  before = sim.trace[n - 1][2]
+  after = [(s, v, p) for s, v, p in sim.trace[n:] if s < 300.]
+  assert after
+  assert all(p.desire != CLEAR_DESIRE and not p.tooFastToTurn for _, _, p in after)
+  assert all(p.speedCap <= before.speedCap + 0.5 for _, _, p in after)
+  assert max(v for _, v, _ in after) <= sim.trace[n - 1][1] + 0.05
+
+
+def test_one_off_route_update_keeps_the_committed_turn():
+  # the desire is out 12 m before the left when one navd update has a fix 20 m off the step: no CLEAR, no skip of the
+  # same turn coming back under a new id, the cap stays, and no new pulse goes out from 10 m
+  sim = approach_with_desire_out(cruise=13., to=12.)
+  n, glitched = len(sim.trace), []
+  def once(sim, instr):
+    if not glitched:
+      glitched.append(sim.s)
+      return invalid_nav(sim)
+    return instr, True
+  sim.nav_filter = once
+  while sim.s < 330.:
+    sim.step()
+  assert glitched
+  assert_turn_held(sim, n)
+  assert all(p.desire != CLEAR_DESIRE and not p.tooFastToTurn for _, _, p in sim.trace)
+
+
+def test_model_fallback_on_the_approach_holds_the_turn_and_defers_the_route_cancel():
+  # the big model falls back 25 m before the left, its desire out: the handback holds the desire and the cap, and the
+  # route isn't cancelled until the turn is over. Were navd's route gone at once (every instruction invalid), the turn
+  # is still held: no CLEAR, the cap stays, the car doesn't speed up into the junction
+  for route_gone in (False, True):
+    sim = approach_with_desire_out()
+    sim.big = True
+    sim.step()
+    n = len(sim.trace)
+    sim.big = False
+    if route_gone:
+      sim.nav_filter = lambda sim, instr: invalid_nav(sim)
+    held = []
+    while sim.s < 330.:
+      plan = sim.step()
+      assert plan.handback == Handback.modelFellBack
+      if sim.s < 300.:
+        held.append(sim.tp.cancel_route and sim.tp.turn_committed)
+    assert all(held) and sim.tp.cancel_route and not sim.tp.turn_committed, route_gone
+    assert_turn_held(sim, n)
+
+
+def test_reroute_onto_the_same_turn_keeps_it():
+  # a same-destination reroute starts 25 m before the left (GPS drift): two invalid updates while it runs, one between
+  # the routes, then the new route with the same left. The turn is held throughout, under the same maneuver
+  sim = approach_with_desire_out()
+  n, first, frames = len(sim.trace), sim.tp.follower.maneuver_id, []
+  def reroute(sim, instr):
+    frames.append(sim.s)
+    if len(frames) <= 3:
+      if len(frames) == 3:
+        sim.navd.route_count = 1  # the new route is in: one invalid instruction marks it, then its own
+      return invalid_nav(sim)
+    return instr, True
+  sim.nav_filter = reroute
+  while sim.s < 330.:
+    sim.step()
+    if sim.s < 290.:
+      assert sim.tp.follower.maneuver_id == first
+  assert_turn_held(sim, n)
+
+
+def test_navd_going_quiet_on_the_approach_keeps_the_turn_cap():
+  sim = approach_with_desire_out()
+  n = len(sim.trace)
+  sim.nav_filter = lambda sim, instr: (instr, True)
+  update = sim.navd.update
+  sim.navd.update = lambda s: None if s < 310. else update(s)
+  while sim.s < 330.:
+    sim.step()
+  assert_turn_held(sim, n)

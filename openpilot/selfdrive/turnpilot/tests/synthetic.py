@@ -13,11 +13,21 @@ def set_lanes(builder, field, lanes):
 
 
 def nav_instruction(distance, mtype="turn", modifier="left", remaining=None, lanes=(), valid=True, junction=None,
-                    through=None):
+                    through=None, route_count=0, ahead=()):
   """A navInstruction reader. lanes: ((directions, active), ...) left to right. junction: (bearing_before,
-  bearing_after, branches) from Valhalla, or None for a route without intersection data. through: (lanes, distance)."""
+  bearing_after, branches) from Valhalla, or None for a route without intersection data. through: (lanes, distance).
+  route_count: navd's routeCount. ahead: the maneuvers after this one for allManeuvers, [(distance, type, modifier[,
+  junction]), ...]; allManeuvers starts with this one, as navd's does."""
   msg = messaging.new_message('navInstruction', valid=valid)
   ni = msg.navInstruction
+  ni.routeCount = route_count
+  maneuvers = [(distance, mtype, modifier, junction)] + [tuple(a) + (None,) * (4 - len(a)) for a in ahead]
+  ni.init('allManeuvers', len(maneuvers))
+  for m, (m_distance, m_type, m_modifier, m_junction) in zip(ni.allManeuvers, maneuvers, strict=True):
+    m.distance, m.type, m.modifier = float(m_distance), m_type, m_modifier
+    if m_junction is not None:
+      m.geometryValid = True
+      m.bearingBefore, m.bearingAfter, m.branches = m_junction
   ni.maneuverDistance = float(distance)
   ni.maneuverType = mtype
   ni.maneuverModifier = modifier
@@ -43,12 +53,14 @@ class FakeNavd:
   """navd's 1 Hz instruction stream for a car driving along a route of maneuvers [(s, type, modifier[, junction]), ...]:
   the distance to the end of the current step, which runs to -10 m before navd moves to the next step. junction:
   (bearing_before, bearing_after, branches), as nav_instruction takes it; without it the route has no junction data.
-  through: {step: (lanes, s)}, an intersection the route goes straight through at s with those lanes."""
-  def __init__(self, maneuvers, lanes=None, period=20, through=None):
+  through: {step: (lanes, s)}, an intersection the route goes straight through at s with those lanes.
+  route_count: navd's routeCount for this route."""
+  def __init__(self, maneuvers, lanes=None, period=20, through=None, route_count=0):
     self.maneuvers = sorted(maneuvers, key=lambda m: m[0])
     self.lanes = lanes or {}
     self.through = through or {}
     self.period = period
+    self.route_count = route_count
     self.step = 0
     self.frame = 0
 
@@ -65,8 +77,9 @@ class FakeNavd:
     through = self.through.get(self.step)
     if through is not None:
       through = (through[0], through[1] - s) if through[1] > s else None
+    ahead = [(m[0] - s,) + tuple(m[1:]) for m in self.maneuvers[self.step + 1:]]
     return nav_instruction(pos - s, mtype, modifier, remaining=self.maneuvers[-1][0] - s, lanes=self.lanes.get(self.step, ()),
-                           junction=junction, through=through)
+                           junction=junction, through=through, route_count=self.route_count, ahead=ahead)
 
 
 def road(lanes_left, lanes_right, line_prob=0.9, edge_std=0.3, lane_width=LANE_WIDTH, shoulder=0.5):

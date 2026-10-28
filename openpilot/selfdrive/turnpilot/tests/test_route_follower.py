@@ -115,3 +115,54 @@ def test_moving_on_from_a_sharp_turn_is_not_a_new_route():
   first = rf.maneuver_id
   rf.update(nav_instruction(300.), True, True, 4., DT_MDL)
   assert rf.maneuver_id != first and rf.passed and not rf.replaced
+
+
+def test_committed_turn_is_held_through_a_gap_in_the_route():
+  # the turn desire is out 14 m before a left when one navd update has a fix 20 m off the step (valid False, the same
+  # route): the maneuver stays, dead-reckoned, under the same id, and navd's next update carries on with it
+  rf = RouteFollower()
+  rf.update(nav_instruction(14., route_count=1), True, True, 6., DT_MDL, committed=True)
+  first = rf.maneuver_id
+  rf.update(nav_instruction(12., valid=False, route_count=1), True, False, 6., DT_MDL, committed=True)
+  assert rf.maneuver_id == first and not rf.replaced and rf.upcoming is not None and abs(rf.distance - 13.7) < 1e-4
+  for _ in range(19):
+    rf.update(None, False, True, 6., DT_MDL, committed=True)
+  rf.update(nav_instruction(8., route_count=1), True, True, 6., DT_MDL, committed=True)
+  assert rf.maneuver_id == first and not rf.replaced and not rf.passed and rf.distance == 8.
+  # not committed, the maneuver is dropped as before
+  rf = RouteFollower()
+  rf.update(nav_instruction(60., route_count=1), True, True, 6., DT_MDL)
+  rf.update(nav_instruction(60., valid=False, route_count=1), True, False, 6., DT_MDL)
+  assert rf.upcoming is None and not rf.valid
+
+
+def test_committed_turn_is_held_while_navd_is_quiet_or_rerouting():
+  # navd quiet (or rerouting, invalid) for longer than NAV_STALE_S with the turn desire out: the turn is dead-reckoned
+  # to its pass, and the route is dropped once the turn is over
+  for gap in ('quiet', 'invalid'):
+    rf = RouteFollower()
+    rf.update(nav_instruction(25., route_count=1), True, True, 5., DT_MDL, committed=True)
+    first, passed = rf.maneuver_id, 0
+    for i in range(int(10. / DT_MDL)):
+      instr = nav_instruction(0., valid=False, route_count=1) if gap == 'invalid' and i % 20 == 0 else None
+      rf.update(instr, instr is not None, False, 5., DT_MDL, committed=not passed)
+      passed += rf.passed
+      if not passed:
+        assert rf.maneuver_id == first and rf.upcoming is not None and not rf.replaced, gap
+    assert passed == 1, gap
+    assert not rf.valid and rf.maneuver_id != first, gap  # lost once nothing holds it
+
+
+def test_committed_turn_survives_a_distance_jump_and_a_reroute_onto_the_same_turn():
+  # a 60 m jump in navd's distance from 30 m out (a GPS jump back along the road) isn't a new route for a committed turn
+  rf = RouteFollower()
+  rf.update(nav_instruction(30., route_count=1), True, True, 5., DT_MDL, committed=True)
+  first = rf.maneuver_id
+  rf.update(nav_instruction(90., route_count=1), True, True, 5., DT_MDL, committed=True)
+  assert rf.maneuver_id == first and not rf.replaced and abs(rf.distance - 29.75) < 1e-4
+  # a reroute (a new routeCount) that starts with the same turn where the car is: the same maneuver
+  rf.update(nav_instruction(27., route_count=2), True, True, 5., DT_MDL, committed=True)
+  assert rf.maneuver_id == first and not rf.replaced and rf.distance == 27.
+  # a new route that doesn't turn there: replaced, and its turn is a new maneuver
+  rf.update(nav_instruction(284., route_count=3), True, True, 5., DT_MDL, committed=True)
+  assert rf.maneuver_id != first and rf.replaced and not rf.passed

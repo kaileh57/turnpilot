@@ -409,6 +409,23 @@ class TestRouteEngine(unittest.TestCase):
       self.engine.update()
     self.assertEqual(valid(), [True, False, True])
 
+  def test_every_instruction_carries_the_route_count(self):
+    # TurnPilot: an invalid instruction for the same route is a gap in it (off it for a fix, rerouting), which a turn
+    # under way is held through; only a new routeCount is a new route
+    counts = lambda: [(call.args[1].valid, call.args[1].navInstruction.routeCount)  # noqa: E731
+                      for call in self.pm.send.call_args_list if call.args[0] == 'navInstruction']
+    self.load_route()
+    self.engine.send_instruction()
+    self.engine.last_position = (0.0005, 0.0003)  # 33 m beside the first step: off it
+    self.engine.send_instruction()
+    self.engine.job = MagicMock()  # rerouting for the same destination
+    self.engine.send_instruction()
+    self.engine.job = None
+    self.load_route()  # the new route
+    self.engine.last_position = (0, 0)
+    self.engine.send_instruction()
+    self.assertEqual(counts(), [(True, 1), (False, 1), (False, 1), (True, 2)])
+
   def test_maneuvers_and_rerouting(self):
     self.load_route()
     self.engine.last_position = (0, 0.001)  # 111 m off route: reroute after a few consecutive misses

@@ -21,8 +21,9 @@ On either, plan.handback is set and selfdrived soft-disables (handback.py). Turn
 lane change, signal prompt, skipped-turn reroute or wrong-lane flag, and the maneuver in hand is dropped. A turn whose
 desire already went out is never cancelled (desire_timing.py): its desire is held, with no new pulse, and cleared from
 the model at the turn's angle as usual; a keep desire is dropped. On a fallback the destination is removed, which
-cancels navd's route. The scene's stops in force stay, and so does the turn speed cap of a turn whose desire already
-went out: a handback must not speed the car up.
+cancels navd's route, once such a turn is over. The scene's stops in force stay, and so does the turn speed cap of a turn
+whose desire already went out: a handback must not speed the car up. Nor does the route going away under a committed
+turn cancel it (route_follower.py: gaps, navd going quiet, reroutes are dead-reckoned through).
 A fault (plan()) is a disabled plan; it carries a model fallback's handback, so a fault never hides one.
 A handback or a fault cancels a lane change that is offered and not yet started, with laneChangeAbort handedBack or
 fault for ABORT_HOLD_S (selfdrived raises turnpilotLaneChangeAborted); TurnPilot turned off cancels it as turnedOff.
@@ -95,7 +96,7 @@ class TurnPilot:
   def __init__(self):
     self.big_seen = False  # modelV2 came from the big model this drive (kept when TurnPilot is turned off and on)
     self.fell_back = False  # ...and then from the small one
-    self.cancel_route = False  # set once on a fallback: main() removes NavDestination
+    self.cancel_route = False  # set once on a fallback: main() removes NavDestination, once no turn is committed
     self.stop_abort, self._stop_abort_t = 'none', 0.  # a lane change cancelled by a disabled plan: reset() can't hold it
     self.reset()
 
@@ -115,6 +116,13 @@ class TurnPilot:
     self.turn_cap_id: int | None = None  # ...whose turn speed cap stays, its desire having gone out
     self.turn_held_id: int | None = None  # ...whose turn desire was out: held to its clear, never cancelled
     self.last_desire = Desire.none
+
+  @property
+  def turn_committed(self) -> bool:
+    """The route's maneuver is a turn whose desire went out and isn't over: it is held through a gap in the route
+    (route_follower.py), and a fallback's route cancel waits for it."""
+    d = self.desires
+    return d.maneuver_id == self.follower.maneuver_id and d.started and not d.done and d.side != 0
 
   def watch_model(self, model, enabled: bool) -> None:
     """Note a fallback from the big driving model, whether or not TurnPilot is on: it lasts the drive."""
@@ -179,7 +187,8 @@ class TurnPilot:
     cs, model = sm['carState'], sm['modelV2']
     v_ego = max(cs.vEgo, 0.)
     rf = self.follower
-    rf.update(sm['navInstruction'], sm.updated['navInstruction'], sm.valid['navInstruction'], v_ego, DT_MDL)
+    rf.update(sm['navInstruction'], sm.updated['navInstruction'], sm.valid['navInstruction'], v_ego, DT_MDL,
+              committed=self.turn_committed)
     upcoming = None if rf.arrived else rf.upcoming
 
     available = scene.available
@@ -391,7 +400,7 @@ def main():
     invalid_frames = 0 if valid else invalid_frames + 1
     msg.valid = invalid_frames < PLAN_INPUT_GRACE_FRAMES
     pm.send('turnpilotPlan', msg)
-    if tp.cancel_route:
+    if tp.cancel_route and not tp.turn_committed:  # a turn under way finishes first, its cap and desire held
       tp.cancel_route = False
       cloudlog.warning(f"turnpilot: driving model fell back to the small model, handing back{'' if shadow else ' and cancelling the route'}")
       if not shadow:
