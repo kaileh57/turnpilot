@@ -4,8 +4,10 @@ traffic in turns. It runs in modeld because the chestnut's USB interface is clai
 
 Each run on the road camera also reads the lane paint (scene/lane_paint.py) on that frame, from the host copy modeld made
 of it, with the frame's modelV2 and calibration read back off the bus and the detections masking what they hide, and
-publishes it in the same message. A run on the wide camera reads none: unmasked, a white car over a yellow line reads as
-broken white paint. It costs under 1 ms on a Mac (lane_paint_video.py measures it) and counts toward the time budget.
+publishes it in the same message, with lanePaintStatus saying why when it isn't read. A run on the wide camera reads none:
+unmasked, a white car over a yellow line reads as broken white paint. It costs about 1 ms on a Mac (lane_paint_video.py
+measures it) and has its own budget: a read slower than PAINT_BUDGET_S (median) turns the paint off for the drive, loudly,
+and the detector, which the pedestrian holds need, keeps running.
 
 Nothing here runs unless TurnPilotEnabled is set and the compiled pkl for this device and camera size exists
 (compile_detector.py builds it; the pkls are not in git).
@@ -15,7 +17,7 @@ from collections import deque
 
 import numpy as np
 
-from openpilot.cereal import log, messaging
+from openpilot.cereal import custom, log, messaging
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.detector.decoder import decode, fill_detections
@@ -32,6 +34,8 @@ WIDE_CURVATURE = 0.01      # 1/m (a 100 m radius): at or above this, look throug
 WIDE_HOLD_S = 2.0          # and keep looking through it this long after the turn ends
 TURN_DESIRES = (log.Desire.turnLeft, log.Desire.turnRight)
 TIME_WINDOW = 5            # the detector time estimate is the median of this many runs, so one slow run can't stop it
+PAINT_BUDGET_S = 0.005     # the lane paint read's median over TIME_WINDOW reads above this turns it off for the drive
+LanePaintStatus = custom.TurnpilotDetections.LanePaintStatus
 
 
 def frame_view(model_state, index: int):
@@ -52,22 +56,23 @@ class LanePaintReader:
     self.stride, self.y_height, _, _ = get_nv12_info(cam_w, cam_h)
     self.classifier: LanePaintClassifier | None = None
 
-  def read(self, frame: np.ndarray, meta, boxes) -> list[LinePaint]:
-    """frame: the road camera's padded NV12, flat; boxes: this frame's detections (x0 y0 x1 y1 ...), or None."""
+  def read(self, frame: np.ndarray, meta, boxes) -> tuple[list[LinePaint], int]:
+    """(paint, lanePaintStatus). frame: the road camera's padded NV12, flat; boxes: this frame's detections (x0 y0 x1 y1 ...),
+    or None."""
     sm = self.sm
     sm.update(0)
     if self.classifier is None:
       if not (sm.seen['deviceState'] and sm.seen['narrowRoadCameraState']):
-        return [UNKNOWN] * 4
+        return [UNKNOWN] * 4, LanePaintStatus.noModel
       cam = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['narrowRoadCameraState'].sensor))]
       self.classifier = LanePaintClassifier(road_lens(cam.narrow_road))
     model, cal = sm['modelV2'], sm['extrinsicsCalibration']
     if not sm.seen['modelV2'] or model.frameId != meta.frame_id % 2**32:
-      return [UNKNOWN] * 4  # not this frame's lines
+      return [UNKNOWN] * 4, LanePaintStatus.noModel  # not this frame's lines
     lines = [(np.array(ln.x), np.array(ln.y), np.array(ln.z)) for ln in model.laneLines]
     calibrated = sm.seen['extrinsicsCalibration'] and cal.calStatus == log.ExtrinsicsCalibration.Status.calibrated
     return self.classifier.update(meta.timestamp_eof * 1e-9, frame, self.stride, self.y_height, list(cal.rpyCalib), calibrated,
-                                  lines, list(model.laneLineProbs), boxes)
+                                  lines, list(model.laneLineProbs), boxes), LanePaintStatus.read
 
 
 class ModeldDetector:
@@ -85,6 +90,7 @@ class ModeldDetector:
     self.cameras = cameras
     self.frames = {cam: frame_view(model_state, i) for cam, i in cameras.items()}
     self.times: deque[float] = deque(maxlen=TIME_WINDOW)
+    self.paint_times: deque[float] = deque(maxlen=TIME_WINDOW)
     for _ in range(3):  # warm up, and a first time estimate
       t0 = time.perf_counter()
       self.run(input_frame=self.frames[next(iter(self.frames))]).numpy()
@@ -109,7 +115,8 @@ class ModeldDetector:
       self.enabled = False
       return
     self.since_run += 1
-    if self.since_run < RUN_EVERY or model_execution_time + float(np.median(self.times)) > STEP_BUDGET_S:
+    paint_time = float(np.median(self.paint_times)) if self.lane_paint is not None and self.paint_times else 0.
+    if self.since_run < RUN_EVERY or model_execution_time + float(np.median(self.times)) + paint_time > STEP_BUDGET_S:
       return
     try:
       cam = self.choose_camera(desired_curvature, desire, time.monotonic())
@@ -121,25 +128,39 @@ class ModeldDetector:
       dets = decode(raw, self.lb)
       msg = messaging.new_message('turnpilotDetections', valid=bool(np.isfinite(raw).all()))
       fill_detections(msg.turnpilotDetections, dets, meta.frame_id, meta.timestamp_eof, cam, dt)
-      self.times.append(dt + (self.read_lane_paint(msg.turnpilotDetections, model_state, metas, dets) if cam == 'road' else 0.))
+      self.times.append(dt)
+      if cam == 'road':
+        self.read_lane_paint(msg.turnpilotDetections, model_state, metas, dets)
+      else:
+        msg.turnpilotDetections.lanePaintStatus = LanePaintStatus.wideCamera if 'road' in self.cameras else LanePaintStatus.disabled
       pm.send('turnpilotDetections', msg)
     except Exception:
       cloudlog.exception("turnpilot detector failed, off for this drive")
       self.enabled = False
 
-  def read_lane_paint(self, td, model_state, metas: list, boxes: np.ndarray) -> float:
-    """Fill td.lanePaint from the road camera's frame, behind this run's detections on it; returns the seconds it took.
-    A failure turns only this off."""
+  def read_lane_paint(self, td, model_state, metas: list, boxes: np.ndarray) -> None:
+    """Fill td.lanePaint, lanePaintStatus and lanePaintTime from the road camera's frame, behind this run's detections on
+    it. A failure, or reads over PAINT_BUDGET_S, turn only the paint off, for the drive; turnpilotd then plans no lane
+    change (no paint is unknown paint)."""
     if self.lane_paint is None:
-      return 0.
+      td.lanePaintStatus = LanePaintStatus.disabled
+      return
     t0 = time.perf_counter()
     try:
       i = self.cameras['road']
-      fill_lane_paint(td.init('lanePaint', 4), self.lane_paint.read(model_state.frames[i], metas[i], boxes))
+      paint, status = self.lane_paint.read(model_state.frames[i], metas[i], boxes)
     except Exception:
       cloudlog.exception("turnpilot lane paint failed, off for this drive")
       self.lane_paint = None
-    return time.perf_counter() - t0
+      td.lanePaintStatus = LanePaintStatus.disabled
+      return
+    dt = time.perf_counter() - t0
+    fill_lane_paint(td.init('lanePaint', 4), paint)
+    td.lanePaintStatus, td.lanePaintTime = status, dt
+    self.paint_times.append(dt)
+    if len(self.paint_times) == TIME_WINDOW and float(np.median(self.paint_times)) > PAINT_BUDGET_S:
+      cloudlog.error(f"turnpilot lane paint over budget ({np.median(self.paint_times) * 1e3:.1f} ms), off for this drive")
+      self.lane_paint = None
 
 
 def load(model_state, cam_w: int, cam_h: int, main_wide_camera: bool, use_extra_client: bool) -> ModeldDetector | None:

@@ -74,9 +74,12 @@ def test_lanes_needed_from_paint():
   # before a junction)
   assert lane_changes_needed(maneuver("turn", "right"), model_lanes(*road(1, 0)), paint=paint(left=BW)) == 0
   assert lane_changes_needed(maneuver("turn", "right"), model_lanes(*road(0, 0)), paint=paint(right=BW)) == 0
-  # an exit still counts the model's lanes to the curb, whatever the paint, unless the line is yellow
+  # an exit still counts the model's lanes to the curb, unless the line is yellow, or solid white (a shoulder beyond it)
   assert lane_changes_needed(maneuver("off ramp", "slight right"), model_lanes(*road(0, 2)), paint=paint(right=BW)) == -2
-  assert lane_changes_needed(maneuver("off ramp", "slight right"), model_lanes(*road(0, 2)), paint=paint(right=SW)) == -2
+  assert lane_changes_needed(maneuver("off ramp", "slight right"), model_lanes(*road(0, 2)), paint=paint(right=SW)) == 0
+  assert lane_changes_needed(maneuver("off ramp", "slight right"), model_lanes(*road(0, 2)), paint=paint(right=BW, far_right=SW)) == -1
+  # the broken white rule off (TurnPilotLanePaintActive): turns don't move over
+  assert lane_changes_needed(maneuver("turn", "left"), model_lanes(*road(2, 0)), paint=paint(left=BW), paint_rule=False) == 0
   assert lane_changes_needed(maneuver("off ramp", "slight right"), model_lanes(*road(0, 2)), paint=paint(right=SY)) == 0
   # no paint at all (old logs, no detector): exactly the old answers
   assert lane_changes_needed(maneuver("turn", "left"), model_lanes(*road(2, 0)), paint=()) == 0

@@ -2,13 +2,16 @@
 """turnpilotd: turns the active route and the scene into desire pulses, lane-change requests and longitudinal limits.
 
 modeld takes the plan's desire and lane change, plannerd its accel and speed caps (see hooks.py). The lane paint the
-detector reads comes in with its detections, and is used only while those are fresh (the scene is available). In shadow mode
+detector reads comes in with its detections, and is used only while those are fresh (the scene is available). The lane
+planner's broken white rule acts only with TurnPilotLanePaintActive set; without it a second planner with the rule on
+publishes what it would have asked for in laneChangePaintRule, so drives can be scored. In shadow mode
 (TurnPilotShadowMode) everything is computed and published with shadow=True, and nothing acts on it.
 """
 from opendbc.car.structs import car
 from openpilot.cereal import custom, messaging
-from openpilot.common.params import Params
+from openpilot.common.params import Params, UnknownKeyName
 from openpilot.common.realtime import DT_MDL, Ratekeeper
+from openpilot.common.swaglog import cloudlog
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.desire_timing import DesireTiming
 from openpilot.selfdrive.turnpilot.lane_planner import OPENPILOT_SIGNALS_BRANDS, LanePlanner, lane_change_window, model_lanes_from_msg
@@ -19,6 +22,7 @@ from openpilot.selfdrive.turnpilot.scene_policy import NO_ACCEL_CAP, scene_polic
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, turn_speed_cap
 
 State = custom.TurnpilotPlan.State
+LaneChange = custom.TurnpilotPlan.LaneChange
 
 APPROACH_M = 150.  # a turn or keep this close (or inside its lane change window) is being approached
 
@@ -30,11 +34,13 @@ class TurnPilot:
   def reset(self):
     self.follower = RouteFollower()
     self.desires = DesireTiming()
-    self.lanes = LanePlanner()
+    self.lanes = LanePlanner(paint_rule=False)
+    self.paint_rule_lanes = LanePlanner(paint_rule=True)  # what the broken white rule would ask for, while it's off
 
-  def update(self, sm, scene, enabled: bool, shadow: bool, driver_signals: bool = True, right_hand_traffic: bool = True, paint=()):
+  def update(self, sm, scene, enabled: bool, shadow: bool, driver_signals: bool = True, right_hand_traffic: bool = True, paint=(),
+             paint_rule: bool = False):
     """A turnpilotPlan message from sm's carState, navInstruction and modelV2, a TurnpilotScene, and the lane paint of
-    modelV2's four lane lines (empty when unknown)."""
+    modelV2's four lane lines (empty when unknown). paint_rule: TurnPilotLanePaintActive."""
     msg = messaging.new_message('turnpilotPlan')
     plan = msg.turnpilotPlan
     plan.shadow = shadow
@@ -57,9 +63,12 @@ class TurnPilot:
     lanes = model_lanes_from_msg(model)
     plan.desire = self.desires.update(maneuver, rf.distance, rf.maneuver_id, rf.passed, v_ego, cs.steeringAngleDeg,
                                       lanes.keep_left_ok, lanes.keep_right_ok, DT_MDL, default_yaw_rate(cs, model))
-    plan.laneChange, plan.signalPrompt, lane_reason = self.lanes.update(
-      maneuver, rf.distance, lanes, model.meta.laneChangeState, v_ego, cs.leftBlinker, cs.rightBlinker, objects,
-      driver_signals, right_hand_traffic, DT_MDL, paint)
+    lane_args = (maneuver, rf.distance, lanes, model.meta.laneChangeState, v_ego, cs.leftBlinker, cs.rightBlinker, objects,
+                 driver_signals, right_hand_traffic, DT_MDL, paint)
+    self.lanes.paint_rule = paint_rule
+    plan.laneChange, plan.signalPrompt, lane_reason = self.lanes.update(*lane_args)
+    rule_change, rule_prompt = (plan.laneChange, plan.signalPrompt) if paint_rule else self.paint_rule_lanes.update(*lane_args)[:2]
+    plan.laneChangePaintRule = rule_change if rule_change != LaneChange.none else rule_prompt
     decision = scene_policy(objects, available, maneuver, rf.distance, v_ego, right_hand_traffic)
     plan.accelCap = decision.accel_cap
     plan.speedCap = min(decision.speed_cap, turn_speed_cap(maneuver, rf.distance, v_ego, right_hand_traffic))
@@ -98,6 +107,15 @@ def driver_signals_for(params) -> bool:
   return messaging.log_from_bytes(cp_bytes, car.CarParams).brand not in OPENPILOT_SIGNALS_BRANDS
 
 
+def lane_paint_active(params) -> bool:
+  """TurnPilotLanePaintActive; off when this build's params library predates the key (rebuild common/ after a merge)."""
+  try:
+    return params.get_bool("TurnPilotLanePaintActive")
+  except UnknownKeyName:
+    cloudlog.error("turnpilotd: TurnPilotLanePaintActive unknown to this build's params, lane paint rule off; run scons")
+    return False
+
+
 def main():
   params = Params()
   pm = messaging.PubMaster(['turnpilotPlan', 'turnpilotScene'])
@@ -108,13 +126,14 @@ def main():
   rk = Ratekeeper(1. / DT_MDL, print_delay_threshold=None)
   tp = TurnPilot()
   tracker = None
-  enabled = shadow = False
+  enabled = shadow = paint_rule = False
   driver_signals, right_hand_traffic = True, True
   while True:
     sm.update(0)
     if sm.frame % int(1. / DT_MDL) == 0:
       enabled = params.get_bool("TurnPilotEnabled")
       shadow = params.get_bool("TurnPilotShadowMode")
+      paint_rule = lane_paint_active(params)
       right_hand_traffic = not params.get_bool("IsRhdDetected")
       driver_signals = driver_signals_for(params)
 
@@ -130,7 +149,7 @@ def main():
 
     scene = scene_msg.as_reader().turnpilotScene
     paint = lane_paint_from_msg(sm['turnpilotDetections'].lanePaint) if scene.available and sm.seen['turnpilotDetections'] else ()
-    msg = tp.update(sm, scene, enabled, shadow, driver_signals, right_hand_traffic, paint)
+    msg = tp.update(sm, scene, enabled, shadow, driver_signals, right_hand_traffic, paint, paint_rule)
     msg.valid = sm.all_checks(['carState', 'modelV2'])
     pm.send('turnpilotPlan', msg)
     rk.keep_time()

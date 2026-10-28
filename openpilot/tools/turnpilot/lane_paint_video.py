@@ -16,7 +16,8 @@ predictions go to frames.json beside them, keyed by name. See replay_video.py fo
   lane_paint_video.py --score labels.json frames/frames.json ...
 
 prints the confusion table of hand labels ({name: {"left": "broken white", "right": "solid yellow"}}, "unclear" skipped)
-against those predictions, and the gate for the lane planner's broken-white rule.
+against those predictions, and the gate for the lane planner's broken-white rule: no solid or yellow line read broken white.
+It writes confusion.json beside the labels file.
 """
 import argparse
 import json
@@ -110,7 +111,7 @@ def score(labels_path: Path, prediction_paths: list[Path]) -> dict:
   print('label \\ predicted'.ljust(16) + ''.join(SHORT[c].rjust(11) for c in PREDICTED))
   for lab in LABELS:
     print(lab.ljust(16) + ''.join(str(table[lab][c]).rjust(11) for c in PREDICTED) + f"   ({sum(table[lab].values())})")
-  gate = false_bw <= 1 and recall > 0.5
+  gate = false_bw == 0  # the planner's rule: no solid or yellow line may read broken white; recall only costs lane changes
   print(f"solid or yellow read broken white: {false_bw}; broken white recognized: {recall:.0%}; gate {'passed' if gate else 'missed'}")
   return {'frames': frames, 'table': table, 'false_broken_white': false_bw, 'broken_white_recall': recall, 'gate_passed': gate}
 

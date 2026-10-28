@@ -40,6 +40,8 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
   maneuverModifier @10 :Text;     # e.g. "left", "slight right"
   routeValid @11 :Bool;
   shadow @12 :Bool;               # computed but not applied (TurnPilotShadowMode)
+  laneChangePaintRule @13 :LaneChange;  # laneChange, or signalPrompt where the driver signals, as it would be with the lane
+                                        # planner's broken white rule on; equal to it when TurnPilotLanePaintActive is set
 }
 
 struct TurnpilotDetections @0xaedffd8f31e7b55d {
@@ -80,6 +82,15 @@ struct TurnpilotDetections @0xaedffd8f31e7b55d {
   executionTime @3 :Float32;   # s
   detections @4 :List(Detection);
   lanePaint @5 :List(LanePaint);  # on the road camera's frame of this step, aligned with modelV2.laneLines; empty when not read
+  enum LanePaintStatus {
+    unset @0;        # a log from before the field
+    read @1;
+    wideCamera @2;   # this run was on the wide camera; the paint is only read on the road camera
+    noModel @3;      # no modelV2 for this very frame yet, or no device type to pick the lens
+    disabled @4;     # the paint failed earlier and is off for the drive, or modeld has no road camera
+  }
+  lanePaintStatus @6 :LanePaintStatus;
+  lanePaintTime @7 :Float32;      # s spent reading the paint in this step, 0 when not read; executionTime is the detector's alone
 }
 
 struct TurnpilotScene @0xf35cc4560bbf6ec2 {

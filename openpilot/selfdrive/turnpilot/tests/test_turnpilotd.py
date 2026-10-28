@@ -31,9 +31,10 @@ class FakeSM:
 
 
 class Sim:
-  def __init__(self, maneuvers, cruise=13., nav_lanes=None, model_lanes=(0, 0), shadow=False, driver_signals=False, paint=()):
+  def __init__(self, maneuvers, cruise=13., nav_lanes=None, model_lanes=(0, 0), shadow=False, driver_signals=False, paint=(),
+               paint_rule=True):
     self.navd, self.tp, self.sm = FakeNavd(maneuvers, nav_lanes), TurnPilot(), FakeSM()
-    self.paint = paint
+    self.paint, self.paint_rule = paint, paint_rule
     self.s, self.v, self.cruise, self.t = 0., cruise, cruise, 0.
     self.model_lanes, self.shadow, self.driver_signals = model_lanes, shadow, driver_signals
     self.trace = []
@@ -46,7 +47,7 @@ class Sim:
     self.sm.put('carState', car_state(self.v, steer, left_blinker=blinker))
     self.sm.put('modelV2', model_v2(*self.model_lanes))
     plan = self.tp.update(self.sm, scene(objects, available), True, self.shadow, self.driver_signals,
-                          paint=self.paint).as_reader().turnpilotPlan
+                          paint=self.paint, paint_rule=self.paint_rule).as_reader().turnpilotPlan
     a = min(plan_accel(plan.accelCap, plan.speedCap, self.v), (self.cruise - self.v) / 2., 1.5)
     if plan.shouldStop:
       a = min(a, -1.)
@@ -179,9 +180,15 @@ def test_lane_change_from_lane_paint():
   start, end = lane_change_window(15.)
   assert requests and 500. - start < requests[0] < 500. - end
   assert all(plan.laneChange != LaneChange.right for _, _, plan in sim.trace)
+  assert all(plan.laneChangePaintRule == plan.laneChange for _, _, plan in sim.trace)
   sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., model_lanes=(1, 0))
   sim.run(15.)
   assert all(plan.laneChange == LaneChange.none for _, _, plan in sim.trace)
+  # TurnPilotLanePaintActive off: nothing acts, and laneChangePaintRule says what the rule would have asked for
+  sim = Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., model_lanes=(1, 0), paint=broken_white_left, paint_rule=False)
+  sim.run(15.)
+  assert all(plan.laneChange == LaneChange.none for _, _, plan in sim.trace)
+  assert any(plan.laneChangePaintRule == LaneChange.left for _, _, plan in sim.trace)
 
 
 def test_shadow_computes_the_same_plan():

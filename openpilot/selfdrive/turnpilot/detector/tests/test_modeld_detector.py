@@ -1,3 +1,4 @@
+import time
 from collections import deque
 
 import numpy as np
@@ -6,7 +7,8 @@ from openpilot.cereal import log
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.selfdrive.turnpilot.detector.decoder import PERSON
 from openpilot.selfdrive.turnpilot.detector.graph import letterbox
-from openpilot.selfdrive.turnpilot.detector.modeld_detector import RUN_EVERY, STEP_BUDGET_S, WIDE_HOLD_S, ModeldDetector
+from openpilot.selfdrive.turnpilot.detector.modeld_detector import (PAINT_BUDGET_S, RUN_EVERY, STEP_BUDGET_S, TIME_WINDOW, WIDE_HOLD_S,
+                                                                    LanePaintStatus, ModeldDetector)
 from openpilot.selfdrive.turnpilot.scene.lane_paint import UNKNOWN, LinePaint
 
 
@@ -40,13 +42,15 @@ class Meta:
 class FakeLanePaint:
   """Stands in for LanePaintReader: records the frame and boxes it got."""
   def __init__(self):
-    self.calls, self.fail = [], False
+    self.calls, self.fail, self.delay = [], False, 0.
 
   def read(self, frame, meta, boxes):
     if self.fail:
       raise RuntimeError("bad frame")
+    if self.delay:
+      time.sleep(self.delay)
     self.calls.append((frame, meta.frame_id, None if boxes is None else len(boxes)))
-    return [UNKNOWN, LinePaint('broken', 'white', 0.9, 0.3), LinePaint('solid', 'yellow', 0.8, 0.95), UNKNOWN]
+    return [UNKNOWN, LinePaint('broken', 'white', 0.9, 0.3), LinePaint('solid', 'yellow', 0.8, 0.95), UNKNOWN], LanePaintStatus.read
 
 
 class FakeModelState:
@@ -70,6 +74,7 @@ def make_detector(cameras=None, det_time=0.005):
   det.lane_paint = FakeLanePaint() if 'road' in det.cameras else None
   det.frames = {cam: f'frame{i}' for cam, i in det.cameras.items()}
   det.times = deque([det_time])
+  det.paint_times = deque(maxlen=TIME_WINDOW)
   det.since_run, det.wide_until, det.enabled = RUN_EVERY, -1.0, True
   return det
 
@@ -131,16 +136,43 @@ class TestModeldDetector(OpenpilotTestCase):
     assert [(str(p.kind), str(p.color)) for p in paint] == [('unknown', 'unknown'), ('broken', 'white'), ('solid', 'yellow'),
                                                            ('unknown', 'unknown')]
     assert abs(paint[1].confidence - 0.9) < 1e-6
+    assert pm.sent[0].lanePaintStatus == LanePaintStatus.read and pm.sent[1].lanePaintStatus == LanePaintStatus.wideCamera
+    assert pm.sent[0].executionTime > 0. and pm.sent[0].lanePaintTime >= 0.
 
   def test_lane_paint_failure_leaves_the_detector_on(self):
     det, pm = make_detector(), PM()
     det.lane_paint.fail = True
     det.step(pm, det.model_state, 0.010, 0.0, log.Desire.none, [Meta(1), Meta(2)])
     assert det.enabled and det.lane_paint is None and len(pm.sent) == 1 and len(pm.sent[0].detections) == 1
+    assert len(pm.sent[0].lanePaint) == 0 and pm.sent[0].lanePaintStatus == LanePaintStatus.disabled  # unknown, said out loud
+    det.since_run = RUN_EVERY
+    det.step(pm, det.model_state, 0.010, 0.0, log.Desire.none, [Meta(3), Meta(4)])
+    assert len(pm.sent) == 2 and pm.sent[1].lanePaintStatus == LanePaintStatus.disabled
     # no road camera, no paint
     det, pm = make_detector({'wide': 0}), PM()
     det.step(pm, det.model_state, 0.010, 0.0, log.Desire.none, [Meta(1), Meta(1)])
-    assert len(pm.sent) == 1 and len(pm.sent[0].lanePaint) == 0
+    assert len(pm.sent) == 1 and len(pm.sent[0].lanePaint) == 0 and pm.sent[0].lanePaintStatus == LanePaintStatus.disabled
+
+  def test_slow_lane_paint_turns_off_and_the_detector_keeps_going(self):
+    det, pm = make_detector(), PM()
+    det.lane_paint.delay = PAINT_BUDGET_S * 1.5
+    for k in range(TIME_WINDOW):
+      det.since_run = RUN_EVERY
+      det.step(pm, det.model_state, 0.010, 0.0, log.Desire.none, [Meta(2 * k), Meta(2 * k + 1)])
+    assert det.lane_paint is None and det.enabled and len(pm.sent) == TIME_WINDOW
+    assert all(m.lanePaintTime > PAINT_BUDGET_S for m in pm.sent)
+    det.since_run = RUN_EVERY
+    det.step(pm, det.model_state, 0.010, 0.0, log.Desire.none, [Meta(100), Meta(101)])
+    assert pm.sent[-1].lanePaintStatus == LanePaintStatus.disabled and len(pm.sent[-1].detections) == 1
+
+  def test_paint_time_counts_toward_the_step_budget(self):
+    det, pm = make_detector(det_time=0.006), PM()
+    det.paint_times.extend([0.003] * 3)
+    det.step(pm, det.model_state, STEP_BUDGET_S - 0.008, 0.0, log.Desire.none, [Meta(1), Meta(2)])
+    assert pm.sent == []  # 6 ms detector + 3 ms paint don't fit in 8 ms
+    det.lane_paint = None  # paint off: its time no longer counts
+    det.step(pm, det.model_state, STEP_BUDGET_S - 0.008, 0.0, log.Desire.none, [Meta(1), Meta(2)])
+    assert len(pm.sent) == 1
 
 
 class TestLanePaintReader(OpenpilotTestCase):
@@ -172,6 +204,7 @@ class TestLanePaintReader(OpenpilotTestCase):
       meta = Meta(100 + k)
       meta.timestamp_eof = int(k * DT * 1e9)
       if k == 19:
-        assert reader.read(frame, Meta(99), None) == [UNKNOWN] * 4  # another frame's lines
-      paint = reader.read(frame, meta, None)
+        assert reader.read(frame, Meta(99), None) == ([UNKNOWN] * 4, LanePaintStatus.noModel)  # another frame's lines
+      paint, status = reader.read(frame, meta, None)
+      assert status == LanePaintStatus.read
     assert [(p.kind, p.color) for p in paint[1:3]] == [('broken', 'white'), ('solid', 'white')], paint
