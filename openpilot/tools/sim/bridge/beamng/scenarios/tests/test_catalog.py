@@ -77,7 +77,7 @@ def test_oncoming_cars(graph):
   for k, car in enumerate(cars):
     path = np.array(car.path)
     start = math.hypot(*(path[0, :2] - np.asarray(plan.junction)))
-    assert start == pytest.approx(60.0 + 25.0 * k, abs=3.0)
+    assert start == pytest.approx(35.0 + 25.0 * k, abs=3.0)
     assert abs(math.degrees(wrap(car.heading - plan.heading - math.pi))) < 25.0  # coming the other way
     lane = car_frame(path[0], plan.junction, plan.heading)[1]
     assert lane * ego_lane < 0 and abs(lane) > 1.0  # on the other side of the road
@@ -104,13 +104,17 @@ def test_pacer_lane(graph, entry):
   assert pacer.params['s_junction'] == pytest.approx(arc_lengths(lane)[-1] + catalog.PACER_END_BEFORE_M, abs=1.0)
 
 
-def test_unprotected_lefts_give_the_car_3_to_4_s_before_the_oncoming_cars():
-  # the car stops at its hold line and waits ~2 s for the driver's go: oncoming cars timed 1.5 s after it reaches the line
-  # have passed before it may go, so the detector's oncoming hold is never exercised
+def test_unprotected_lefts_give_the_car_3_to_4_s_after_its_go_before_the_oncoming_cars(graph):
+  # the car stands at the junction's signal line and goes on the driver's tap 2 s later: the first oncoming car, released
+  # a fixed time after the stand, reaches the junction 3-4 s after that go, as the car pulls away toward its lanes
+  from openpilot.tools.sim.bridge.beamng.driver import STOPPED_TAP_S
+  from openpilot.tools.sim.bridge.beamng.scenarios.timing import travel_time
   lefts = {n: e for n, e in catalog.SCENARIOS.items() if e.actor == 'oncoming'}
   assert set(lefts) >= {'unprotected_left', 'unprotected_left_visible'}
   for n, e in lefts.items():
-    assert 3.0 <= e.arrive_after_s <= 4.0, n
+    car = catalog.build(n, graph).actors[0]
+    arrive = car.params['release_after_stop_s'] + travel_time(car.params['start_m'], car.speed, car.accel) - STOPPED_TAP_S
+    assert 3.0 <= e.arrive_after_s <= 4.0 and arrive == pytest.approx(e.arrive_after_s, abs=0.05), n
 
 
 def test_every_scenario_carries_a_road_model_and_starts_on_its_own_side(graph):

@@ -8,11 +8,13 @@ A row is a dict:
   steer, gas, brake  carState steeringPressed, gasPressed, brakePressed
   state, reason      turnpilotPlan.state and .reason; lc, prompt: its laneChange and signalPrompt
   control_prompt     turnpilotPlan.controlPrompt: the go TurnPilot asks the driver for ('none', 'stopSignGo', ...)
+  desire             turnpilotPlan.desire (a log.Desire index); map_kind: its mapControl.kind ('none', 'signal', ...)
   lc_state           modelV2.meta.laneChangeState
   nav_valid, nav_type, nav_mod, nav_dist, nav_remaining   navInstruction; route: an id of the current navRoute
   dest_dist          m from the ego to the destination (None without one)
   ped_gap, car_gap   m from the camera mount to the nearest mannequin / scenario car (None when there is none)
   pacer_dx           m the pacer car is ahead of the ego along its heading (None without one)
+  j_dist, car_j_dist m from the ego, and from the nearest oncoming car, to the scenario's junction (None without one)
   blinker            the driver's stalk: '', 'left' or 'right'
 
 Rescore a saved result: python -m openpilot.tools.sim.bridge.beamng.scenarios.score result.json
@@ -58,6 +60,7 @@ def msg_fields(ss, cs, tp, nav, model) -> dict:
     'state': '' if tp is None else str(tp.state), 'reason': '' if tp is None else str(tp.reason),
     'lc': '' if tp is None else str(tp.laneChange), 'prompt': '' if tp is None else str(tp.signalPrompt),
     'control_prompt': '' if tp is None else str(tp.controlPrompt),
+    'desire': 0 if tp is None else int(tp.desire), 'map_kind': '' if tp is None else str(tp.mapControl.kind),
     'lc_state': str(model.meta.laneChangeState),
     'nav_valid': nav is not None, 'nav_type': '' if nav is None else str(nav.maneuverType),
     'nav_mod': '' if nav is None else str(nav.maneuverModifier),
@@ -96,7 +99,7 @@ def rows_from_log(msgs) -> list[dict]:
     nav = latest.get('navInstruction')
     rows.append({'t': round(t - t0, 3), 'wall': None, 'x': None, 'y': None, 'heading': None, 'v': round(cs.vEgo, 2), 'route': route,
                  'dest_dist': None, 'blinker': 'left' if cs.leftBlinker else 'right' if cs.rightBlinker else '',
-                 'ped_gap': None, 'car_gap': None, 'pacer_dx': None,
+                 'ped_gap': None, 'car_gap': None, 'pacer_dx': None, 'j_dist': None, 'car_j_dist': None,
                  **msg_fields(latest['selfdriveState'].selfdriveState, cs, m.turnpilotPlan,
                               nav.navInstruction if nav is not None and nav.valid else None, latest['modelV2'].modelV2)})
   return rows

@@ -4,9 +4,9 @@ import numpy as np
 import pytest
 
 # no beamngpy here: the scenario math runs without the game's client library
-from openpilot.tools.sim.bridge.beamng.scenarios.timing import (WALK_SPEED, catch_up_lead, eta, oncoming_should_release, pacer_drop_s,
-                                                                point_at, profile_times, script_nodes, travel_time, walker_pose,
-                                                                walker_should_start)
+from openpilot.tools.sim.bridge.beamng.scenarios.timing import (GO_NEAR_M, WALK_SPEED, GoWatch, catch_up_lead, oncoming_release_delay,
+                                                                pacer_drop_s, point_at, profile_times, script_nodes, travel_time,
+                                                                walker_pose)
 
 L_PATH = np.array([[0.0, 0.0, 10.0], [10.0, 0.0, 10.0], [10.0, 10.0, 12.0]])  # east 10 m, then north 10 m, climbing 2 m
 
@@ -32,15 +32,56 @@ class TestWalker:
     p, h = walker_pose(L_PATH, 100.0)
     assert np.allclose(p, L_PATH[-1]) and h == pytest.approx(math.pi / 2)  # faces the way it last walked
 
-  def test_starts_lead_before_the_car(self):
-    # at 8 m/s, 4 s lead, 1.5 m to the road edge: leave when the car is 8 * (4 + 1.5 / 1.4) = 40.6 m out
-    assert not walker_should_start(41.5, 8.0, 1.5, 4.0)
-    assert walker_should_start(40.0, 8.0, 1.5, 4.0)
 
-  def test_a_crawling_car_still_triggers(self):
-    assert eta(4.0, 0.0) == pytest.approx(4.0)  # speed floored at 1 m/s
-    assert walker_should_start(4.0, 0.0, 1.5, 4.0)
-    assert not walker_should_start(40.0, 0.0, 1.5, 4.0)
+
+def drive(watch, legs, dt=0.05):
+  """Feed a GoWatch 20 Hz rows: legs of (seconds, m to the junction at the start, speed, holding, turn desire), the car
+  moving toward the junction at speed. Returns the t of the first go and of the first held stand near the junction."""
+  t, go, stood = 0.0, None, None
+  for dur, d, v, holding, desire in legs:
+    for k in range(int(round(dur / dt))):
+      watch.update(t, d - v * k * dt, v, holding, desire)
+      go = t if go is None and watch.went else go
+      stood = t if stood is None and watch.held_t is not None else stood
+      t += dt
+  return go, stood
+
+
+class TestGoWatch:
+  def test_the_go_is_the_release_of_the_hold_at_the_junction_not_one_further_out(self):
+    # BeamNG smoke 2026-10-28, ped_crosswalk_right: held at a signal 116 m out, then braking for the junction's own signal,
+    # stood there 2 s, released: the go is the release at the junction, never the one 116 m out nor the braking to it
+    go, stood = drive(GoWatch(), [(3., 117., 0., True, False), (3., 117., 0., False, False), (8., 116., 8., False, False),
+                                  (5., 30., 3., True, True), (2., 12.3, 0., True, False), (0.5, 12.3, 0., False, False),
+                                  (2., 12.3, 1., False, True)])
+    assert stood == pytest.approx(19.0, abs=0.06) and go == pytest.approx(21.0, abs=0.06)
+
+  def test_a_car_that_stood_and_moves_again_has_gone_whatever_the_plan_says(self):
+    go, _ = drive(GoWatch(), [(2., 20., 0., True, False), (1., 20., 0.2, True, False), (1., 20., 1., True, False)])
+    assert go == pytest.approx(3.0, abs=0.06)
+
+  def test_on_a_green_no_stop_the_go_is_the_turn_desire_out_near_the_junction(self):
+    go, stood = drive(GoWatch(), [(5., 70., 8., False, True)])
+    assert stood is None and go == pytest.approx((70. - GO_NEAR_M) / 8., abs=0.06)
+
+  def test_a_stand_or_a_desire_far_from_the_junction_is_no_go(self):
+    go, stood = drive(GoWatch(), [(3., 60., 0., True, True), (3., 60., 0., False, True), (2., 60., 5., False, True)])
+    assert go is None and stood is None
+
+
+class TestOncomingRelease:
+  @pytest.mark.parametrize("start_m", [30., 35.])
+  def test_first_car_arrives_arrive_after_s_after_the_go(self, start_m):
+    # BeamNG smoke 2026-10-28: released on the car braking to the hold line, the cars came after the car, stood at the
+    # signal's line 22-26 m out, had turned. Released delay s after the car stands at its hold near the junction, the
+    # first reaches the junction arrive_after s after the go: the sim driver's tap STOPPED_TAP_S after the stop
+    from openpilot.tools.sim.bridge.beamng.driver import STOPPED_TAP_S
+    delay = oncoming_release_delay(start_m, 11.0, 2.5, 3.5)
+    assert delay >= 0. and delay + travel_time(start_m, 11.0, 2.5) == pytest.approx(STOPPED_TAP_S + 3.5, abs=0.01)
+
+  def test_a_start_too_far_out_to_make_it_is_refused(self):
+    with pytest.raises(ValueError, match="60"):
+      oncoming_release_delay(60.0, 11.0, 2.5, 3.5)
 
 
 class TestProfiles:
@@ -67,29 +108,6 @@ class TestProfiles:
     assert nodes[-1]['t'] == pytest.approx(analytic_time(100.0, 10.0, 2.0), abs=0.03)
     stopping = script_nodes(path, 10.0, 2.0, s_change=40.0, v_change=0.0)
     assert stopping[-1]['x'] < 70.0  # nodes past the stop are dropped
-
-
-class TestOncoming:
-  @pytest.mark.parametrize("v_ego,decel", [(12.0, 1.0), (12.0, 1.5), (12.0, 2.0), (8.0, 1.5), (5.0, 1.5)])
-  def test_first_car_arrives_arrive_after_s_after_the_car_stops_at_the_hold_line(self, v_ego, decel):
-    # the car cruises, then brakes to a stop at its hold line (an unprotected left stops there), checked at 20 Hz like the
-    # runner; the oncoming car stands 60 m out. It reaches the junction arrive_after_s after the car has stopped, give or
-    # take half a second, whatever the car's braking: after the driver's go (2 s after the stop), as the car creeps out
-    s_car, v_car, a_car, after, dt = 60.0, 11.0, 2.5, 3.5, 0.05
-    d, v, t, released = 150.0, v_ego, 0.0, None
-    while v > 0.:
-      if released is None and oncoming_should_release(d, v, s_car, v_car, a_car, after):
-        released = t
-      if d <= v * v / (2. * decel):
-        v = max(v - decel * dt, 0.)
-      d -= v * dt
-      t += dt
-    assert released is not None and abs(d) < 0.5
-    car_at_junction = released + travel_time(s_car, v_car, a_car)
-    assert after - 0.5 <= car_at_junction - t <= after + 0.5, car_at_junction - t
-
-  def test_late_releases_at_once(self):
-    assert oncoming_should_release(2.0, 8.0, 60.0, 11.0, 2.5, 1.5)
 
 
 class TestPacer:

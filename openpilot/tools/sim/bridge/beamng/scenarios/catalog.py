@@ -25,7 +25,7 @@ from openpilot.selfdrive.turnpilot.lane_planner import LANE_WIDTH, lane_change_w
 from openpilot.selfdrive.turnpilot.map_controls import MAP_STOP_DECEL, PROTECT_BEFORE_M, engage_distance
 from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M
 from openpilot.tools.sim.bridge.beamng.roadgraph import RoadGraph, wrap
-from openpilot.tools.sim.bridge.beamng.scenarios.timing import WALK_SPEED, arc_lengths, point_at
+from openpilot.tools.sim.bridge.beamng.scenarios.timing import WALK_SPEED, arc_lengths, oncoming_release_delay, point_at
 
 DATA_JSON = os.path.join(os.path.dirname(__file__), "lane_change_junctions.json")
 SIGNALS_JSON = os.path.join(os.path.dirname(os.path.dirname(__file__)), "wcusa_map_node_signals.json")
@@ -58,15 +58,15 @@ class Entry:
   speed_kph: float = 30.
   timeout_s: float = 150.
   actor: str = ''                 # 'crosswalk', 'oncoming', 'standing', 'pacer'
-  walker_lead_s: float = 4.       # the walker steps off the curb this long before the car would reach its hold line
   crosswalk_m: float = 0.         # crosswalk centre from the junction along the exit road; 0: road edge + 2.5 m (unverified)
   ped_before_m: float = 40.       # standing mannequin, this far before the junction
   oncoming: int = 2               # cars
-  oncoming_start_m: float = 60.   # the first one starts this far from the junction
+  oncoming_start_m: float = 35.   # the first one starts this far from the junction (released at the car's stop: nearer
+                                  # than ~36 m at 11 m/s, 2.5 m/s^2, it can still come arrive_after_s after the go)
   oncoming_spacing_m: float = 25.
   oncoming_speed: float = 11.     # m/s
   oncoming_accel: float = 2.5     # m/s^2
-  arrive_after_s: float = 1.5     # the first oncoming car reaches the junction this long after the car stops at its hold line
+  arrive_after_s: float = 3.5     # the first oncoming car reaches the junction this long after the car's go there
   pace_block_s: float = 6.        # the pacer keeps the target lane occupied this long into the lane change window
   end_on_stop_s: float = 0.       # end the run once the car has stood this long after moving
   spawn: tuple = ()               # route: (x, y, z), heading_deg, destination (x, y, z)
@@ -76,8 +76,9 @@ class Entry:
 
 SCENARIOS = {
   'ped_crosswalk_right': Entry('turn', junction=(-768.6, 555.2), turn='right', actor='crosswalk', timeout_s=120.),
-  # the oncoming cars reach the junction 3.5 s after the car stops at its hold line, stands ~2 s for the
-  # driver's go and is creeping out when they arrive, so the detector's oncoming hold is what decides when it turns
+  # the car stands at the junction's signal line (11-27 m out) for the driver's go, 2 s after the stop; the first oncoming
+  # car reaches the junction 3.5 s after that go, as the car pulls away toward the oncoming lanes, so the detector's
+  # oncoming hold is what decides when it turns
   'unprotected_left': Entry('turn', junction=(-650.1, 481.7), turn='left', actor='oncoming', arrive_after_s=3.5, timeout_s=150.),
   # unprotected_left comes downhill onto a shelf on a ~21% hill, and the arm straight across drops away past it: the
   # oncoming cars are out of the cameras' view until they top the shelf, about 13 m from the car. This is the same
@@ -435,18 +436,21 @@ def _turn_plan(name: str, e: Entry, graph: RoadGraph) -> Plan:
   if e.actor == 'crosswalk':
     path, c_dist = crosswalk_path(graph, jn, e.crosswalk_m)
     h = heading_of(path[0], path[1])
-    actors.append(Actor(f"{PREFIX}ped", 'walker', 'walk', path.tolist(), WALK_SPEED, heading=h,
-                        params={'lead_s': e.walker_lead_s, 'step_in_m': CURB_STEP_M}))
+    # sets off on the car's go at the junction (timing.GoWatch): 0.9 s to the crosswalk zone, then 15 s in it, while the
+    # car, standing 11-27 m out, takes 2 s or more to its hold line
+    actors.append(Actor(f"{PREFIX}ped", 'walker', 'walk', path.tolist(), WALK_SPEED, heading=h))
     notes['crosswalk_m'] = round(c_dist, 1)
     notes['crosswalk_unverified'] = "crosswalk placed from road widths, not from the level's crossing decals"
   elif e.actor == 'standing':
     p, _ = lane_pose(jn.approach, e.ped_before_m, lanes, radius, ego_lane(e.turn))
     actors.append(Actor(f"{PREFIX}ped", 'walker', 'setup', [list(p)], 0., heading=wrap(heading + math.pi)))
   elif e.actor == 'oncoming':
+    # all released together, a fixed time after the car stands at its hold at the junction (timing.oncoming_release_delay)
+    delay = oncoming_release_delay(e.oncoming_start_m, e.oncoming_speed, e.oncoming_accel, e.arrive_after_s)
     for k, path in enumerate(oncoming_paths(graph, jn, e.oncoming, e.oncoming_start_m, e.oncoming_spacing_m)):
       h = heading_of(path[0], path[1])
       actors.append(Actor(f"{PREFIX}car{k}", 'car', 'oncoming', path.tolist(), e.oncoming_speed, e.oncoming_accel, h,
-                          params={'start_m': e.oncoming_start_m, 'arrive_after_s': e.arrive_after_s}))
+                          params={'start_m': e.oncoming_start_m, 'arrive_after_s': e.arrive_after_s, 'release_after_stop_s': round(delay, 2)}))
   return Plan(name, spawn, heading, dest, (float(jn.center[0]), float(jn.center[1])), e.speed_kph, e.timeout_s,
               e.end_on_stop_s, actors, notes)
 
@@ -530,8 +534,8 @@ def build(name: str, graph: RoadGraph | None = None, data_path: str = DATA_JSON,
   return plan
 
 
-def hold_distance(plan: Plan, x: float, y: float) -> float:
-  """m from (x, y) to the hold line before the plan's junction (straight line, fine on an approach)."""
+def junction_distance(plan: Plan, x: float, y: float) -> float | None:
+  """m from (x, y) to the plan's junction (straight line), or None without one."""
   if plan.junction is None:
-    return math.inf
-  return math.hypot(plan.junction[0] - x, plan.junction[1] - y) - HOLD_LINE_M
+    return None
+  return math.hypot(plan.junction[0] - x, plan.junction[1] - y)

@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 import openpilot.cereal.messaging as messaging
-from openpilot.cereal import custom
+from openpilot.cereal import custom, log
 from openpilot.tools.sim.bridge.beamng.roadgraph import GRAPH_JSON
 from openpilot.tools.sim.bridge.beamng.scenarios import catalog, run
 
@@ -30,8 +30,10 @@ class Clock:
 
 
 class FakeDirector:
+  clock = None  # the test's Clock: each call is logged with its time
+
   def __init__(self, *args, **kwargs):
-    self.calls, self.poses = [], {}
+    self.calls, self.poses, self.times = [], {}, []
 
   def start(self):
     pass
@@ -41,6 +43,7 @@ class FakeDirector:
 
   def submit(self, fn, *args):
     self.calls.append((getattr(fn, '__name__', str(fn)), args))
+    self.times.append(None if self.clock is None else self.clock.t)
     f: Future = Future()
     f.set_result(fn(*args))
     return f
@@ -63,19 +66,27 @@ class FakeDirector:
 
   def close(self):
     self.calls.append(('close', ()))
+    self.times.append(None if self.clock is None else self.clock.t)
 
 
 LANE_OFFSET_M = 1.75  # the fake car drives this far right of the line between the plan's points: in its own lane
 
 
+HOLD_S = 3.0  # the fake car stands this long at the junction's stop line, TurnPilot holding it, before its go
+
+
 class World:
-  """The car and navd: drives spawn -> junction -> destination at 8 m/s once engaged."""
+  """The car and navd: drives spawn -> junction -> destination at 8 m/s once engaged, standing HOLD_S at the junction's
+  stop line (the mapped one, as on the signal tiles) with TurnPilot holding, the turn's desire out from its go."""
   def __init__(self, plan, clock):
     self.plan, self.clock = plan, clock
     self.path = np.array([plan.spawn[:2], plan.junction, plan.dest[:2]])
     self.seg = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(self.path, axis=0), axis=1))]
     self.s, self.enabled, self.dest_set, self.route_t = 0.0, False, False, None
     self.msgs, self.updated, self.next_nav = {}, set(), 0.0
+    self.s_stop = self.seg[1] - (plan.notes.get('stop_line_m') or 8.0) - 1.0
+    self.hold = None  # (start, end) of this run's stand at the stop line
+    self.holds = []   # every run's
 
   def pos(self):
     """On the way from one point to the next, kept a lane's width (LANE_OFFSET_M) right of the line between them: driving
@@ -94,6 +105,11 @@ class World:
 
   def step(self, b):
     v = 8.0 if self.enabled else 0.0
+    if self.enabled and self.hold is None and self.s >= self.s_stop:
+      self.hold = (self.clock.t, self.clock.t + HOLD_S)
+      self.holds.append(self.hold)
+    holding = self.hold is not None and self.clock.t < self.hold[1]
+    v = 0.0 if holding else v
     self.s = min(self.s + v * DT, self.seg[-1])
     (x, y), h = self.pos()
     b.simulator_state.position = SimpleNamespace(x=float(x), y=float(y), z=0.0)
@@ -110,7 +126,9 @@ class World:
     self.msgs['selfdriveState'] = ss
     self.msgs['carState'] = messaging.new_message('carState', valid=True)
     tp = messaging.new_message('turnpilotPlan', valid=True)
-    tp.turnpilotPlan.state = custom.TurnpilotPlan.State.following
+    tp.turnpilotPlan.state = custom.TurnpilotPlan.State.holding if holding else custom.TurnpilotPlan.State.following
+    if self.hold is not None and not holding and self.s < self.seg[1] + 10.:
+      tp.turnpilotPlan.desire = log.Desire.turnRight
     self.msgs['turnpilotPlan'] = tp
     self.msgs['modelV2'] = messaging.new_message('modelV2', valid=True)
     if self.clock.t >= self.next_nav:  # navd at 1 Hz
@@ -178,11 +196,12 @@ def test_runs_end_to_end(tmp_path, monkeypatch, name, runs, trigger, failure):
   monkeypatch.setattr(run, 'time', SimpleNamespace(monotonic=clock.monotonic, strftime=lambda *a: 'now'))
   monkeypatch.setattr(run, 'wall', clock.wall)
   monkeypatch.setattr(run, 'Director', FakeDirector)
+  monkeypatch.setattr(FakeDirector, 'clock', clock)
   monkeypatch.setattr(run, 'web_call', world.web)
   monkeypatch.setattr(run.messaging, 'SubMaster', lambda services: FakeSM(world))
   runner = run.Runner(plan, runs, str(tmp_path), 'http://127.0.0.1:8088', 'tok', 'host', 0)
   b = bridge()
-  b.world.teleport = lambda pos, rot: (b.teleports.append(pos), setattr(world, 's', 0.0))
+  b.world.teleport = lambda pos, rot: (b.teleports.append(pos), setattr(world, 's', 0.0), setattr(world, 'hold', None))
   b.simulator_state.position, b.simulator_state.bearing, b.simulator_state.wheel_speed = SimpleNamespace(x=0, y=0, z=0), 0.0, 0.0
   for _ in range(int(200 / DT)):
     world.step(b)
@@ -198,6 +217,15 @@ def test_runs_end_to_end(tmp_path, monkeypatch, name, runs, trigger, failure):
   assert names.count('setup') == runs and names.count(trigger) == runs * actors and names.count('cleanup') >= runs and names[-1] == 'close'
   assert [c[1][2] for c in runner.director.calls if c[0] == 'web'] == ['DELETE', 'POST'] * runs
   assert out['road'] == plan.road
+  # the actors go on the car at the junction: the walker on its go, the oncoming cars a set time after it stands there
+  d = runner.director
+  assert len(world.holds) == runs
+  for (fn, args), t in zip(d.calls, d.times, strict=True):
+    if fn == 'walk':
+      assert any(end <= t <= end + 0.1 for _, end in world.holds), (t, world.holds)
+    elif fn == 'release':
+      delay = next(a for a in plan.actors if a.name == args[0]).params['release_after_stop_s']
+      assert any(start + delay <= t <= start + delay + 0.1 for start, _ in world.holds), (t, world.holds, delay)
   for r in out['runs']:
     assert r['maneuvers_attempted'] == 1 and not r['disengagements']
     assert r['wrong_side_m'] == 0.0  # checked against the plan's road model, saved beside the runs for a rescore

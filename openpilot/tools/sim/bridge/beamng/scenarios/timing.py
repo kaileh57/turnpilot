@@ -1,13 +1,24 @@
 """Timing for scenario actors: where a walking mannequin is, when a walker starts and when oncoming cars go, and the
-timestamps of a BeamNG AI script. Pure functions of positions (BeamNG world meters, x east, y north) and speeds.
+timestamps of a BeamNG AI script. Pure functions of positions (BeamNG world meters, x east, y north) and speeds, and
+GoWatch, which follows the car at its junction.
+
+On the signal tiles every scenario junction has a mapped signal, and the car stands at its line (BeamNG smoke 2026-10-28:
+11-27 m out) until the driver's go. So the actors key on the car at the junction, not on its distance to the hold line:
+the walker sets off on the car's go, and the oncoming cars go a fixed time after the car stands at its hold there, so the
+first reaches the junction arrive_after s after the go (the sim driver's tap, driver.STOPPED_TAP_S after the stop).
 """
 import math
 
 import numpy as np
 
+from openpilot.tools.sim.bridge.beamng.driver import STOPPED_TAP_S
+
 WALK_SPEED = 1.4  # m/s, a brisk pedestrian
 PROFILE_DT = 0.02  # s, integration step for speed profiles
 NODE_SPACING = 4.0  # m between AI script nodes
+GO_NEAR_M = 35.     # a stand or a turn desire this close to the junction (straight line) is at it: the car stood 27 m out
+STOOD_V = 0.3       # m/s: standing
+MOVING_V = 0.5      # m/s: moving again
 
 
 def arc_lengths(pts) -> np.ndarray:
@@ -38,15 +49,34 @@ def walker_pose(path, t: float, speed: float = WALK_SPEED):
   return point_at(path, speed * max(t, 0.0))
 
 
-def eta(dist: float, v: float, v_min: float = 1.0) -> float:
-  """Seconds to cover dist at the current speed (no slower than v_min, so a car rolling up isn't infinitely far)."""
-  return max(dist, 0.0) / max(v, v_min)
+class GoWatch:
+  """The car at its junction, from 20 Hz rows: held_t, when it came to a stand within GO_NEAR_M of the junction with
+  TurnPilot holding (a map stop, a queue), and went, its go there: the hold let go with the car standing, the car moving
+  again after a stand there, or, never having stood (a green), the turn's desire out there with nothing holding the car
+  (braking for the line with the desire out is no go). A stand or a release further out (a signal before the junction's
+  own) is no go."""
 
+  def __init__(self, near_m: float = GO_NEAR_M):
+    self.near_m = near_m
+    self.held_t: float | None = None  # the first held stand near the junction
+    self.stood = False                # stood near the junction
+    self.held = False                 # ...with TurnPilot holding the car
+    self.went = False
 
-def walker_should_start(d_ego: float, v_ego: float, step_in_m: float, lead_s: float, speed: float = WALK_SPEED) -> bool:
-  """True once the walker must set off to step off the curb lead_s before the ego, at its current speed, reaches the
-  crosswalk d_ego m ahead. step_in_m: from the walker's start to the road edge."""
-  return eta(d_ego, v_ego) <= step_in_m / speed + lead_s
+  def update(self, t: float, d_junction: float, v: float, holding: bool, turn_desire: bool) -> None:
+    """d_junction: m from the car to the junction; holding: turnpilotPlan.state is holding; turn_desire: its desire is a
+    turn."""
+    if self.went or d_junction > self.near_m:
+      return
+    if v < STOOD_V:
+      self.stood = True
+      if holding:
+        self.held = True
+        self.held_t = t if self.held_t is None else self.held_t
+      elif self.held:
+        self.went = True  # let go at a standstill: the go, before the car moves
+    elif v > MOVING_V and (self.stood or (turn_desire and not holding)):
+      self.went = True
 
 
 def profile_times(s_nodes, v: float, accel: float, s_change: float = math.inf, v_change: float = 0.0,
@@ -82,19 +112,15 @@ def travel_time(s: float, v: float, accel: float) -> float:
   return profile_times([s], v, accel)[0]
 
 
-def stop_eta(dist: float, v: float, v_min: float = 1.0) -> float:
-  """Seconds to come to a stop dist m ahead, braking evenly from v to 0 there: 2 dist / v. Exact once the car is braking
-  for it, whatever its rate; while it still cruises, later than it will be (the release waits for the braking)."""
-  return 2.0 * max(dist, 0.0) / max(v, v_min)
-
-
-def oncoming_should_release(d_ego_hold: float, v_ego: float, s_car: float, v_car: float, accel: float,
-                            arrive_after_s: float) -> bool:
-  """True once oncoming cars standing s_car m before the junction must go so the first arrives there arrive_after_s
-  after the ego has stopped at its hold line d_ego_hold m ahead (an unprotected left stops there for the driver's go).
-  At its current speed it would get there sooner: the cars arrived before the go, not after it. Already late releases at
-  once."""
-  return stop_eta(d_ego_hold, v_ego) + arrive_after_s <= travel_time(s_car, v_car, accel)
+def oncoming_release_delay(s_car: float, v_car: float, accel: float, arrive_after_s: float, tap_s: float = STOPPED_TAP_S) -> float:
+  """Seconds after the car stands at its hold near the junction (GoWatch.held_t) to release oncoming cars standing s_car
+  m out, so the first reaches the junction arrive_after_s after the go (the driver's tap tap_s after the stop). One too
+  far out to make it from there is refused: it would come late, after the car had turned."""
+  delay = tap_s + arrive_after_s - travel_time(s_car, v_car, accel)
+  if delay < 0.:
+    raise ValueError(f"an oncoming car {s_car:.0f} m out takes {travel_time(s_car, v_car, accel):.1f} s to the junction, " +
+                     f"more than the {tap_s + arrive_after_s:.1f} s from the stop to {arrive_after_s} s after the go: start it nearer")
+  return delay
 
 
 def pacer_drop_s(s_start: float, s_junction: float, window_start_m: float, v: float, block_s: float) -> float:

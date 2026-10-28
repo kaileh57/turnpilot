@@ -30,6 +30,7 @@ from multiprocessing import Queue
 from pathlib import Path
 
 import openpilot.cereal.messaging as messaging
+from openpilot.cereal import log
 from openpilot.common.hardware.hw import Paths
 from openpilot.common.params import Params
 from openpilot.selfdrive.turnpilot.web.pairing import PORT
@@ -39,15 +40,16 @@ from openpilot.tools.sim.bridge.beamng.driver import GasTaps, ground_truth_green
 from openpilot.tools.sim.bridge.beamng.pose import beamng_quat
 from openpilot.tools.sim.bridge.beamng.scenario import heading_quat
 from openpilot.tools.sim.bridge.beamng.scenarios import score
-from openpilot.tools.sim.bridge.beamng.scenarios.catalog import DATA_JSON, ROLL_FRACTION, SCENARIOS, Plan, build, hold_distance
+from openpilot.tools.sim.bridge.beamng.scenarios.catalog import DATA_JSON, ROLL_FRACTION, SCENARIOS, Plan, build, junction_distance
 from openpilot.tools.sim.bridge.beamng.scenarios.director import Director, sweep
-from openpilot.tools.sim.bridge.beamng.scenarios.timing import oncoming_should_release, walker_should_start
+from openpilot.tools.sim.bridge.beamng.scenarios.timing import GoWatch
 
 SETTLE_S = 4.         # after the teleport: the car is back in D and the GPS has caught up
 CLEAR_TIMEOUT_S = 5.  # wait this long for navd to drop the old route
 ROUTE_TIMEOUT_S = 30.
 ENGAGE_TIMEOUT_S = 30.
 
+TURN_DESIRES = (int(log.Desire.turnLeft), int(log.Desire.turnRight))
 SERVICES = ['turnpilotPlan', 'selfdriveState', 'carState', 'navInstruction', 'navRoute', 'modelV2', 'turnpilotLights']
 OUT_ROOT = os.path.expanduser("~/turnpilot-artifacts/scenarios")
 POSE_FIELDS = ["wall_s", "t_s", "x", "y", "z", "qx", "qy", "qz", "qw"]  # route_drive's, which chase_render.py reads
@@ -194,6 +196,7 @@ class Runner:
     self.t_engaged = self.t_engaged_wall = None
     self.end_check = score.EndCheck(plan.timeout_s, plan.end_on_stop_s)
     self.taps = GasTaps(self.signal_tap)
+    self.watch = GoWatch()
 
   def engage(self, b):
     b.set_speed_kph, b.rolling_start_kph, b.auto_engage = self.plan.speed_kph, self.plan.speed_kph * ROLL_FRACTION, True
@@ -208,7 +211,7 @@ class Runner:
       'v': round(s.wheel_speed, 2), 'route': self.route_id,
       'dest_dist': None if self.plan.dest is None else round(math.hypot(self.plan.dest[0] - x, self.plan.dest[1] - y), 1),
       'blinker': 'left' if b.blinker[0] else 'right' if b.blinker[1] else '',
-      'ped_gap': None, 'car_gap': None, 'pacer_dx': None,
+      'ped_gap': None, 'car_gap': None, 'pacer_dx': None, 'j_dist': junction_distance(self.plan, x, y), 'car_j_dist': None,
       **score.msg_fields(sm['selfdriveState'], sm['carState'], sm['turnpilotPlan'] if sm.seen['turnpilotPlan'] else None,
                          sm['navInstruction'] if sm.seen['navInstruction'] and sm.valid['navInstruction'] else None,
                          sm['modelV2']),
@@ -220,6 +223,11 @@ class Runner:
       d = math.hypot(pose[0] - x, pose[1] - y)
       key = 'ped_gap' if a.kind == 'walker' else 'car_gap'
       r[key] = round(d if r[key] is None else min(r[key], d), 2)
+      if a.trigger == 'oncoming':  # where the oncoming traffic is, for the score's "presented" (score.oncoming_presented)
+        dj = junction_distance(self.plan, pose[0], pose[1])
+        r['car_j_dist'] = round(dj if r['car_j_dist'] is None else min(r['car_j_dist'], dj), 2)
+    if r['j_dist'] is not None:
+      r['j_dist'] = round(r['j_dist'], 2)
       if a.trigger == 'pace':
         r['pacer_dx'] = round((pose[0] - x) * math.cos(h) + (pose[1] - y) * math.sin(h), 2)
     return r
@@ -243,26 +251,29 @@ class Runner:
         rows.append(new)
 
   def triggers(self, b, r):
-    """Set the actors going when the car gets to them: the walker steps out as the car arrives, the oncoming cars go
-    to reach the junction just after the car reaches its hold line, the pacer goes once the car is engaged."""
+    """Set the actors going on the car at its junction (timing.GoWatch): the walker steps out on the car's go there, the
+    oncoming cars go a fixed time after it stands at its hold there, so the first reaches the junction arrive_after_s
+    after the go (or at once on a go that came sooner); the pacer goes once the car is engaged."""
     plan, d = self.plan, self.director
+    if r['j_dist'] is not None:
+      self.watch.update(r['t'], r['j_dist'], r['v'], r['state'] == 'holding', r['desire'] in TURN_DESIRES)
+    w = self.watch
     for a in plan.actors:
       if a.name in self.fired or a.trigger == 'setup':
         continue
       go = False
       if a.trigger == 'walk':
-        go = walker_should_start(hold_distance(plan, r['x'], r['y']), r['v'], a.params['step_in_m'], a.params['lead_s'], a.speed)
-        job = (d.walk, a.name)
+        go, job = w.went, (d.walk, a.name)
       elif a.trigger == 'oncoming':
-        go = oncoming_should_release(hold_distance(plan, r['x'], r['y']), r['v'], a.params['start_m'], a.speed, a.accel,
-                                     a.params['arrive_after_s'])
+        go = w.went or (w.held_t is not None and r['t'] - w.held_t >= a.params['release_after_stop_s'])
         job = (d.release, a.name)
       elif a.trigger == 'pace':
         go, job = True, (d.release_pacer, a.name, (r['x'], r['y']), r['v'])
       if go:
         self.fired.add(a.name)
         self.jobs.append((a.name, d.submit(*job)))
-        print(f"scenario: {a.name} goes at t={r['t']:.1f} s, {hold_distance(plan, r['x'], r['y']):.0f} m from the hold line", flush=True)
+        where = '' if r['j_dist'] is None else f", {r['j_dist']:.0f} m from the junction"
+        print(f"scenario: {a.name} goes at t={r['t']:.1f} s{where}", flush=True)
 
   def driver(self, b):
     """The driver taps the stalk when TurnPilot asks for a signal (PLAN: Tesla can't signal for openpilot), and lets go
