@@ -14,6 +14,11 @@ from pathlib import Path
 
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.turnpilot.maps import coverage as coverage_cache
+from openpilot.selfdrive.turnpilot.maps.client import MapError, cert_fingerprint, check_cert, missing_config, normalize_host
+from openpilot.selfdrive.turnpilot.maps.coverage import CoverageCache, CoverageRefresher, check_trip
+from openpilot.selfdrive.turnpilot.maps.status import read_status
+from openpilot.selfdrive.turnpilot.routing.sources import local_override
 from openpilot.selfdrive.turnpilot.web import places
 from openpilot.selfdrive.turnpilot.web.pairing import PORT, icon_png, pairing_url, qr_svg
 from openpilot.selfdrive.turnpilot.web.status import StatusReader, format_status
@@ -27,9 +32,10 @@ LOOPBACK = ("127.0.0.1", "::1")
 
 
 class ApiError(Exception):
-  def __init__(self, code: int, message: str):
+  def __init__(self, status: int, message: str, **extra):
     super().__init__(message)
-    self.code = code
+    self.code = status
+    self.extra = extra  # more fields for the JSON body, as the geofence's code and regions
 
 
 def number(value):
@@ -44,11 +50,14 @@ def number(value):
 
 class App:
   """What the handlers share. search and resolve can be swapped for tests."""
-  def __init__(self, params, reader=None, search=places.search, resolve=places.resolve_apple_maps):
+  def __init__(self, params, reader=None, search=places.search, resolve=places.resolve_apple_maps, maps_dir=None, refresh=None):
     self.store = Store(params)
     self.reader = reader
     self.search = search
     self.resolve = resolve
+    self.maps_dir = maps_dir
+    self.coverage = CoverageCache(maps_dir)
+    self.refresh = refresh if refresh is not None else (lambda: coverage_cache.refresh(params, maps_dir))
 
   def valid_token(self, candidates) -> str | None:
     """The stored token if any candidate matches it, else None."""
@@ -67,7 +76,108 @@ class App:
 
   def status(self) -> dict:
     snap = self.reader.get() if self.reader else None
-    return format_status(snap, self.store.destination(), self.store.flag("TurnPilotEnabled"), self.store.flag("IsMetric"))
+    status = format_status(snap, self.store.destination(), self.store.flag("TurnPilotEnabled"), self.store.flag("IsMetric"))
+    status["map"] = self.map_status(status["gps"])
+    return status
+
+  # TurnPilot's mapped area (the geofence) and its map server
+
+  def cached_coverage(self):
+    """(coverage or None, error message or None). Never raises: the status must load to show the error."""
+    try:
+      return self.coverage.get(), None
+    except MapError as e:
+      return None, e.message
+
+  def map_status(self, gps) -> dict:
+    """Where the car is against the mapped area, and navd's download and route status."""
+    with self.store.lock:
+      params = self.store.params
+      override = local_override(params)
+      missing = missing_config(params)
+      refresh_status = params.get(coverage_cache.STATUS_PARAM)
+      nav = read_status(params)
+    coverage, error = self.cached_coverage()
+    if coverage is None and error is None:
+      error = coverage_cache.NO_COVERAGE_MESSAGE
+    here = gps
+    if here is None and (last := self.store.last_gps()):
+      here = {"latitude": last[0], "longitude": last[1]}
+    region = coverage.region_at(here["longitude"], here["latitude"]) if coverage and here else None
+    return {
+      "override": override,  # TurnPilotValhallaTiles: local tiles, no geofence, no download
+      "missing": missing,
+      "coverage": coverage and {"version": coverage.version, "fetched_at": self.coverage.fetched_at, "regions": coverage.summary(),
+                                "names": coverage.names()},
+      "coverage_error": error,
+      "refresh": refresh_status if isinstance(refresh_status, dict) else None,
+      "car": here,
+      "car_region": region.name if region else None,
+      "car_outside": bool(coverage and here and region is None),
+      "outside_message": coverage.outside_message() if coverage else None,
+      "nav": nav,
+    }
+
+  def check_destination(self, latitude, longitude):
+    """Refuse a destination outside the mapped area, and any destination while there is no coverage to check it against.
+    With the local tiles override (TurnPilotValhallaTiles, as in the sim) there is no geofence."""
+    with self.store.lock:
+      if local_override(self.store.params):
+        return
+    try:
+      coverage = self.coverage.require()
+      here = self.position()  # (latitude, longitude)
+      check_trip(coverage, (here[1], here[0]) if here else None, (longitude, latitude))
+    except MapError as e:
+      coverage = self.coverage.coverage
+      raise ApiError(422, e.message, code=e.code, regions=coverage.summary() if coverage else []) from None
+
+  def map_settings(self) -> dict:
+    """The map server settings for the page. The key is never sent back, only its last 4 characters."""
+    with self.store.lock:
+      params = self.store.params
+      host, key, cert = (params.get(k) or "" for k in ("TurnPilotMapHost", "TurnPilotMapKey", "TurnPilotMapCert"))
+    try:
+      fingerprint = cert_fingerprint(cert) if cert else ""
+    except ValueError:
+      fingerprint = "not a valid certificate"
+    return {"host": host, "key_set": bool(key), "key_hint": key[-4:] if len(key) >= 12 else "", "cert_set": bool(cert),
+            "cert_fingerprint": fingerprint}
+
+  def set_map_settings(self, body) -> dict:
+    """Save what the body sets (host, key, cert); a missing or empty field stays as it is. Then fetch the coverage with
+    the new settings, so the page shows at once whether they work."""
+    values = {}
+    try:
+      if str(body.get("host") or "").strip():
+        values["TurnPilotMapHost"] = normalize_host(str(body["host"]))
+      if str(body.get("key") or "").strip():
+        values["TurnPilotMapKey"] = str(body["key"]).strip()
+      if str(body.get("cert") or "").strip():
+        values["TurnPilotMapCert"] = check_cert(str(body["cert"]))
+        cert_fingerprint(values["TurnPilotMapCert"])
+    except MapError as e:
+      raise ApiError(400, e.message) from None
+    except ValueError:
+      raise ApiError(400, "The certificate is not valid PEM.") from None
+    if not values:
+      raise ApiError(400, "nothing to save: send host, key or cert")
+    with self.store.lock:
+      for k, v in values.items():
+        self.store.params.put(k, v, block=True)
+    try:
+      self.refresh()
+      result = {"coverage_ok": True, "coverage_error": None}
+    except MapError as e:
+      result = {"coverage_ok": False, "coverage_error": e.message}
+    return {**self.map_settings(), **result}
+
+  def coverage_body(self) -> dict:
+    coverage, error = self.cached_coverage()
+    if coverage is None:
+      return {"coverage": None, "error": error or coverage_cache.NO_COVERAGE_MESSAGE}
+    return {"coverage": coverage.data, "version": coverage.version, "fetched_at": self.coverage.fetched_at,
+            "regions": coverage.summary(), "names": coverage.names(), "error": None}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -153,7 +263,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.send(200, qr_svg(url).encode(), "image/svg+xml")
       self.send_json(200, self.api(method, path, query))
     except ApiError as e:
-      self.send_json(e.code, {"error": str(e)})
+      self.send_json(e.code, {"error": str(e), **e.extra})
     except ValueError as e:
       self.send_json(400, {"error": str(e)})
     except Exception:
@@ -182,6 +292,12 @@ class Handler(BaseHTTPRequestHandler):
     if (method, path) in (("DELETE", "/api/destination"), ("POST", "/api/stop")):
       store.stop()
       return {"ok": True}
+    if method == "GET" and path == "/api/coverage":
+      return app.coverage_body()
+    if method == "GET" and path == "/api/map":
+      return app.map_settings()
+    if method == "POST" and path == "/api/map":
+      return {"ok": True, **app.set_map_settings(self.body())}
     if method == "POST" and path == "/api/favorites":
       body = self.body()
       return {"ok": True, **store.add_favorite(number(body.get("latitude")), number(body.get("longitude")), body.get("name"))}
@@ -216,6 +332,7 @@ class Handler(BaseHTTPRequestHandler):
     lat, lon = number(place.get("latitude")), number(place.get("longitude"))
     if lat is None or lon is None or not valid_latlon(lat, lon):
       raise ApiError(400, "need latitude and longitude, or a url")
+    self.app.check_destination(lat, lon)  # before anything is saved, so a refused place never becomes the destination or a recent
     return self.app.store.navigate(lat, lon, place.get("name"))
 
 
@@ -232,6 +349,8 @@ def main():
   ensure_token(params)
   reader = StatusReader()
   reader.start()
+  refresher = CoverageRefresher(params)  # keeps TurnPilot's mapped area fresh while the comma is online
+  refresher.start()
   server = Server(("", PORT), make_handler(App(params, reader)))
   cloudlog.info(f"turnpilot_web listening on :{PORT}")
   server.serve_forever()

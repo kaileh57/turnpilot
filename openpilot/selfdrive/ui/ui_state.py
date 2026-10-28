@@ -93,6 +93,7 @@ class UIState:
     self.navigation_enabled: bool = self.params.get_bool("NavigationEnabled")
     self.nav_destination_set: bool = self.params.get("NavDestination") is not None
     self.turnpilot_enabled: bool = self.params.get_bool("TurnPilotEnabled")
+    self.turnpilot_map_status: dict | None = self.params.get("TurnPilotMapStatus")  # navd's map download and route status
     self.chestnut_present: bool = False
     self.chestnut_compiled: bool = chestnut_compiled()
     self.chestnut_active: bool | None = None
@@ -257,6 +258,7 @@ class UIState:
     self.navigation_enabled = self.params.get_bool("NavigationEnabled")
     self.nav_destination_set = self.params.get("NavDestination") is not None
     self.turnpilot_enabled = self.params.get_bool("TurnPilotEnabled")
+    self.turnpilot_map_status = self.params.get("TurnPilotMapStatus")
     self.chestnut_active = self.params.get("ChestnutActive")
     self.chestnut_loading = self.params.get_bool("ChestnutLoading")
     self.chestnut_alert = any(self.params.get(k) is not None for k, a in OFFROAD_ALERTS.items() if k.startswith("Offroad_Chestnut") and a["severity"] >= 0)
