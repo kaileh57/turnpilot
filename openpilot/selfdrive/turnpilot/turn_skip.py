@@ -64,6 +64,14 @@ class TurnSkip:
     self.skipped = False
     self._infeasible = 0
 
+  def skip(self, maneuver, distance: float, maneuver_id: int, v_ego: float, reason: str) -> None:
+    """Skip this maneuver for good now, for reason: as when it is too fast to make (turnpilotd: a turn whose desire was
+    dropped while TurnPilot had handed back, with too little road left for a fresh pulse to be taken)."""
+    self.maneuver_id, self.skipped, self._infeasible = maneuver_id, True, 0
+    cloudlog.event("turnpilot_turn_skipped", error=True, reason=reason, type=maneuver.type, modifier=maneuver.modifier,
+                   angle_deg=round(maneuver.angle_deg, 1), geometry=maneuver.geometry, distance=round(distance, 1),
+                   v_ego=round(v_ego, 2))
+
   def update(self, maneuver, distance: float, maneuver_id: int, v_ego: float, desire_out: bool,
              right_hand_traffic: bool = True) -> SkipState:
     """maneuver: RouteFollower.upcoming; desire_out: this maneuver's desire has gone out (DesireTiming.started)."""

@@ -89,6 +89,7 @@ class DesireTiming:
     self._stopped_t = 0.
     self.side = 0             # set once a turn desire went out: the turn to clear once it is done
     self._held = False        # held off while openpilot wasn't steering, since the last pulse
+    self._abandoned = False   # abandon()ed: TurnPilot handed back
 
   def _turn_over(self):
     """The maneuver was passed or replaced: clear its turn desire now, or once the car has turned CLEAR_MIN_DEG."""
@@ -101,6 +102,13 @@ class DesireTiming:
     queue once the car has turned CLEAR_MIN_DEG, as for a passed turn; the caller sends None as the maneuver from now on."""
     self._turn_over()
     self.done, self.active = True, False
+    self._abandoned = True
+
+  def resume(self):
+    """TurnPilot acts again after a handback: a maneuver abandoned before any desire went out for it is taken up again,
+    as on a fresh engage. One whose desire went out stays done (turnpilotd decides about a held turn)."""
+    if self._abandoned and not self.started:
+      self.done = self._abandoned = False
 
   def _clear(self):
     self.clear_frames, self._pending, self.side = CLEAR_FRAMES, None, 0

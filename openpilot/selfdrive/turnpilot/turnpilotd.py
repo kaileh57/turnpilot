@@ -25,6 +25,8 @@ cancels navd's route, once such a turn is over. The scene's stops in force stay,
 whose desire already went out: a handback must not speed the car up. Nor does the route going away under a committed
 turn cancel it (route_follower.py: gaps, navd going quiet, reroutes are dead-reckoned through).
 A fault (plan()) is a disabled plan; it carries a model fallback's handback, so a fault never hides one.
+Once the detector is back and TurnPilot acts again, the dropped maneuver is taken up or skipped out loud, never left
+half driven (_take_up_dropped).
 A handback or a fault cancels a lane change that is offered and not yet started, with laneChangeAbort handedBack or
 fault for ABORT_HOLD_S (selfdrived raises turnpilotLaneChangeAborted); TurnPilot turned off cancels it as turnedOff.
 A change DesireHelper has started goes on.
@@ -40,7 +42,7 @@ from openpilot.common.params import Params, UnknownKeyName
 from openpilot.common.realtime import DT_MDL, Ratekeeper
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
-from openpilot.selfdrive.turnpilot.desire_timing import DesireTiming
+from openpilot.selfdrive.turnpilot.desire_timing import TURN_STARTED_DEG, DesireTiming
 from openpilot.selfdrive.turnpilot.handback import Handback
 from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S, CLEAR_DESIRE
 from openpilot.selfdrive.turnpilot.lane_planner import (OPENPILOT_SIGNALS_BRANDS, LanePlanner, lane_change_window, lane_mismatch,
@@ -210,6 +212,8 @@ class TurnPilot:
       # an offered lane change is cancelled out loud, its abort held on this planner; one under way goes on
       self.lanes.cancel('handedBack')
       self.paint_rule_lanes.cancel('handedBack')
+    elif acting and not self.acting and self.dropped_id is not None:
+      self._take_up_dropped(upcoming, rf, v_ego)
     self.acting = acting
 
     # too fast to make the turn: skipped, so nothing below acts on it (no desire, no cap, no turn holds or lane changes)
@@ -285,6 +289,22 @@ class TurnPilot:
     else:
       plan.state = State.following
     return msg
+
+  def _take_up_dropped(self, upcoming, rf, v_ego: float) -> None:
+    """TurnPilot acts again after a handback (the detector is back): the maneuver dropped at the handback is never left
+    half driven, capped with no desire and no alert. A held turn desire still out (openpilot stayed engaged) drives on,
+    as does a turn the driver has already started; a maneuver whose desire never went out is taken up as on a fresh
+    engage. A turn whose desire was dropped while openpilot was off is skipped out loud (tooFastToTurn, navd reroutes):
+    the car is inside the turn's lead by now, where a fresh pulse isn't taken."""
+    d = self.desires
+    dropped = self.dropped_id == rf.maneuver_id and d.maneuver_id == rf.maneuver_id
+    self.dropped_id = self.turn_cap_id = self.turn_held_id = None
+    if not dropped or upcoming is None:
+      return
+    if d.started and d.side != 0 and not d.done and not d.active and d.turned_deg < TURN_STARTED_DEG:
+      self.skip.skip(upcoming, rf.distance, rf.maneuver_id, v_ego, 'desireDropped')
+    else:
+      d.resume()
 
   def plan(self, sm, scene, enabled: bool, shadow: bool, *args, long_control: bool | None, **kwargs):
     """update(), but a disabled plan while openpilot doesn't control speed (on a Tesla, without alpha longitudinal):

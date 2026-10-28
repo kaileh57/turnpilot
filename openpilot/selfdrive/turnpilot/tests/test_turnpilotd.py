@@ -580,3 +580,50 @@ def test_turn_just_after_a_bend_or_a_new_name_is_slowed_for_not_skipped():
       plans = [p for _, _, p in sim.trace]
       assert not any(p.tooFastToTurn for p in plans), (first, gap)
       assert Desire.turnLeft in [p.desire for p in plans], (first, gap)
+
+
+SOFT_DISABLE_S = 3.  # selfdrived/state.py SOFT_DISABLE_TIME: lat stays active this long after the handback
+
+
+def recover_after_outage(cruise, outage, reengage=1.):
+  """The turn desire goes out, then the detector stops for outage s: handback, soft disable (lat active SOFT_DISABLE_S),
+  then openpilot disengaged until the driver engages again reengage s after the detector comes back. Returns the sim
+  and the trace index at which TurnPilot acts again."""
+  sim = Sim([(300., "turn", "left", junction_of("left")), (1500., "turn", "right", junction_of("right"))], cruise=cruise)
+  while sim.distance() > TURN_DESIRE_LEAD_M - 1. or sim.s < 10.:
+    sim.step()
+  assert sim.trace[-1][2].desire == Desire.turnLeft
+  t, handback_t, back_t, back_i = 0., None, None, None
+  while sim.s < 310.:
+    available = t >= outage
+    if handback_t is None and not sim.tp.acting:
+      handback_t = t
+    if available and back_t is None:
+      back_t, back_i = t, len(sim.trace)
+    disengaged = handback_t is not None and t - handback_t >= SOFT_DISABLE_S
+    lat = not disengaged or (back_t is not None and t - back_t >= reengage)
+    sim.step(available=available, lat_active=lat)
+    t += DT_MDL
+  return sim, back_i
+
+
+def test_turn_dropped_while_disengaged_is_not_left_half_driven():
+  # the detector is back after a long outage and the driver engages again before the left, whose desire was dropped
+  # while openpilot was off: TurnPilot never drives on toward it capped, 'approaching' and with no desire and no alert.
+  # The turn is skipped out loud (too late for a fresh pulse to be taken)
+  for cruise in (13., 3.5):
+    sim, back = recover_after_outage(cruise, outage=5.)
+    after = [p for s, _, p in sim.trace[back:] if s < 300.]
+    assert after, cruise
+    silent = [p for p in after if p.desire == Desire.none and p.speedCap < NO_SPEED_CAP and not p.tooFastToTurn and
+              p.state == State.approaching]
+    assert not silent, cruise
+    assert any(p.tooFastToTurn for p in after), cruise
+
+
+def test_detector_back_within_the_soft_disable_keeps_the_turn():
+  # back before openpilot disengaged: the held desire stays out with no new rising edge, and TurnPilot drives the turn on
+  sim, back = recover_after_outage(13., outage=2.)
+  after = [p for s, _, p in sim.trace[back:] if s < 300.]
+  assert after and all(p.desire in (Desire.turnLeft, Desire.none) and not p.tooFastToTurn for p in after)
+  assert after[0].desire == Desire.turnLeft and all(p.state == State.turning for p in after[:5])
