@@ -1,9 +1,9 @@
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot.hooks import plan_accel
 from openpilot.selfdrive.turnpilot.route_follower import NOMINAL_ANGLE_DEG, Maneuver, classify
-from openpilot.selfdrive.turnpilot.scene_policy import (ACCEL_CAP_JERK, CROSSWALK_LEAVING_FRAMES, GAS_RELEASE_M, HOLD_LINE_M, NO_ACCEL_CAP, NO_SPEED_CAP,
-                                                        ONCOMING_ASSUMED_SPEED, ONCOMING_TTA_S, PED_STOP_GAP_M, STOP_DECEL,
-                                                        VEL_TRUST_HITS, ScenePolicy, scene_policy)
+from openpilot.selfdrive.turnpilot.scene_policy import (ACCEL_CAP_JERK, COMMIT_SPEED, CROSSWALK_LEAVING_FRAMES, GAS_RELEASE_M, HOLD_LINE_M,
+                                                        NO_ACCEL_CAP, NO_SPEED_CAP, ONCOMING_ASSUMED_SPEED, ONCOMING_ENTRY_M, ONCOMING_TTA_S,
+                                                        PED_STOP_GAP_M, STOP_DECEL, VEL_TRUST_HITS, ScenePolicy, scene_policy)
 from openpilot.selfdrive.turnpilot.tests.synthetic import scene
 
 LEFT_TURN = Maneuver(*classify("turn", "left"), "turn", "left", NOMINAL_ANGLE_DEG["left"])
@@ -162,9 +162,10 @@ def test_a_hold_in_force_is_carried_through_a_gap():
 
 def test_gas_releases_the_hold_at_the_line():
   oncoming = scene([car(60., 5., vx=-12.)])
-  # crept past the hold line under COMMIT_SPEED on the gas, then lifted: the one-frame policy stops hard inside the junction
+  # crept past the hold line on the gas, then lifted: the one-frame policy stops it where the comfortable curve can, short
+  # of the oncoming lanes (no hard stop in the junction)
   d = policy([car(60., 5., vx=-12.)], maneuver=LEFT_TURN, distance=HOLD_LINE_M - 2., v_ego=1.5)
-  assert d.should_stop or d.accel_cap < -STOP_DECEL
+  assert d.holding and d.speed_cap == 0. and d.accel_cap == NO_ACCEL_CAP
   sp = ScenePolicy()
   d = sp.update(oncoming.objects, True, LEFT_TURN, HOLD_LINE_M - 2., 1.5, maneuver_id=3, gas_pressed=True)
   assert not d.holding
@@ -414,3 +415,49 @@ def test_fault_keeps_a_junction_open():
     sp.update([], True, None, float('inf'), 1.)  # the faulted frame: no route
     d = sp.update(scene([car(distance + 4., 5., vx=-1.5)]).objects, True, LEFT_TURN, distance, 1., maneuver_id=7)
     assert (d.reason == "waiting for oncoming") == held, distance
+
+
+def test_the_go_that_released_a_map_stop_never_releases_the_oncoming_hold():
+  # the driver's gas tap at an unprotected left's hold line is the map latch's go (map_controls.py): the detector still
+  # holds the car for a car it sees coming. Only another press, the driver overriding the detector, releases that
+  oncoming = scene([car(40., 5., vx=-10., age=VEL_TRUST_HITS)])
+  sp = ScenePolicy()
+  d = sp.update(oncoming.objects, True, LEFT_TURN, HOLD_LINE_M + 0.8, 0., maneuver_id=3, gas_pressed=True, go_press=True)
+  assert d.should_stop and d.reason == "waiting for oncoming"
+  for _ in range(10):  # the same press, held
+    d = sp.update(oncoming.objects, True, LEFT_TURN, HOLD_LINE_M + 0.8, 0., maneuver_id=3, gas_pressed=True, go_press=True)
+    assert d.should_stop and d.reason == "waiting for oncoming"
+  d = sp.update(oncoming.objects, True, LEFT_TURN, HOLD_LINE_M + 0.8, 0., maneuver_id=3)
+  assert d.should_stop
+  d = sp.update(oncoming.objects, True, LEFT_TURN, HOLD_LINE_M + 0.8, 0., maneuver_id=3, gas_pressed=True)
+  assert not d.holding and sp.released_id == 3
+
+
+def test_after_the_go_an_oncoming_car_still_holds_short_of_the_oncoming_lanes():
+  # pulling away from the hold line past COMMIT_SPEED is no commitment while the car can still stop short of the oncoming
+  # lanes on the comfortable curve (BeamNG: the hold depended on the car happening to be under 2 m/s there)
+  sp, distance, v = ScenePolicy(), HOLD_LINE_M + 0.5, 0.
+  while distance > HOLD_LINE_M - 1.5:
+    assert not sp.update([], True, LEFT_TURN, distance, v, maneuver_id=1).holding
+    v += 1.5 * DT_MDL
+    distance -= v * DT_MDL
+  assert v > COMMIT_SPEED and sp.committed_id is None
+  oncoming = scene([car(40., 5., vx=-10., age=VEL_TRUST_HITS)])
+  stopped = False
+  for _ in range(int(5. / DT_MDL)):
+    d = sp.update(oncoming.objects, True, LEFT_TURN, distance, v, maneuver_id=1)
+    assert d.holding and d.reason == "waiting for oncoming" and d.accel_cap == NO_ACCEL_CAP  # the curve, never harder
+    a = plan_accel(d.accel_cap, d.speed_cap, v)
+    if d.should_stop:
+      a, stopped = min(a, -1.), True
+    v = max(v + a * DT_MDL, 0.)
+    distance -= v * DT_MDL
+  assert stopped and v == 0. and distance > ONCOMING_ENTRY_M - 0.5
+  # too far in to stop short of them comfortably: committed, the turn is finished
+  sp = ScenePolicy()
+  sp.update([], True, LEFT_TURN, HOLD_LINE_M + 0.5, 0., maneuver_id=2)
+  d = sp.update(oncoming.objects, True, LEFT_TURN, ONCOMING_ENTRY_M + 2., 3., maneuver_id=2)
+  assert not d.holding and sp.committed_id == 2
+  # standing past the line (crept there): stays where it is, never creeps on toward the oncoming lanes
+  d = ScenePolicy().update(oncoming.objects, True, LEFT_TURN, HOLD_LINE_M - 2., 0., maneuver_id=4)
+  assert d.should_stop and d.speed_cap == 0.

@@ -162,6 +162,7 @@ class MapDecision:
   shown: Shown | None = None
   reason: str = ''               # the controls' status to show when nothing holds
   released_stopped: bool = False  # a hold let go this frame with the car stopped: turnpilotd re-pulses the turn
+  gas_go: bool = False            # a control was released by the driver's gas tap this frame: that press is the go
 
 
 @dataclass
@@ -254,6 +255,7 @@ class MapControlPolicy:
   def _release(self, c: TrackedControl, controls, cause: str, v: float, out: MapDecision) -> None:
     st = c.state
     st.done = 'released'
+    out.gas_go = out.gas_go or cause == 'gas'
     if self.held == c.key:
       self.held, c.held = None, False
       out.released_stopped = out.released_stopped or v < LATCH_SPEED

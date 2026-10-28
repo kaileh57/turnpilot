@@ -993,7 +993,7 @@ def test_fault_keeps_the_commitment_to_the_turn_under_way():
   def oncoming(sim):
     return ({'cls': 'car', 'x': 306. - sim.s, 'y': 5., 'vx': -1.5},)
   for how in ('committed', 'released'):
-    sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
+    sim = Sim([(300., "turn", "left", T_LEFT), (1500., "turn", "right")])
     if how == 'committed':
       while sim.tp.scene.committed_id is None:
         sim.step()
@@ -1294,3 +1294,32 @@ def test_left_whose_stop_cant_be_made_is_skipped_though_the_turn_could_be():
     assert not any(p.shouldStop or p.controlAlert == 'cannotStopComfortably' or p.mapControl.kind == 'unprotectedTurn'
                    for _, _, p in sim.trace)
     assert any(p.desire == Desire.turnLeft for _, _, p in sim.trace) != skipped
+
+
+def oncoming_from(sim, s_world, speed=10.):
+  """A car coming down the oncoming lanes from s_world (along the route) now, at speed: objects(sim) for the scene."""
+  t0 = sim.t
+
+  def objects(sim):
+    return ({'cls': 'car', 'x': s_world - speed * (sim.t - t0) - sim.s, 'y': 5., 'vx': -speed},)
+  return objects
+
+
+def test_go_at_an_unprotected_left_with_a_car_coming_still_waits_for_it():
+  # the driver's tap is the latch's go; the detector, seeing a car coming, still holds the car at the line until it is
+  # through (it only adds holds), and then the car goes and turns
+  sim = Sim(TURNS_AHEAD)
+  sim.go_taps = False
+  stop_at(sim, 300.)
+  held_s = sim.s
+  car = oncoming_from(sim, 360.)
+  plan = sim.step(car(sim), gas=True)
+  assert plan.shouldStop and plan.reason == "waiting for oncoming" and plan.controlPrompt == 'none'
+  for _ in range(int(3. / DT_MDL)):  # the press held on: still the go, not an override of the detector
+    plan = sim.step(car(sim), gas=True)
+    assert plan.shouldStop and plan.reason == "waiting for oncoming"
+  while car(sim)[0]['x'] > sim.distance() - 5.:
+    plan = sim.step(car(sim))
+    assert sim.s - held_s < 0.05, "moved with the car still coming"
+  sim.run(15., objects=car, turn_at=300.)
+  assert sim.s > 320.

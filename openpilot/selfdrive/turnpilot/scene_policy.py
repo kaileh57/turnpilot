@@ -21,7 +21,11 @@ No scene is no evidence, never a reason to hold: a missing detector is turnpilot
 this policy's to stop for. Nor is it a reason to release: ScenePolicy keeps the stops in force when the scene went
 away, dead-reckoned with the car's speed, until it comes back. A gas press at the hold line releases the junction hold
 for that maneuver, not just while it's held: otherwise lifting off brings the hold back, inside the junction if the car
-crept past the line. Passing the hold line faster than COMMIT_SPEED commits the car to that maneuver for good: slowing
+crept past the line. The press that released a map stop (an unprotected left's go, map_controls.py) isn't one: the
+detector's holds only add to the driver's go. Past the hold line a turn is committed for good once stopping in the
+junction is worse than finishing it (committed_past_line): a curb-side turn faster than COMMIT_SPEED, a far-side one
+once it can't stop short of the oncoming lanes on the comfortable curve, so the oncoming hold still stops a car pulling
+away from the line on the driver's go (BeamNG: it held only because the car happened to be under 2 m/s there). Slowing
 later in the junction never brings its junction hold back (pedestrians in the path still stop it). ScenePolicy keeps
 those and the rest of what one frame can't know; scene_policy() is one frame on its own.
 A turnpilotd fault (fault()) loses the route, and with it the maneuver a junction hold is for: the hold in force then
@@ -104,6 +108,7 @@ ONCOMING_MIN_SPEED = 1.     # m/s toward the car
 ONCOMING_Y_NEAR_M = 1.5     # oncoming lanes, to the turn side
 ONCOMING_Y_FAR_M = 20.
 ONCOMING_PAST_M = 5.        # a vehicle this far short of the maneuver point has cleared it
+ONCOMING_ENTRY_M = 4.       # m (of the car's position) before the maneuver point it must stop by, short of the oncoming lanes
 # A new track's velocity isn't trusted: BeamNG unprotected_left_visible (2026-10-27), the wide camera's new track of a car
 # closing at about 11 m/s read vx +3.6, +6.1, +5.5, +1.5 (moving away) for its first 2-2.5 s, and the hold came after it
 # had crossed. Until a track has this many hits (2.5 s of the detector's 10 Hz) a vehicle in the oncoming lanes is taken
@@ -202,16 +207,35 @@ def pedestrian_stops(objects, v_ego: float, is_confirmed=confirmed_track) -> lis
   return stops
 
 
-def hold_line_stop(maneuver, distance, v_ego, reason: str) -> list[Stop]:
-  """A stop at the hold line before a turn, while the junction rules apply."""
+def committed_past_line(distance: float, v_ego: float, far_side: bool) -> bool:
+  """Past the hold line and committed to the turn: stopping in the junction is worse than finishing it. A curb-side turn
+  faster than COMMIT_SPEED. A far-side one once it can't stop short of the oncoming lanes (ONCOMING_ENTRY_M) on the
+  comfortable curve: pulling away from the line on the driver's go is no commitment while it still can."""
+  if distance >= HOLD_LINE_M:
+    return False
+  if not far_side:
+    return v_ego > COMMIT_SPEED
+  return distance < ONCOMING_ENTRY_M or v_ego ** 2 / (2. * STOP_DECEL) > distance - ONCOMING_ENTRY_M
+
+
+def hold_line_stop(maneuver, distance, v_ego, reason: str, far_side: bool = False) -> list[Stop]:
+  """A stop at the hold line before a turn, while the junction rules apply. Past it and not committed, a far-side turn
+  stops where the comfortable curve can (standing, where it is), which is short of the oncoming lanes: never a hard stop
+  in the junction, never creeping on toward them."""
   if maneuver is None or maneuver.kind != TURN or distance < -TURN_ZONE_PAST_M:
     return []
   d_hold = distance - HOLD_LINE_M
-  if d_hold < 0. and v_ego > COMMIT_SPEED:
-    return []  # committed: stopping in the junction is worse than finishing the turn
+  if committed_past_line(distance, v_ego, far_side):
+    return []
+  if d_hold < 0. and far_side:
+    d_hold = v_ego ** 2 / (2. * STOP_DECEL)
   if d_hold > v_ego ** 2 / (2. * STOP_DECEL) + HOLD_ENGAGE_MARGIN_M:
     return []
   return [stop(v_ego, d_hold, reason)]
+
+
+def far_side_turn(maneuver, right_hand_traffic: bool) -> bool:
+  return maneuver is not None and maneuver.kind == TURN and (maneuver.side == LEFT) == right_hand_traffic
 
 
 def leaving_crosswalk(obj, distance: float, side: int) -> bool:
@@ -228,11 +252,11 @@ def junction_stops(objects, maneuver, distance, v_ego, right_hand_traffic, is_wa
                    may_leave=confirmed_track) -> list[Stop]:
   """Holds at the hold line before a turn: the crosswalk of a curb-side turn, oncoming traffic across a far-side one.
   may_leave: whether a walker's velocity is trusted to let it go when it is leaving the crosswalk."""
-  if not hold_line_stop(maneuver, distance, v_ego, ""):
+  far_side = far_side_turn(maneuver, right_hand_traffic)
+  if not hold_line_stop(maneuver, distance, v_ego, "", far_side):
     return []
   side = maneuver.side  # the crosswalk and the oncoming lanes are both on the turn side; y is positive left
-  curb_side = (side == LEFT) != right_hand_traffic
-  if curb_side:
+  if not far_side:
     walkers = [obj for obj in objects if str(obj.cls) == "pedestrian" and is_walker(obj) and
                distance - CROSSWALK_X_BEFORE_M < obj.x < distance + CROSSWALK_X_AFTER_M and
                CROSSWALK_Y_NEAR_M < obj.y * side < CROSSWALK_Y_FAR_M and
@@ -244,7 +268,7 @@ def junction_stops(objects, maneuver, distance, v_ego, right_hand_traffic, is_wa
     if str(obj.cls) in VEHICLES and ONCOMING_Y_NEAR_M < obj.y * side < ONCOMING_Y_FAR_M and \
        obj.x > distance - ONCOMING_PAST_M and toward > ONCOMING_MIN_SPEED and \
        max(obj.x - distance, 0.) / toward < ONCOMING_TTA_S:
-      return hold_line_stop(maneuver, distance, v_ego, "waiting for oncoming")
+      return hold_line_stop(maneuver, distance, v_ego, "waiting for oncoming", far_side)
   return []
 
 
@@ -316,9 +340,14 @@ class ScenePolicy:
     return [self.fault_junction]
 
   def update(self, objects, available: bool, maneuver, distance: float, v_ego: float, right_hand_traffic: bool = True,
-             maneuver_id: int | None = None, gas_pressed: bool = False, dt: float = DT_MDL, extra_stops=()) -> SceneDecision:
+             maneuver_id: int | None = None, gas_pressed: bool = False, dt: float = DT_MDL, extra_stops=(),
+             go_press: bool = False) -> SceneDecision:
     """As scene_policy(), plus maneuver_id (RouteFollower.maneuver_id) and carState.gasPressed, once per frame dt apart.
-    extra_stops: the map's stop signs and signals (map_controls.py), composed with the scene's like any other stop."""
+    extra_stops: the map's stop signs and signals (map_controls.py), composed with the scene's like any other stop.
+    go_press: this gas press is the one that released a map stop (turnpilotd): the map's go, not a release of the scene's
+    holds, which only add to it; another press is."""
+    gas_pressed = gas_pressed and not go_press
+    far_side = far_side_turn(maneuver, right_hand_traffic)
     self.t += dt
     if available:
       objects = list(objects)
@@ -338,12 +367,12 @@ class ScenePolicy:
       peds = self.carried
       junction = []
       if self.carried_junction is not None and self.carried_junction[0] == maneuver_id:
-        junction = hold_line_stop(maneuver, distance, v_ego, self.carried_junction[1])
+        junction = hold_line_stop(maneuver, distance, v_ego, self.carried_junction[1], far_side)
 
     if junction and gas_pressed and maneuver_id is not None and distance - HOLD_LINE_M < GAS_RELEASE_M:
       self.released_id = maneuver_id  # the driver looked and goes: stopping again further in would be worse
-    if maneuver_id is not None and maneuver is not None and maneuver.kind == TURN and distance < HOLD_LINE_M and \
-       v_ego > COMMIT_SPEED:
+    if maneuver_id is not None and maneuver is not None and maneuver.kind == TURN and \
+       committed_past_line(distance, v_ego, far_side):
       self.committed_id = maneuver_id  # never stopped in the junction for it again, however slow the car gets in there
     if self.fault_open and maneuver_id is not None and maneuver is not None and maneuver.kind == TURN:
       self.fault_open = False

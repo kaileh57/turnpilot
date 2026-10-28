@@ -152,6 +152,7 @@ class TurnPilot:
       self.lights_age = float('inf')  # s since the last turnpilotLights
       self.was_stopping = False    # the last plan held the car (shouldStop)
       self.release_go = False      # ...and let go of it at standstill: the turn pulses again now
+      self.go_press = False        # the gas press that released a map stop, while it lasts: the go, not a scene release
       self.detector_seen = False   # fresh detections since TurnPilot was turned on
       self.stale_s = 0.            # how long the scene has been unavailable
       self.waited_s = 0.           # how long modeld has run since TurnPilot was turned on, before the first detection
@@ -364,9 +365,11 @@ class TurnPilot:
     if found == LaneMismatch.none and acting and self.lanes.lane_unknown:
       found = LaneMismatch.laneUnknown  # no change from a lane it can't place: said instead
     plan.laneMismatch = self._lane_mismatch(found)
-    # the scene's holds only ever brake, so they keep the real maneuver through a handback
+    # the scene's holds only ever brake, so they keep the real maneuver through a handback. The press that released a map
+    # stop is its go: the scene's holds (an oncoming car, a pedestrian) only add to it (scene_policy.py)
+    self.go_press = cs.gasPressed and (mapd.gas_go or self.go_press)
     decision = self.scene_now = self.scene.update(objects, available, maneuver, rf.distance, v_ego, right_hand_traffic, rf.maneuver_id,
-                                                 cs.gasPressed, extra_stops=mapd.stops)
+                                                 cs.gasPressed, extra_stops=mapd.stops, go_press=self.go_press)
     # a hold let go with the car standing (the walker cleared, a stop's go): the model won't pull away on its own, and the
     # turn's pulse is long forgotten, so it goes again next frame (desire_timing.py)
     self.release_go = self.was_stopping and not decision.should_stop and v_ego < STANDSTILL_SPEED
@@ -516,8 +519,9 @@ class TurnPilot:
           except Exception:
             log_error("turnpilotd.fault_map_controls_failed")
             stops = self.map_controls.held_stops()
+        self.go_press = cs.gasPressed and ((self.map_now is not None and self.map_now.gas_go) or self.go_press)
         decision = self.scene.update(list(scene.objects) if scene.available else [], scene.available, None, float('inf'),
-                                     max(cs.vEgo, 0.), gas_pressed=cs.gasPressed, extra_stops=stops)
+                                     max(cs.vEgo, 0.), gas_pressed=cs.gasPressed, extra_stops=stops, go_press=self.go_press)
         self.was_stopping = decision.should_stop
       if self.hold_v is not None:
         self.hold_v = None if not sm['carControl'].latActive else \
