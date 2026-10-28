@@ -11,8 +11,11 @@ approach took longer than that, it planned the turn and then dropped it 10 m out
 the turn back at once. So a turn desire is pulsed again every REPULSE_S on the approach, and once more ENTRY_M
 before the junction, so the last pulse is fresh for the whole turn: at 4 m/s a turn outlasts one pulse, and the
 model let go of it halfway round. None once the car has turned TURN_STARTED_DEG (by its yaw rate): pulses during
-the turn turned the car on past the exit road, into the curb. That holds for every pulse: a repeat, one on engaging, and
-one as the car pulls away after a standstill (STANDSTILL_REARM_S), as when it stops halfway round for a pedestrian.
+the turn turned the car on past the exit road, into the curb. That holds for a repeat and one on engaging. One as the car
+pulls away after a standstill (STANDSTILL_REARM_S) goes while it has turned less than STANDSTILL_REPULSE_MAX_DEG: waiting
+in the junction for oncoming traffic, 15-25 degrees into a left, longer than the model's queue, the turn would lapse
+(H2, below: with the pulse gone at 5-16 degrees the model gave up 3 turns of 3); further round (stopped halfway for a
+pedestrian) none goes, and the model finishes it (H2: 9 of 10 from 25-42 degrees).
 A repeat pulse is a short drop to none, long enough that modeld (unsynchronized, conflated subscriber) can't miss it.
 The model keeps the rising edges of the last 132 frames (6.6 s at 20 Hz, the big model's state_desire_q), and
 forgets a pulse when it leaves that queue. A pulse still in the queue once the car is round the corner turns it
@@ -51,6 +54,7 @@ REPULSE_S = 3.5               # a turn desire pulses again this often on the app
 ENTRY_M = 10.                 # ...and once more this far before the junction (not within ENTRY_GAP_S of the last)...
 ENTRY_GAP_S = 1.5
 TURN_STARTED_DEG = 15.        # ...until the car has turned this far toward the maneuver
+STANDSTILL_REPULSE_MAX_DEG = 25.  # a pulse as the car pulls away after a standstill goes while it has turned less than this
 MAX_PULSES = 5
 PULSE_GAP_FRAMES = 3          # frames of none before a repeat pulse
 STANDSTILL_SPEED = 0.3        # m/s
@@ -89,6 +93,7 @@ class DesireTiming:
     self._stopped_t = 0.
     self.side = 0             # set once a turn desire went out: the turn to clear once it is done
     self._held = False        # held off while openpilot wasn't steering, since the last pulse
+    self._rearmed = False     # re-armed by a standstill, since the last pulse
     self._abandoned = False   # abandon()ed: TurnPilot handed back
 
   def _turn_over(self):
@@ -190,6 +195,7 @@ class DesireTiming:
       self._stopped_t += dt
       if self._stopped_t > STANDSTILL_REARM_S:
         self.active = False  # the model has forgotten the pulse by now; send it again once the car moves
+        self._rearmed = True
         return Desire.none
     else:
       self._stopped_t = 0.
@@ -211,10 +217,13 @@ class DesireTiming:
       return Desire.none
 
     if not self.active:
-      if turn and (not may_start or self.turned_deg >= TURN_STARTED_DEG):
+      started_deg = STANDSTILL_REPULSE_MAX_DEG if self._rearmed and not self._held else TURN_STARTED_DEG
+      if turn and (not may_start or self.turned_deg >= started_deg):
         return Desire.none  # a pulse in the turn (re-engaging, pulling away) turns the car on past the exit road
+      if turn and not self.started and distance < 0.:
+        return Desire.none  # a first pulse past the junction turns the car into the curb (turn_skip.py skips it)
       self.active = self.started = True
-      self._held = False
+      self._held = self._rearmed = False
       self.pulses += 1
       self._since_pulse = 0.
       if turn:

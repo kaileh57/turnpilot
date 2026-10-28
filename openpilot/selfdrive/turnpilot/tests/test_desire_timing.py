@@ -9,6 +9,7 @@ from openpilot.selfdrive.turnpilot.turn_skip import TurnSkip
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, nav_instruction
 
 Desire = log.Desire
+PASSED_M = 15.  # route_follower.PASSED_DIST_M
 
 
 def drive(maneuvers, v=8., seconds=40., lines=(True, True), turns_at=8., speed_profile=None, noise=None, steer_sign=1.):
@@ -349,3 +350,63 @@ def test_no_pulse_after_a_standstill_in_the_turn():
                            (1., 1, LEFT_TURN, 15., 4., 0., False)])
   stop_end = int(round((5. + STANDSTILL_REARM_S + 1.) / DT_MDL))
   assert out[stop_end] == Desire.turnLeft
+
+
+def test_pulse_after_a_standstill_early_in_the_turn():
+  # waiting in the junction for oncoming traffic 18-22 degrees into an unprotected left, longer than the model's desire
+  # queue: the turn would lapse with no pulse as the car pulls away (H2: with the pulse gone at 5-16 degrees the model
+  # gave up 3 turns of 3), so one goes. 40 degrees in, none does (it turns the car on past the exit road)
+  yaw = 0.5  # rad/s, 29 deg/s
+  for turned_deg, stop_s, pulse in ((18., 8., True), (22., 10., True), (40., 3., False)):
+    dt_ = DesireTiming()
+    out = step_through(dt_, [(9., 1, LEFT_TURN, 45., 5., 0., False),
+                             (turned_deg / 28.65, 1, LEFT_TURN, 0., 4., yaw, False),
+                             (stop_s, 1, LEFT_TURN, -2., 0., 0., False),
+                             (3., 1, LEFT_TURN, -2., 4., yaw, False)])
+    after = out[int(round((9. + turned_deg / 28.65 + stop_s) / DT_MDL)) - 1:]
+    assert (pulses(after, Desire.turnLeft) == 1) == pulse, turned_deg
+    assert out.count(CLEAR_DESIRE) == CLEAR_FRAMES, turned_deg
+
+
+def glitch_through(mode):
+  """A committed right, desire out at 40 m, braking to 6 m/s; from 14 m out navd's next three updates are a glitch
+  (mode), as turnpilotd runs RouteFollower, TurnSkip and DesireTiming. Returns [(distance, desire, id, skipped)]."""
+  rf, dt_, skip = RouteFollower(), DesireTiming(), TurnSkip()
+  right = (0., 90., 2)
+  dist, v, rc, k, out = 80., 8., 0, 0, []
+  for i in range(600):
+    v = max(6., v - DT_MDL)
+    dist -= v * DT_MDL
+    updated = i % 20 == 0
+    reported, valid, mtype, modifier = dist, True, "turn", "right"
+    if updated and dist < 14. and k < 3:
+      k += 1
+      if mode == 'invalid':
+        valid = False
+      elif mode == 'reroute_far':  # one invalid, then a new route whose same right reads 25 m off
+        valid, rc, reported = (False, rc, reported) if k == 1 else (True, 1, dist + 25.)
+      elif mode == 'reroute_past':  # one invalid, then a new route starting past the junction
+        valid, rc, mtype, modifier, reported = (False, rc, mtype, modifier, reported) if k == 1 else (True, 1, "new name", "straight", 200.)
+      elif mode == 'jump_close':
+        reported = dist + 60.
+    instr = nav_instruction(reported, mtype, modifier, valid=valid, junction=right if mtype == "turn" else (90., 90., 2),
+                            route_count=rc)
+    committed = dt_.maneuver_id == rf.maneuver_id and dt_.started and not dt_.done and dt_.side != 0
+    rf.update(instr, updated, valid, v, DT_MDL, committed=committed)
+    state = skip.update(rf.upcoming, rf.distance, rf.maneuver_id, v, dt_.maneuver_id == rf.maneuver_id and dt_.started)
+    desire = dt_.update(None if state.skipped else rf.upcoming, rf.distance, rf.maneuver_id, rf.passed, v, 0., True, True, DT_MDL,
+                        0., replaced=rf.replaced, may_start=state.feasible_now)
+    out.append((dist, desire, rf.maneuver_id, state.skipped))
+    if dist < -20.:
+      break
+  return out
+
+
+def test_committed_turn_rides_out_route_glitches():
+  # navd off the step for three updates, a reroute onto the same right from 25 m off, a reroute starting past it, a 60 m
+  # GPS jump 12 m out: the committed right is never cleared, skipped or pulsed again under a new id before it is over
+  for mode in ('invalid', 'reroute_far', 'reroute_past', 'jump_close'):
+    out = glitch_through(mode)
+    first = next(mid for d, desire, mid, _ in out if desire == Desire.turnRight)
+    before = [(d, desire, mid, skipped) for d, desire, mid, skipped in out if d > -PASSED_M]
+    assert all(mid == first and not skipped and desire != CLEAR_DESIRE for d, desire, mid, skipped in before if d < 40.), mode

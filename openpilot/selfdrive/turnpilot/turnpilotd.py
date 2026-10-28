@@ -271,7 +271,7 @@ class TurnPilot:
 
     # too fast to make the turn: skipped, so nothing below acts on it (no desire, no cap, no turn holds or lane changes)
     desire_out = self.desires.maneuver_id == rf.maneuver_id and self.desires.started
-    skip = self.skip.update(upcoming, rf.distance, rf.maneuver_id, v_ego, desire_out, right_hand_traffic)
+    skip = self.skip.update(upcoming, rf.distance, rf.maneuver_id, v_ego, desire_out, right_hand_traffic, sm['carControl'].latActive)
     maneuver = None if skip.skipped else upcoming
     # navd reroutes on it and selfdrived alerts: only while TurnPilot is driving the route (handback outranks it)
     plan.tooFastToTurn = skip.skipped and acting

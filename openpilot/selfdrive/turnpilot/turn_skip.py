@@ -22,6 +22,12 @@ is never skipped and nothing is cancelled: a turn the model has started planning
 you crash). Near the junction the check fails for a car rolling at the model's own corner speed, which is one more
 reason it can't cancel. It still gates the repeat pulses and a fresh pulse on re-engaging (the old 10 m/s gate's job):
 a car the driver sped up isn't sent into the turn again from road speed.
+Nor does a turn's first pulse go out late: gate 1's model took a turn from a pulse 40 m out and not from 10-20 m, and a
+pulse at or past the junction turns the car into the curb or the oncoming lanes. A turn whose desire hasn't gone out by
+MIN_FIRST_PULSE_M (between those two) while openpilot is steering is skipped as above, reason tooLate: one that comes up
+that close (navd moves past a bend or a straight-on step only 10 m beyond it), or one openpilot engages for that late.
+With openpilot not steering no desire goes out at all, and the driver turning there isn't skipped under them. A pulse
+again for a turn whose desire did go out (on the entry, re-engaging, pulling away) isn't a first pulse.
 Only junction turns (route_follower.TURN) are checked. A keep (slight turns, forks, ramps) is taken at speed by the
 model, and its desire goes at any speed.
 """
@@ -37,6 +43,7 @@ A_LAT_SAFE = A_LAT_MAX           # m/s^2 through the corner
 A_COMFORT = -SPEED_CAP_ACCEL_MIN  # m/s^2: 2.0, the hardest the turn speed cap brakes
 T_LAG = SPEED_CAP_TAU            # s before the braking builds
 SKIP_CONFIRM_FRAMES = 5          # 0.25 s at 20 Hz
+MIN_FIRST_PULSE_M = 25.          # m: a turn's first pulse goes no later than this before the junction
 
 
 def safe_turn_speed(angle_deg: float, curb_side: bool) -> float:
@@ -66,15 +73,17 @@ class TurnSkip:
 
   def skip(self, maneuver, distance: float, maneuver_id: int, v_ego: float, reason: str) -> None:
     """Skip this maneuver for good now, for reason: as when it is too fast to make (turnpilotd: a turn whose desire was
-    dropped while TurnPilot had handed back, with too little road left for a fresh pulse to be taken)."""
+    dropped while TurnPilot had handed back, with too little road left for a fresh pulse to be taken; too late for its
+    first pulse)."""
     self.maneuver_id, self.skipped, self._infeasible = maneuver_id, True, 0
     cloudlog.event("turnpilot_turn_skipped", error=True, reason=reason, type=maneuver.type, modifier=maneuver.modifier,
                    angle_deg=round(maneuver.angle_deg, 1), geometry=maneuver.geometry, distance=round(distance, 1),
                    v_ego=round(v_ego, 2))
 
   def update(self, maneuver, distance: float, maneuver_id: int, v_ego: float, desire_out: bool,
-             right_hand_traffic: bool = True) -> SkipState:
-    """maneuver: RouteFollower.upcoming; desire_out: this maneuver's desire has gone out (DesireTiming.started)."""
+             right_hand_traffic: bool = True, lat_active: bool = True) -> SkipState:
+    """maneuver: RouteFollower.upcoming; desire_out: this maneuver's desire has gone out (DesireTiming.started);
+    lat_active: carControl.latActive."""
     if maneuver_id != self.maneuver_id:
       self.maneuver_id, self.skipped, self._infeasible = maneuver_id, False, 0
     if self.skipped:
@@ -82,6 +91,9 @@ class TurnSkip:
     if maneuver is None or maneuver.kind != TURN:
       self._infeasible = 0
       return SkipState(False, True)
+    if not desire_out and lat_active and distance < MIN_FIRST_PULSE_M:
+      self.skip(maneuver, distance, maneuver_id, v_ego, 'tooLate')
+      return SkipState(True, False)
     curb_side = (maneuver.side == LEFT) != right_hand_traffic
     if can_make_turn(v_ego, distance, maneuver.angle_deg, curb_side):
       self._infeasible = 0

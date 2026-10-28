@@ -9,8 +9,12 @@ meet (navInstruction.maneuverBranches > 0, from Valhalla's intersection bearings
 other road meets it, the maneuver is NONE: the driving model follows the bend (0.11.3's Autospeed slows for curves), and
 TurnPilot sends no desire and no speed cap there. navd moves past such a step only 10 m beyond its end, so the turn or
 keep after it (RouteFollower.ahead, from allManeuvers with its junction) is looked ahead to for its speed cap: a junction
-turn 30-50 m past a bend was otherwise seen at road speed, too late to slow for, and skipped. Its desire still waits for
-navd to move on (a turn desire before a straight-on junction would turn the car there). The angle is the real one, bearing_after less bearing_before. A route
+turn 30-50 m past a bend was otherwise seen at road speed, too late to slow for, and skipped. Its desire waits until the
+car is past the step: a turn desire before a straight-on junction would turn the car there. That is when the step is
+dead-reckoned NAVD_ADVANCE_M past, where navd moves on, not up to a second later at navd's next update: the turn after
+it becomes the maneuver then, under its own id, which navd's update moving on to it keeps (an update still on the step
+only brings the turn's distance). Even so a turn under turn_skip.MIN_FIRST_PULSE_M past the step is skipped out loud.
+The angle is the real one, bearing_after less bearing_before. A route
 without intersection data (maneuverGeometryValid false; Valhalla always has it) leaves every turn a junction at the
 modifier's nominal angle, which is logged once per maneuver and shown in the plan's reason.
 A new route (a destination set from the phone, a reroute) can start with a maneuver of the same type and modifier as
@@ -23,9 +27,13 @@ committed, and a car slowing for a turn must not speed up into it). The junction
 - an invalid navInstruction for the same route (navd off the step for a fix, rerouting, the destination removed) or navd
   going quiet past NAV_STALE_S is a gap: the maneuver stays, dead-reckoned, under the same id, until navd's next valid
   update carries on with it or the turn is over (cleared at its angle, or dead-reckoned PASSED_DIST_M past it);
-- a jump in the distance from further than REPLACED_FROM_M is GPS noise: the dead-reckoned distance stands;
-- a new route (a new routeCount) whose first maneuver is the same turn within SAME_TURN_M of the dead-reckoned one is
-  the same maneuver (a reroute onto the road the car is on). Only a new route that doesn't turn there replaces it.
+- a jump in the distance from further than REPLACED_FROM_M is GPS noise: the dead-reckoned distance stands. Closer in,
+  navd may move on early to the next step (a sharp turn's, up to 10 m before its end), but that one turns from the
+  heading this turn ends on: a jump to a maneuver with this one's bearings (same_junction) is noise there too;
+- a new route (a new routeCount) whose first maneuver is the same junction (same_junction) within SAME_TURN_M of the
+  dead-reckoned one is the same maneuver (a reroute onto the road the car is on, its origin snapped up to a reroute's
+  25 m off). A new route that doesn't turn there (a reroute whose origin snapped past the junction, a destination
+  changed from the phone) is a gap too: the turn is held to its end, and the new route taken up after.
 """
 from dataclasses import dataclass
 
@@ -61,8 +69,11 @@ REPLACED_FROM_M = 15.      # ...and from further out than this, where navd never
                            # next step up to 10 m early), a new route
 PASSED_NEAR_M = 30.        # a new maneuver means the last one was passed if it was this close
 PASSED_DIST_M = 15.        # dead-reckoned this far past a maneuver navd hasn't advanced from, it counts as passed
+NAVD_ADVANCE_M = 10.       # navd moves past a step this far beyond its end (navd.py MANEUVER_TRANSITION_THRESHOLD)
 NAV_STALE_S = 3.           # no navInstruction for this long, the route is lost
-SAME_TURN_M = 20.          # a committed turn is the first maneuver of a new route this close to where it was dead-reckoned
+SAME_TURN_M = 40.          # a committed turn is the first maneuver of a new route this close to where it was dead-reckoned
+                           # (navd reroutes 25 m off the route; the next junction the same way is a block on)
+SAME_BEARING_DEG = 15.     # the same junction's bearings, from two routes or two fixes, are this close
 ARRIVE_DIST_M = 15.
 
 
@@ -77,6 +88,7 @@ class Maneuver:
   geometry: bool = False  # angle_deg and the junction test came from the route's bearings
   bend: bool = False      # the road bends here and no other road meets it: left to the model (kind NONE)
   bearing_side: int = 0   # LEFT or RIGHT as the bearings turn, 0 without them or under SIDE_MIN_DEG
+  bearings: tuple = ()    # (bearing_before, bearing_after) with geometry
 
   @property
   def ramp(self) -> bool:
@@ -132,9 +144,23 @@ def make_maneuver(mtype: str, modifier: str, lanes: tuple, geometry_valid: bool,
     return Maneuver(kind, side, mtype, modifier, NOMINAL_ANGLE_DEG.get(modifier, 0.), lanes)
   angle = turn_angle(bearing_before, bearing_after)
   bearing_side = 0 if abs(angle) < SIDE_MIN_DEG else RIGHT if angle > 0 else LEFT
+  bearings = (float(bearing_before), float(bearing_after))
   if kind in (TURN, KEEP) and branches == 0:
-    return Maneuver(NONE, 0, mtype, modifier, abs(angle), lanes, geometry=True, bend=True, bearing_side=bearing_side)
-  return Maneuver(kind, side, mtype, modifier, abs(angle), lanes, geometry=True, bearing_side=bearing_side)
+    return Maneuver(NONE, 0, mtype, modifier, abs(angle), lanes, geometry=True, bend=True, bearing_side=bearing_side, bearings=bearings)
+  return Maneuver(kind, side, mtype, modifier, abs(angle), lanes, geometry=True, bearing_side=bearing_side, bearings=bearings)
+
+
+def same_bearings(a: Maneuver, b: Maneuver) -> bool:
+  """Both have junction geometry, and it is the same junction's: bearings before and after within SAME_BEARING_DEG.
+  Two junctions in a row the same way can't share them: the heading changes at the first."""
+  return a.geometry and b.geometry and len(a.bearings) == len(b.bearings) == 2 and \
+    all(abs(turn_angle(x, y)) <= SAME_BEARING_DEG for x, y in zip(a.bearings, b.bearings, strict=True))
+
+
+def same_junction(a: Maneuver, b: Maneuver) -> bool:
+  """The same maneuver at the same junction, as far as the route says: type and modifier, and the bearings when both
+  have them."""
+  return (a.type, a.modifier) == (b.type, b.modifier) and (same_bearings(a, b) or not (a.geometry and b.geometry))
 
 
 class RouteFollower:
@@ -158,6 +184,7 @@ class RouteFollower:
     self.ahead_distance = float('inf')      # m to it, dead-reckoned
     self._passed_id = -1
     self._stale_t = 0.
+    self._moved_on_from: tuple[str, str] | None = None  # (type, modifier) of the NONE step left for the turn after it
 
   @property
   def upcoming(self) -> Maneuver | None:
@@ -197,6 +224,9 @@ class RouteFollower:
       self.through_distance -= travelled
       self.ahead_distance -= travelled
 
+    if self.valid and self.maneuver is not None and self.maneuver.kind == NONE and self.ahead is not None and \
+       self.distance < -NAVD_ADVANCE_M:
+      self._move_on()
     if self.valid and self.distance < -PASSED_DIST_M and self._passed_id != self.maneuver_id:
       self._passed_id = self.maneuver_id
       self.passed = True
@@ -214,20 +244,50 @@ class RouteFollower:
       cloudlog.warning(f"turnpilot: {maneuver.type} {maneuver.modifier} {distance:.0f} m ahead, but its bearings turn " +
                        f"{maneuver.angle_deg:.0f} deg the other way")
 
+  def _move_on(self):
+    """Past a NONE step where navd moves on from it: the turn or keep after it is the maneuver now (module docstring)."""
+    self._moved_on_from = (self.maneuver.type, self.maneuver.modifier)
+    self.maneuver, self.distance = self.ahead, self.ahead_distance
+    self.ahead, self.ahead_distance = None, float('inf')
+    self.maneuver_id += 1
+
+  @staticmethod
+  def _following(instruction) -> tuple[Maneuver | None, float]:
+    """Past a NONE step, the next turn or keep in allManeuvers and its distance."""
+    for ahead in list(instruction.allManeuvers)[1:]:
+      following = maneuver_from_ahead(ahead)
+      if following.kind != NONE:
+        return (following, float(ahead.distance)) if following.kind in (TURN, KEEP) else (None, float('inf'))
+    return None, float('inf')
+
   def _on_instruction(self, instruction, committed: bool, travelled: float):
     distance = float(instruction.maneuverDistance)
     maneuver = maneuver_from_instruction(instruction)
     prev = self.maneuver
     route_count, new_route = int(instruction.routeCount), self.valid and int(instruction.routeCount) != self.route_count
-    self.route_count = route_count
+    if self._moved_on_from is not None:
+      if not new_route and maneuver.kind == NONE and (maneuver.type, maneuver.modifier) == self._moved_on_from:
+        # navd still on the step the car is past: the turn after it, by navd's distance to it when it's that one
+        following, following_distance = self._following(instruction)
+        same = following is not None and prev is not None and (following.type, following.modifier) == (prev.type, prev.modifier)
+        self.distance = following_distance if same else self.distance - travelled
+        self.distance_remaining = float(instruction.distanceRemaining)
+        return
+      self._moved_on_from = None
     advanced = self.distance < ADVANCE_NEAR_M and distance > self.distance + NEW_MANEUVER_JUMP_M
     jumped = distance > self.distance + ROUTE_JUMP_M
     same = self.valid and prev is not None and (maneuver.type, maneuver.modifier) == (prev.type, prev.modifier)
-    if committed and same and not advanced:
-      if new_route:  # a reroute onto the road the car is on keeps the turn; one that doesn't turn there replaces it
-        jumped = abs(distance - self.distance) > SAME_TURN_M
-      elif jumped and self.distance > REPLACED_FROM_M:  # GPS noise: the junction is where it was
-        jumped, distance = False, self.distance - travelled
+    if committed and self.valid and prev is not None:
+      if new_route:
+        if not (same_junction(maneuver, prev) and abs(distance - self.distance) <= SAME_TURN_M):
+          # a new route that doesn't turn there: a gap, the turn held to its end (module docstring), the new route's
+          # updates new until then
+          self.distance -= travelled
+          return
+        advanced = jumped = False  # a reroute onto the road the car is on: the same turn
+      elif same and (advanced or jumped) and (self.distance > REPLACED_FROM_M or same_bearings(maneuver, prev)):
+        advanced, jumped, distance = False, False, self.distance - travelled  # GPS noise: the junction is where it was
+    self.route_count = route_count
     new = not same or advanced or jumped or (new_route and not committed)
     if new:
       self._log_new(maneuver, distance)
@@ -243,9 +303,4 @@ class RouteFollower:
     self.through_distance = float(instruction.throughLanesDistance) if self.through_lanes else float('inf')
     self.ahead, self.ahead_distance = None, float('inf')
     if maneuver.kind == NONE:  # a bend or a road going on: the turn after it may be close
-      for ahead in list(instruction.allManeuvers)[1:]:
-        following = maneuver_from_ahead(ahead)
-        if following.kind != NONE:
-          if following.kind in (TURN, KEEP):
-            self.ahead, self.ahead_distance = following, float(ahead.distance)
-          break
+      self.ahead, self.ahead_distance = self._following(instruction)

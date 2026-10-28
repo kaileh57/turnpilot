@@ -10,6 +10,7 @@ from openpilot.selfdrive.turnpilot.scene.lane_paint import UNKNOWN, LinePaint
 from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP, ONCOMING_TTA_S, PED_STOP_GAP_M
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_control, car_state, junction_of, model_v2, nav_instruction, scene
 from openpilot.selfdrive.turnpilot.desire_timing import TURN_DESIRE_LEAD_M
+from openpilot.selfdrive.turnpilot.turn_skip import MIN_FIRST_PULSE_M
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, V_TURN_MIN
 from openpilot.selfdrive.turnpilot.turnpilotd import (CAR_UNKNOWN_REASON, DETECTOR_DEADLINE_S, DETECTOR_START_DEADLINE_S, NO_LONG_REASON,
                                                        WAITING_REASON, TurnPilot, long_control_for)
@@ -146,30 +147,54 @@ def test_highway_bends_are_left_alone():
 
 
 def test_turn_desire_waits_for_openpilot_to_steer():
-  # the driver engages 20 m before the left: no desire before, a fresh pulse then
+  # the driver engages 30 m before the left: no desire before, a fresh pulse then
   sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
   for _ in range(int(45. / DT_MDL)):
-    sim.step(lat_active=sim.s > 280.)
+    sim.step(lat_active=sim.s > 270.)
   edges = rising(sim.trace, 'desire', Desire.turnLeft)
-  assert edges and 280. < edges[0] < 281.
-  assert all(plan.desire == Desire.none for s, _, plan in sim.trace if s < 280.)
+  assert edges and 270. < edges[0] < 271.
+  assert all(plan.desire == Desire.none for s, _, plan in sim.trace if s < 270.)
+  assert not any(plan.tooFastToTurn for _, _, plan in sim.trace)
+  # engaged 20 m before it, too late for a first pulse to be taken: skipped out loud. Driving it with openpilot off
+  # isn't skipped under the driver
+  for engage in (280., None):
+    sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
+    for _ in range(int(45. / DT_MDL)):
+      sim.step(lat_active=engage is not None and sim.s > engage)
+    assert all(plan.desire == Desire.none for _, _, plan in sim.trace), engage
+    assert any(plan.tooFastToTurn for _, _, plan in sim.trace) == (engage is not None), engage
 
 
-def test_destination_change_drops_the_old_turn():
-  # a new destination from the phone 25 m before a left, whose route starts with a left 284 m on (navd's next route,
-  # routeCount 1): the old pulse is cleared at once, the car speeds up again, and the next pulse waits for the new left's
-  # lead
+def test_destination_change_keeps_a_committed_turn():
+  # a new destination from the phone 25 m before a left whose desire is out, its route starting with a left 284 m on
+  # (navd's next route, routeCount 1): a committed turn is never cancelled. The old left is held to its end, its desire
+  # never cleared and its cap kept until the car is past it, then the new route is taken up and its left pulses at its lead
   sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
   switch = None
   for _ in range(int(80. / DT_MDL)):
     if switch is None and sim.distance() < 25.:
       switch = sim.s
+      assert sim.trace[-1][2].desire == Desire.turnLeft
       sim.navd = FakeNavd([(switch + 284., "turn", "left"), (switch + 1500., "turn", "right")], route_count=1)
     sim.step()
   after = [(s, v, plan) for s, v, plan in sim.trace if s > switch]
-  assert next(s for s, _, plan in after if plan.desire == CLEAR_DESIRE) < switch + 2.
-  assert all(plan.desire != Desire.turnLeft for _, _, plan in after if plan.maneuverDistance > TURN_DESIRE_LEAD_M)
-  assert any(plan.desire == Desire.turnLeft for _, _, plan in after) and max(v for _, v, _ in after) > 12.
+  before = [(v, plan) for s, v, plan in after if s < 300.]
+  assert all(plan.desire != CLEAR_DESIRE and plan.speedCap < 6. for _, plan in before)
+  assert all(b[0] <= a[0] + 1e-6 for a, b in zip(before, before[1:], strict=False))  # never speeding up into it
+  assert all(plan.desire != Desire.turnLeft for s, _, plan in after if s > 316. and plan.maneuverDistance > TURN_DESIRE_LEAD_M)
+  new_left = [s for s in rising(sim.trace, 'desire', Desire.turnLeft) if s > 316.]
+  assert new_left and switch + 284. - new_left[0] > MIN_FIRST_PULSE_M and max(v for _, v, _ in after) > 12.
+  # not yet committed (60 m out, no desire out): the old left is dropped at once, and the car speeds up again
+  sim = Sim([(300., "turn", "left"), (1500., "turn", "right")])
+  sim.cruise = 13.
+  while sim.distance() > 60. or sim.s < 10.:
+    sim.step()
+  switch = sim.s
+  sim.navd = FakeNavd([(switch + 284., "turn", "left"), (switch + 1500., "turn", "right")], route_count=1)
+  for _ in range(int(10. / DT_MDL)):
+    sim.step()
+  assert not any(p.desire == Desire.turnLeft for s, _, p in sim.trace if switch < s < switch + 200.)
+  assert sim.v > 12.
 
 
 def test_oncoming_car_holds_unprotected_left():
@@ -580,16 +605,31 @@ def test_navd_going_quiet_on_the_approach_keeps_the_turn_cap():
 
 
 def test_turn_just_after_a_bend_or_a_new_name_is_slowed_for_not_skipped():
-  # a left junction turn 30-50 m after a step that is NONE (a bend no other road meets, a straight-on name change): the
-  # turn cap brakes for the left before navd moves past that step, so the left isn't skipped as too fast
+  # a left junction turn 40-50 m after a step that is NONE (a bend no other road meets, a straight-on name change): the
+  # turn cap brakes for the left before navd moves past that step, so the left isn't skipped as too fast, and its pulse
+  # goes once the car is where navd moves past the step, not up to a second later
   for first in (("turn", "right", junction_of("right", 0, 60.)), ("new name", "straight", (0., 0., 2))):
-    for gap in (30., 50.):
+    for gap in (40., 50.):
       sim = Sim([(300.,) + first, (300. + gap, "turn", "left", junction_of("left")), (1500., "turn", "right", junction_of("right"))])
-      while sim.s < 300. + gap + 5.:
+      while sim.s < 305. + gap:
         sim.step()
       plans = [p for _, _, p in sim.trace]
       assert not any(p.tooFastToTurn for p in plans), (first, gap)
-      assert Desire.turnLeft in [p.desire for p in plans], (first, gap)
+      edges = rising(sim.trace, 'desire', Desire.turnLeft)
+      assert 300. + 9. < edges[0] < 300. + gap - MIN_FIRST_PULSE_M, (first, gap)
+
+
+def test_turn_too_close_after_a_bend_for_its_first_pulse_is_skipped_out_loud():
+  # navd moves past a NONE step only 10 m beyond it, so a left 5-30 m after it comes up inside the lead gate 1's model
+  # takes a turn from (and under 10 m, past the junction). Its first pulse never goes that late: the turn is skipped out
+  # loud (tooFastToTurn, navd reroutes), not pulsed into a missed turn, or into the curb past the junction
+  for first in (("turn", "right", junction_of("right", 0, 60.)), ("new name", "straight", (0., 0., 2))):
+    for gap in (5., 8., 12., 15., 20., 25., 30.):
+      sim = Sim([(300.,) + first, (300. + gap, "turn", "left", junction_of("left", 2)), (1500., "turn", "right", junction_of("right", 2))])
+      while sim.s < 300. + gap + 20.:
+        sim.step()
+      assert not rising(sim.trace, 'desire', Desire.turnLeft), (first, gap)
+      assert any(p.tooFastToTurn for _, _, p in sim.trace), (first, gap)
 
 
 SOFT_DISABLE_S = 3.  # selfdrived/state.py SOFT_DISABLE_TIME: lat stays active this long after the handback
