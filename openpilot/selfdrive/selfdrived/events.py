@@ -294,6 +294,17 @@ def turnpilot_lane_change_aborted_alert(CP: car.CarParams, CS: car.CarState, sm:
                Priority.LOW, VisualAlert.none, AudibleAlert.tpLaneChangeAbort, 2.)
 
 
+def turnpilot_too_fast_to_turn_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool,
+                                     soft_disable_time: int, personality) -> Alert:
+  """The turn ahead is skipped and navd reroutes (turnpilotPlan.tooFastToTurn): too fast to make it, or a map stop left no
+  room to get into its lane (laneChangeWait unreachable, lane_planner.py)."""
+  plan = shown_plan(sm)
+  lane = plan is not None and str(plan.laneChangeWait) == 'unreachable'
+  return Alert("Can't Reach Turn Lane" if lane else "Too Fast to Turn", "Rerouting",
+               AlertStatus.userPrompt, AlertSize.mid,
+               Priority.LOW, VisualAlert.none, AudibleAlert.tpTooFastTurn, 3.)
+
+
 CONTROL_PROMPT_TITLE = {'stopSignGo': "Stop Sign", 'signalGo': "Signal Ahead", 'yieldAhead': "Yield Ahead",
                         'unprotectedTurnGo': "Unprotected Turn", 'carStoppedGo': "Car Stopped"}
 CONTROL_ALERT_TITLE = {'cannotStopComfortably': "Take Control", 'stopOverrun': "Stop Line Passed",
@@ -512,11 +523,7 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   },
 
   EventName.turnpilotTooFastToTurn: {
-    ET.WARNING: Alert(
-      "Too Fast to Turn",
-      "Rerouting",
-      AlertStatus.userPrompt, AlertSize.mid,
-      Priority.LOW, VisualAlert.none, AudibleAlert.tpTooFastTurn, 3.),
+    ET.WARNING: turnpilot_too_fast_to_turn_alert,
   },
 
   EventName.turnpilotWrongLane: {

@@ -171,6 +171,28 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
   mapControl @24 :MapControlStatus;
   controlPrompt @25 :ControlPrompt;
   controlAlert @26 :ControlAlert;   # held about 2 s (ABORT_HOLD_S), like laneChangeAbort; permanent ones while they last
+
+  # Why a lane change the route wants isn't offered now (lane_planner.py), every frame, so a missing offer is explained
+  enum LaneChangeWait {
+    none @0;           # no change wanted (or no maneuver), or one is offered or under way
+    paintRuleOff @1;   # TurnPilotLanePaintActive off: no changes planned
+    inputsInvalid @2;  # carState or modelV2 failing their checks
+    laneUnknown @3;    # the car's lane in the map's lane list can't be confirmed
+    beforeWindow @4;   # the maneuver is further than the window's start
+    pastWindow @5;     # closer than the window's end
+    tooSlow @6;        # below DesireHelper's lane change speed
+    cooldown @7;       # just after a lane change or an abort
+    lineNotBroken @8;  # the ego line that way isn't read broken white
+    noLane @9;         # no travel lane that way
+    laneParked @10;    # something stopped in that lane ahead
+    blindspot @11;
+    carInLane @12;
+    confirming @13;    # the same change wanted for under LC_CONFIRM_FRAMES yet
+    afterStop @14;     # a map stop in the window, no room at speed before it: the change goes after its go
+    unreachable @15;   # a map stop in the window, no room before it nor after its go: the lane can't be reached
+  }
+  laneChangeWait @27 :LaneChangeWait;
+  laneChangeWant @28 :Int8;           # lane changes the route wants before the maneuver, positive left, at any speed
 }
 
 struct TurnpilotDetections @0xaedffd8f31e7b55d {

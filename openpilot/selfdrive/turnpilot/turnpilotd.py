@@ -50,6 +50,9 @@ Standing engaged STOPPED_PROMPT_S with nothing of TurnPilot's holding the car (n
 the model, no map control within STOPPED_CONTROL_M, gas and brake off, the model stopped on its own: the plan asks for the
 driver's go (controlPrompt carStoppedGo, "Car stopped — tap gas to continue", a chime). TurnPilot never goes itself: the
 driver's tap does, and the wait starts over.
+A lane change a map stop leaves no room for, before it or after its go, with the map's lane list placing the car in a lane
+the maneuver doesn't leave from (lane_planner.py: unreachable), skips the maneuver as too fast to turn does: said
+(turnpilotTooFastToTurn, "Can't Reach Turn Lane" by laneChangeWait unreachable) and rerouted, unless its desire went out.
 A handback or a fault cancels a lane change that is offered and not yet started, with laneChangeAbort handedBack or
 fault for ABORT_HOLD_S (selfdrived raises turnpilotLaneChangeAborted); TurnPilot turned off cancels it as turnedOff.
 A change DesireHelper has started goes on, and one it may have started on the request already isn't announced as
@@ -406,13 +409,20 @@ class TurnPilot:
     # carState or modelV2 failing their checks: no change is offered, and one offered aborts. Not acting: act_on is None,
     # so nothing is offered (an offer at the handback was cancelled above, as handedBack)
     lane_kw = {'left_blindspot': cs.leftBlindspot, 'right_blindspot': cs.rightBlindspot, 'maneuver_id': rf.maneuver_id,
-               'inputs_valid': inputs_valid}
+               'inputs_valid': inputs_valid, 'stop_d': self.map_controls.stop_ahead()}
     lane_args = (act_on, rf.distance, lanes, model.meta.laneChangeState, v_ego, cs.leftBlinker, cs.rightBlinker, objects,
                  driver_signals, right_hand_traffic, DT_MDL, paint)
     self.lanes.paint_rule = paint_rule
     lc = self.lanes.update(*lane_args, **lane_kw)
     plan.laneChange, plan.signalPrompt, lane_reason = lc.lane_change, lc.prompt, lc.reason
     plan.laneChangeOffer, plan.laneChangeCountdown, plan.laneChangeAbort = lc.offer, lc.countdown, lc.abort
+    plan.laneChangeWait, plan.laneChangeWant = lc.wait, max(min(lc.want, 127), -128)
+    committed = self.desires.maneuver_id == rf.maneuver_id and self.desires.started  # this frame's desire included
+    if lc.unreachable and act_on is not None and not committed and not self.skip.skipped:
+      # a map stop leaves no room to get into the maneuver's lane before it nor after its go: skipped out loud and
+      # rerouted (turn_skip.py), never a turn from the wrong lane. Never one whose desire went out: a committed turn goes on
+      self.skip.skip(act_on, rf.distance, rf.maneuver_id, v_ego, 'laneUnreachable')
+      plan.tooFastToTurn = True
     rule = lc if paint_rule else self.paint_rule_lanes.update(*lane_args, **lane_kw)  # its offers and aborts are never raised
     plan.laneChangePaintRule = rule.lane_change if rule.lane_change != LaneChange.none else rule.prompt
     found = lane_mismatch(act_on, rf.distance, rf.through_lanes, rf.through_distance, lanes, v_ego, right_hand_traffic) \

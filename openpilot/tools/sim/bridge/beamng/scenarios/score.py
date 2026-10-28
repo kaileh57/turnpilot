@@ -8,6 +8,7 @@ A row is a dict:
   steer, gas, brake  carState steeringPressed, gasPressed, brakePressed
   state, reason      turnpilotPlan.state and .reason; lc, prompt: its laneChange and signalPrompt
   control_prompt     turnpilotPlan.controlPrompt: the go TurnPilot asks the driver for ('none', 'stopSignGo', ...)
+  lc_wait, lc_want   turnpilotPlan.laneChangeWait (why a change the route wants isn't offered) and laneChangeWant
   desire             turnpilotPlan.desire (a log.Desire index); map_kind: its mapControl.kind ('none', 'signal', ...)
   lc_state           modelV2.meta.laneChangeState
   nav_valid, nav_type, nav_mod, nav_dist, nav_remaining   navInstruction; route: an id of the current navRoute
@@ -65,6 +66,7 @@ def msg_fields(ss, cs, tp, nav, model) -> dict:
     'state': '' if tp is None else str(tp.state), 'reason': '' if tp is None else str(tp.reason),
     'lc': '' if tp is None else str(tp.laneChange), 'prompt': '' if tp is None else str(tp.signalPrompt),
     'control_prompt': '' if tp is None else str(tp.controlPrompt),
+    'lc_wait': '' if tp is None else str(tp.laneChangeWait), 'lc_want': 0 if tp is None else int(tp.laneChangeWant),
     'desire': 0 if tp is None else int(tp.desire), 'map_kind': '' if tp is None else str(tp.mapControl.kind),
     'lc_state': str(model.meta.laneChangeState),
     'nav_valid': nav is not None, 'nav_type': '' if nav is None else str(nav.maneuverType),

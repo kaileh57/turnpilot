@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 
 import openpilot.cereal.messaging as messaging
@@ -9,6 +10,7 @@ from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S
 from openpilot.selfdrive.turnpilot.lane_planner import (LANE_UNKNOWN_REASON, LANE_WIDTH,
                                                         LC_ABORT_COOLDOWN_S, LC_ABORT_SETTLE_S, LC_CONFIRM_FRAMES, LC_REQUEST_TIMEOUT_S,
                                                         LC_SIGNAL_TIMEOUT_S, LC_WARN_S, YELLOW_HOLD_S, LanePlanner, ModelLanes, Phase,
+                                                        slow_zone,
                                                         YellowHold, change_blocker, desired_changes, ego_lane_index, lane_change_window,
                                                         lane_mismatch,
                                                         lane_changes_needed, model_lanes, model_lanes_from_msg, nav_lane_span, stopped_in_lane,
@@ -195,7 +197,7 @@ class Drive:
     self.offset = 0.  # the car's lateral offset from its lane's centre, positive left
     self.requests, self.prompts, self.offers, self.aborts, self.decisions = [], [], [], [], []
 
-  def step(self, m, distance, objects=(), blinker=None, blindspot=None, maneuver_id=0, inputs_valid=True):
+  def step(self, m, distance, objects=(), blinker=None, blindspot=None, maneuver_id=0, inputs_valid=True, stop_d=None):
     line_ys, probs, edges, stds = road(self.lanes_left, self.lanes_right)
     if self.curb_unpainted and self.lanes_right == 1:
       probs[3] = 0.05
@@ -207,7 +209,7 @@ class Drive:
       (self._lc_seen[-self.lag] if len(self._lc_seen) >= self.lag else LaneChangeState.off)
     d = self.lp.update(m, distance, lanes, lc_state, self.v, left_blinker, right_blinker, objects,
                        self.driver_signals, True, DT_MDL, self.paint(self.lanes_left, self.lanes_right) if self.paint else (),
-                       blindspot == LaneChange.left, blindspot == LaneChange.right, maneuver_id, inputs_valid)
+                       blindspot == LaneChange.left, blindspot == LaneChange.right, maneuver_id, inputs_valid, stop_d=stop_d)
     prev = self.decisions[-1] if self.decisions else None
     if d.lane_change != LaneChange.none and (prev is None or prev.lane_change == LaneChange.none):
       self.requests.append((d.lane_change, distance, self.t))
@@ -774,3 +776,95 @@ def test_a_lane_crossed_without_desirehelper_leaves_the_lane_unknown():
   drive.run(m, dist, 15.)
   assert not drive.requests[n:], 'a change asked for into the oncoming lane'
   assert drive.lp.done is None
+
+
+class StopDrive(Drive):
+  """Drive with a map stop (a signal) stop_at m before the maneuver: the car slows for it on the map stop's curve
+  (MAP_STOP_DECEL, a second's lag), braking no harder than 2 m/s^2, stands hold_s at its line, then pulls away at 1 m/s^2
+  to cruise. The planner gets the stop's distance until the go, as MapControlPolicy.stop_ahead() gives it."""
+  def __init__(self, lanes_left, lanes_right, cruise, stop_at, hold_s=3., v=None, **kw):
+    super().__init__(lanes_left, lanes_right, v=cruise if v is None else v, **kw)
+    self.cruise, self.stop_at, self.hold_s = cruise, stop_at, hold_s
+    self.held_t, self.gone = 0., False
+    self.waits, self.min_v_before_stop = [], cruise
+
+  def drive(self, m, distance, seconds, **kw):
+    for _ in range(int(round(seconds / DT_MDL))):
+      stop_d = None if self.gone else max(distance - self.stop_at, 0.)
+      d = self.step(m, distance, stop_d=stop_d, **kw)
+      self.waits.append((distance, self.v, d.wait))
+      if stop_d is not None and stop_d < 0.5 and self.v < 0.3:
+        self.held_t += DT_MDL
+        self.gone = self.held_t >= self.hold_s
+        self.v = 0.
+        continue
+      target = self.cruise if stop_d is None else min(self.cruise, math.sqrt(3. * max(stop_d - self.v - 0.5, 0.)))
+      self.v = max(min(target, self.v + 1. * DT_MDL), self.v - 2. * DT_MDL, 0.)
+      distance -= self.v * DT_MDL
+    return distance
+
+
+def test_a_signal_inside_the_window_gets_the_change_offered_before_it_at_speed():
+  """BeamNG lane_change on the signal tiles, 2026-10-28: a signal 164 m before the turn sat inside the lane change window,
+  and braking for it kept the car under DesireHelper's 9.44 m/s from 227 m in: no change was offered, and nothing in the
+  plan said why. The window opens early enough for the change to start before the stop's braking takes the car below it."""
+  drive = StopDrive(1, 0, cruise=11.35, stop_at=164.)
+  m = maneuver("turn", "left")
+  drive.drive(m, 450., 40.)
+  assert drive.offers and drive.offers[0][1] > 164. + slow_zone(11.35), drive.offers
+  req = drive.requests[0][1]
+  assert req > 164. + slow_zone(11.35) and drive.lp.changes >= 1, (drive.requests, drive.aborts)
+  assert not [a for a, _ in drive.aborts if a == 'tooSlow']
+  # before its window, the plan said why there was no offer yet
+  assert any(w == 'beforeWindow' for d, _, w in drive.waits if d > drive.offers[0][1] + 5.)
+
+
+def test_with_no_room_before_the_stop_the_change_goes_after_its_go():
+  """The stop seen too close to change lanes before it at speed, with room after it: no offer, said in the plan
+  (afterStop), and once the car is away and up to speed, offered and made."""
+  drive = StopDrive(1, 0, cruise=12., stop_at=175., hold_s=1000.)
+  m = maneuver("turn", "left")
+  distance = drive.drive(m, 255., 25.)  # up to the stop and held there
+  assert not drive.offers and drive.v == 0. and drive.held_t > 1.
+  assert {w for d, _, w in drive.waits if d < 250.} == {'afterStop'}
+  drive.cruise, drive.hold_s = 13., 0.
+  drive.drive(m, distance, 25.)
+  assert drive.offers and drive.lp.changes == 1, (drive.offers, drive.aborts, drive.waits[-1])
+  assert all(60. < d < 180. for _, d, _ in drive.offers)
+
+
+def test_with_no_room_before_the_stop_nor_after_it_the_lane_is_unreachable_and_said():
+  """A stop 100 m before the turn: not enough road after its go to get up to speed and change. Too close to it at speed
+  for one before it. The turn's lane can't be reached: unreachable, never a late change."""
+  drive = StopDrive(2, 0, cruise=11., stop_at=100.)
+  m = maneuver("turn", "left", THREE_LANES_LEFT_TURN)
+  drive.drive(m, 190., 4.)
+  d = drive.decisions[-1]
+  assert not drive.offers and d.wait == 'unreachable' and d.unreachable and d.want == 2
+  assert 'reach' in d.reason
+  # without the map's lane list the car's lane isn't known to be wrong: said, never a skip
+  drive = StopDrive(1, 0, cruise=11., stop_at=100.)
+  drive.drive(maneuver("turn", "left"), 190., 4.)
+  d = drive.decisions[-1]
+  assert d.wait == 'unreachable' and not d.unreachable
+
+
+def test_lane_change_wait_says_why_no_change_is_offered():
+  drive = Drive(1, 0, v=8.)  # below DesireHelper's speed
+  m = maneuver("turn", "left")
+  drive.run(m, 120., 1.)
+  assert drive.decisions[-1].wait == 'tooSlow' and drive.decisions[-1].want == 1
+  drive = Drive(1, 0, v=15., paint=lambda l, r: paint(left=SW, right=SW))
+  drive.run(m, 200., 1.)
+  assert drive.decisions[-1].wait == 'lineNotBroken'
+  drive = Drive(1, 0, v=15.)
+  drive.run(m, 600., 0.2)
+  assert drive.decisions[-1].wait == 'beforeWindow'
+  drive.run(m, 200., 0.2)
+  assert drive.decisions[-1].wait == 'confirming'
+  drive = Drive(0, 0, v=15., paint=lambda l, r: paint(left=BW, right=SW))  # broken white, and no lane beyond it
+  drive.run(m, 200., 1.)
+  assert drive.decisions[-1].wait == 'noLane'
+  drive = Drive(1, 0, v=15., paint_rule=False)
+  drive.run(m, 200., 1.)
+  assert drive.decisions[-1].wait == 'paintRuleOff'

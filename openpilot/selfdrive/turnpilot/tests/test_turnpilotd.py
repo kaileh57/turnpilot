@@ -1852,3 +1852,20 @@ def test_stood_engaged_with_nothing_holding_it_asks_for_the_drivers_go_and_never
   sim = Sim([(2000., 'turn', 'left', T_LEFT)], controls=[(28., 'stop')])
   sim.run(0.2)
   assert all(p.controlPrompt == 'none' for p in stand(sim, STOPPED_PROMPT_S + 1.))  # a stop sign 25 m on: the queue for it
+
+
+def test_a_turn_lane_a_map_stop_leaves_no_room_for_is_skipped_out_loud_never_turned_from_the_wrong_lane():
+  """The map's lane list puts the car two lanes right of the left turn's lane, and a signal 100 m before the turn leaves no
+  room to change before it at speed nor after its go: the turn is skipped as too fast to turn is (navd reroutes), the plan
+  saying why (laneChangeWait unreachable), and its desire never goes out."""
+  sim = Sim([(400., 'turn', 'left', T_LEFT)], cruise=11., nav_lanes={0: THREE_LANES_LEFT_TURN}, model_lanes=(2, 0),
+            controls=[(300., 'signal')])
+  sim.run(25.)
+  plans = [p for _, _, p in sim.trace]
+  first = next(i for i, p in enumerate(plans) if p.tooFastToTurn)
+  s_skip = sim.trace[first][0]
+  assert 400. - s_skip > 150., s_skip  # decided once it was so, well before the junction
+  assert plans[first].laneChangeWait == 'unreachable' and plans[first].laneChangeWant == 2
+  assert any(p.laneChangeWait == 'beforeWindow' for p in plans[:first])
+  assert all(p.desire == Desire.none for p in plans)
+  assert all(p.tooFastToTurn for p in plans[first:] if p.maneuverDistance > 0.)
