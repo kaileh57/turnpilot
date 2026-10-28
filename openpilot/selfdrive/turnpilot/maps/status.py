@@ -47,12 +47,14 @@ def same_destination(status: dict, destination) -> bool:
     return False
 
 
-def for_destination(status: dict | None, destination) -> dict | None:
-  """navd's status for the current destination: its own if it is about it, else 'checking' (navd hasn't started on
-  it yet), and None with no destination."""
+def for_destination(status: dict | None, destination, onroad: bool = True) -> dict | None:
+  """navd's status for the current destination: its own if it is about it, else 'checking' while onroad (navd hasn't
+  started on it yet), and None with no destination or offroad, where navd doesn't run."""
   if destination is None:
     return None
   if status is not None and same_destination(status, destination):
     return status
+  if not onroad:
+    return None
   return {'state': 'checking', 'message': 'Checking the mapped area', 'short': 'Checking the mapped area', 'code': '',
           'destination': [destination.get('longitude'), destination.get('latitude')] if isinstance(destination, dict) else None}

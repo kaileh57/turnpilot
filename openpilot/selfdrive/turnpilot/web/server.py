@@ -77,7 +77,7 @@ class App:
   def status(self) -> dict:
     snap = self.reader.get() if self.reader else None
     status = format_status(snap, self.store.destination(), self.store.flag("TurnPilotEnabled"), self.store.flag("IsMetric"))
-    status["map"] = self.map_status(status["gps"])
+    status["map"] = self.map_status(status["gps"], status["onroad"])
     return status
 
   # TurnPilot's mapped area (the geofence) and its map server
@@ -89,14 +89,14 @@ class App:
     except MapError as e:
       return None, e.message
 
-  def map_status(self, gps) -> dict:
+  def map_status(self, gps, onroad: bool = True) -> dict:
     """Where the car is against the mapped area, and navd's download and route status."""
     with self.store.lock:
       params = self.store.params
       override = local_override(params)
       missing = missing_config(params)
       refresh_status = params.get(coverage_cache.STATUS_PARAM)
-      nav = for_destination(read_status(params), params.get("NavDestination"))  # only about the current destination
+      nav = for_destination(read_status(params), params.get("NavDestination"), onroad)  # only about the current destination
     coverage, error = self.cached_coverage()
     if coverage is None and error is None:
       error = coverage_cache.NO_COVERAGE_MESSAGE

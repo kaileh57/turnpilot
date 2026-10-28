@@ -228,3 +228,21 @@ def test_refresh_records_any_failure(server, tmp_path):
     refresh(params, tmp_path)
   assert e.value.code == 'refresh_failed'
   assert params.values[STATUS_PARAM]['ok'] is False and 'RuntimeError: surprise' in params.values[STATUS_PARAM]['error']
+
+
+
+def test_the_corridor_waits_longer_for_the_server_to_build_it(server, tmp_path):
+  """The server builds the whole corridor before its status line: the default 30 s read timeout would cut off a big one."""
+  server.corridor = (200, make_pack({'tiles/2/0.gph': b'x'}), 'application/x-tar')
+  real, seen = requests.request, []
+
+  def spy(*args, **kwargs):
+    seen.append((args[1].rsplit('/', 1)[1], kwargs['timeout']))
+    return real(*args, **kwargs)
+
+  c = client_for(server, tmp_path)
+  with patch.object(map_client.requests, 'request', side_effect=spy):
+    c.coverage()
+    c.corridor(INDY, INDY_EAST, tmp_path / 'out.tar')
+  assert seen == [('coverage', map_client.TIMEOUT), ('corridor', map_client.CORRIDOR_TIMEOUT)]
+  assert map_client.CORRIDOR_TIMEOUT[1] >= 120

@@ -18,6 +18,9 @@ import requests
 from openpilot.selfdrive.turnpilot.maps.paths import maps_dir
 
 TIMEOUT = (5., 30.)  # s to connect, s between bytes
+# the server builds the whole corridor (up to a few hundred MB, gzipped) before it sends the status line, so the first
+# byte can take a minute or more on its small VM; after that, bytes come steadily
+CORRIDOR_TIMEOUT = (5., 180.)
 CHUNK = 256 * 1024
 CERT_FILE = 'server-cert.pem'
 PEM_BEGIN = '-----BEGIN CERTIFICATE-----'
@@ -121,10 +124,10 @@ class MapClient:
                      'Map server not set up')
     return cls(params.get('TurnPilotMapHost'), params.get('TurnPilotMapKey'), params.get('TurnPilotMapCert'), directory)
 
-  def request(self, method, path, auth=True, **kwargs) -> requests.Response:
+  def request(self, method, path, auth=True, timeout=TIMEOUT, **kwargs) -> requests.Response:
     headers = {'Authorization': f"Bearer {self.key}"} if auth else {}
     try:
-      resp = requests.request(method, self.host + path, headers=headers, verify=str(self.cert_path), timeout=TIMEOUT, **kwargs)
+      resp = requests.request(method, self.host + path, headers=headers, verify=str(self.cert_path), timeout=timeout, **kwargs)
     except requests.exceptions.SSLError as e:
       raise MapError('tls', f"The map server at {self.host} failed the TLS check against the saved certificate ({type(e).__name__}). " +
                      "Paste the server's current certificate in the TurnPilot web app.", 'Map server TLS check failed') from None
@@ -167,7 +170,8 @@ class MapClient:
     rather than by urllib3, which accepts a gzip stream that stops short of its end. So a download that broke off is
     caught three ways: fewer bytes than Content-Length, a gzip stream that never reached its end, and (in unpack) a tar
     that ends early. progress(received, total or None) counts bytes off the wire against Content-Length."""
-    resp = self.request('POST', '/v1/corridor', json={'start': list(start), 'destination': list(destination)}, stream=True)
+    resp = self.request('POST', '/v1/corridor', json={'start': list(start), 'destination': list(destination)}, stream=True,
+                        timeout=CORRIDOR_TIMEOUT)
     with resp:
       if resp.status_code == 422:
         raise refusal(resp, coverage_names)
