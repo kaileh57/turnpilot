@@ -23,6 +23,14 @@ if [ "${1:-}" = "--setup" ]; then
   "${SSH[@]}" "bash /tmp/setup_server.sh ${HOST#*@}"
 fi
 
+# server.py requires --tmp-dir, which only the unit setup_server.sh writes has. With an older unit the new server would
+# not start, and swap_region.sh would take that for a bad region and roll it back: refuse here instead, before anything.
+if ! "${SSH[@]}" "grep -q -- '--tmp-dir' /etc/systemd/system/turnpilot-maps.service"; then
+  echo "The server's systemd unit has no --tmp-dir (corridors would be built in a tmpfs /tmp that counts against MemoryMax)." >&2
+  echo "Run: $0 --setup ${*:-}" >&2
+  exit 1
+fi
+
 rsync -e "ssh -i $KEY" "$HERE/server.py" "$HERE/geo.py" "$HERE/tiles.py" "$HERE/swap_region.sh" "$HOST:/opt/turnpilot-maps/"
 
 if [ $# -eq 0 ]; then

@@ -10,8 +10,10 @@ the route, so the car can reroute locally without a connection. Start and destin
 one region's fence, or the server refuses with a 422 that says why. The corridor is built in a temp file before
 anything is sent, so it goes out with a Content-Length the car checks, and any failure is a clean 5xx.
 
-The TLS handshake runs in each connection's own thread with a timeout, every socket has a timeout, and connections
-and corridors in flight are capped, so idle or slow clients can't stall the server or exhaust its 1 GB.
+The TLS handshake runs in each connection's own thread, and it and the request (line, headers and body) each have a
+deadline for the whole of it, not per read, so a client that drips a byte at a time is dropped all the same. Connections
+are capped in total and per client address, and corridors in flight are capped, so idle or slow clients can't stall the
+server, lock the cars out, or exhaust its 1 GB.
 
 Each region is a directory under --regions, written by build_region.py:
   fence.geojson  the drivable area, a Feature with a Polygon or MultiPolygon
@@ -29,10 +31,12 @@ import json
 import logging
 import os
 import shutil
+import socket
 import ssl
 import tarfile
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -46,9 +50,11 @@ BUFFER_KM = 15.0  # with 28 km level-2 tiles this keeps every road within 15-40 
 GZIP_LEVEL = 3
 MAX_BODY = 4096
 CACHE_BYTES = 150 * 1024 * 1024  # Valhalla's tile cache; the server has 1 GB
-HANDSHAKE_TIMEOUT = 10.  # s for a client to finish the TLS handshake, in its own thread
-REQUEST_TIMEOUT = 60.  # s a client may stall on one socket read or write
+HANDSHAKE_TIMEOUT = 10.  # s for a client to finish the whole TLS handshake, in its own thread
+HEADER_TIMEOUT = 20.  # s for the whole request (line, headers and body) once the handshake is done
+REQUEST_TIMEOUT = 60.  # s a client may stall on one socket write while a response goes out (cellular stalls)
 MAX_CONNECTIONS = 32  # open connections; more are closed at once, so idle sockets can't exhaust threads or memory
+MAX_PER_ADDRESS = 4  # open connections from one address: a car needs one or two, and one host can't take all 32
 MAX_CORRIDORS = 2  # corridors built or sent at once; each is a temp file of up to a few hundred MB
 SEND_CHUNK = 256 * 1024
 
@@ -123,7 +129,7 @@ class Maps:
   def __init__(self, regions: list[Region], key: str, tmp_dir: Path | None = None, max_corridors: int = MAX_CORRIDORS):
     self.regions = regions
     self.key = key
-    self.tmp_dir = tmp_dir  # None: the system's (the unit's PrivateTmp)
+    self.tmp_dir = tmp_dir  # main() requires it; None (tests) is the system's
     self.corridor_slots = threading.BoundedSemaphore(max_corridors)
     blob = json.dumps([[r.meta, r.fence] for r in regions], sort_keys=True).encode()
     self.version = hashlib.sha256(blob).hexdigest()[:16]
@@ -228,12 +234,55 @@ def send_file(src, dst):
   shutil.copyfileobj(src, dst, SEND_CHUNK)
 
 
-def make_handler(maps: Maps, request_timeout: float = REQUEST_TIMEOUT):
+class DeadlineIO(socket.SocketIO):
+  """A socket reader whose every recv waits only as long as is left of a deadline, so the deadline bounds a whole
+  readline (http.server reads the request line and headers with readline), however slowly the bytes come."""
+
+  def __init__(self, sock, remaining):
+    super().__init__(sock, 'rb')
+    self.remaining = remaining
+
+  def readinto(self, b):
+    left = self.remaining()
+    if left is not None:
+      if left <= 0:
+        raise TimeoutError('the request took too long')
+      self._sock.settimeout(left)
+    return super().readinto(b)
+
+
+def make_handler(maps: Maps, request_timeout: float = REQUEST_TIMEOUT, header_timeout: float = HEADER_TIMEOUT):
   class Handler(BaseHTTPRequestHandler):
     server_version = 'turnpilot-maps'
     sys_version = ''
     timeout = request_timeout  # StreamRequestHandler puts it on the socket: a stalled client lets go of its thread
     headers_sent = False
+    deadline: float | None = None
+
+    def setup(self):
+      super().setup()
+      # the request line, headers and body must all arrive by the deadline: a timeout per read alone lets a client that
+      # sends a byte every timeout - 1 s hold its connection forever
+      self.deadline = time.monotonic() + header_timeout
+      self.rfile.close()
+      raw = DeadlineIO(self.connection, self.remaining)
+      self.connection._io_refs += 1  # as makefile() counts it, so closing the socket waits for this reader
+      self.rfile = io.BufferedReader(raw)
+
+    def handle(self):
+      try:
+        super().handle()
+      except OSError as e:  # the client hung up or broke TLS mid-request: its own problem, not a server error
+        log.info("%s: connection lost (%s: %s)", self.address_string(), type(e).__name__, e)
+        self.close_connection = True
+
+    def remaining(self) -> float | None:
+      return None if self.deadline is None else self.deadline - time.monotonic()
+
+    def request_read(self):
+      """The request is in: from here on only the per-write timeout applies, as the response goes out."""
+      self.deadline = None
+      self.connection.settimeout(request_timeout)
 
     def log_message(self, format, *args):  # noqa: A002
       log.info("%s %s", self.address_string(), format % args)
@@ -254,6 +303,8 @@ def make_handler(maps: Maps, request_timeout: float = REQUEST_TIMEOUT):
 
     def handle_request(self, method):
       try:
+        if method != 'POST':
+          self.request_read()
         if method == 'GET' and self.path == '/v1/health':
           return self.send_json(200, {'ok': True, 'regions': [r.id for r in maps.regions]})
         if not self.path.startswith('/v1/'):
@@ -265,6 +316,9 @@ def make_handler(maps: Maps, request_timeout: float = REQUEST_TIMEOUT):
         if method == 'POST' and self.path == '/v1/corridor':
           return self.corridor()
         raise Refusal(404, {'error': 'not_found'})
+      except TimeoutError as e:
+        log.info("%s: %s (%s); closing the connection", self.address_string(), 'timed out' if self.headers_sent else 'request too slow', e)
+        self.close_connection = True
       except Exception as e:
         if self.headers_sent:  # a status line is out: an error now must not write a second response into the body
           log.warning("request failed after its headers were sent (%s: %s); closing the connection", type(e).__name__, e)
@@ -279,8 +333,10 @@ def make_handler(maps: Maps, request_timeout: float = REQUEST_TIMEOUT):
       length = int(self.headers.get('Content-Length') or 0)
       if not 0 < length <= MAX_BODY:
         raise Refusal(400, {'error': 'bad_request', 'detail': 'body missing or too large'})
+      data = self.rfile.read(length)
+      self.request_read()
       try:
-        body = json.loads(self.rfile.read(length))
+        body = json.loads(data)
       except ValueError as e:
         raise Refusal(400, {'error': 'bad_request', 'detail': 'body is not JSON'}) from e
       if not isinstance(body, dict):
@@ -323,39 +379,61 @@ def make_handler(maps: Maps, request_timeout: float = REQUEST_TIMEOUT):
 
 
 class MapHTTPServer(ThreadingHTTPServer):
-  """ThreadingHTTPServer with the TLS handshake in each connection's thread, with a timeout, and a cap on connections.
+  """ThreadingHTTPServer with the TLS handshake in each connection's thread, with a deadline, and caps on connections,
+  in total and per client address.
 
   Wrapping the listening socket instead would run the handshake inside accept() on the one serving thread: a single
-  client that connects and sends nothing would stall every other request."""
+  client that connects and sends nothing would stall every other request. The cap per address keeps one host from
+  taking every connection, which would turn the total cap into a lockout of every car."""
   daemon_threads = True
   request_queue_size = 64
 
   def __init__(self, address, handler, context: ssl.SSLContext | None = None, handshake_timeout: float = HANDSHAKE_TIMEOUT,
-               max_connections: int = MAX_CONNECTIONS):
+               max_connections: int = MAX_CONNECTIONS, max_per_address: int = MAX_PER_ADDRESS):
     super().__init__(address, handler)
     self.context, self.handshake_timeout = context, handshake_timeout
-    self.slots = threading.BoundedSemaphore(max_connections)
+    self.max_connections, self.max_per_address = max_connections, max_per_address
+    self.lock = threading.Lock()
+    self.open: dict[str, int] = {}  # open connections by client address
+
+  def take(self, address: str) -> str:
+    """'' and a slot taken for the connection, or why it is turned away."""
+    with self.lock:
+      if sum(self.open.values()) >= self.max_connections:
+        return f"over {self.max_connections} connections"
+      if self.open.get(address, 0) >= self.max_per_address:
+        return f"over {self.max_per_address} connections from it"
+      self.open[address] = self.open.get(address, 0) + 1
+      return ''
+
+  def give_back(self, address: str):
+    with self.lock:
+      self.open[address] -= 1
+      if not self.open[address]:
+        del self.open[address]
 
   def process_request(self, request, client_address):
-    if not self.slots.acquire(blocking=False):
-      log.warning("%s: over %s connections, closing it", client_address[0], self.slots._initial_value)  # type: ignore[attr-defined]
+    if why := self.take(client_address[0]):
+      log.warning("%s: %s, closing it", client_address[0], why)
       self.shutdown_request(request)
       return
     try:
       super().process_request(request, client_address)
     except BaseException:
-      self.slots.release()
+      self.give_back(client_address[0])
       raise
 
   def process_request_thread(self, request, client_address):
     try:
       super().process_request_thread(request, client_address)
     finally:
-      self.slots.release()
+      self.give_back(client_address[0])
 
   def finish_request(self, request, client_address):
     if self.context is None:
       return super().finish_request(request, client_address)
+    # the handshake runs with this as one deadline for all of it (CPython's do_handshake counts down the socket timeout
+    # across its reads), so a ClientHello sent a byte at a time is cut off all the same
     request.settimeout(self.handshake_timeout)
     try:
       tls = self.context.wrap_socket(request, server_side=True)
@@ -369,14 +447,27 @@ class MapHTTPServer(ThreadingHTTPServer):
 
 
 def make_server(maps: Maps, host: str, port: int, cert=None, cert_key=None, handshake_timeout: float = HANDSHAKE_TIMEOUT,
-                request_timeout: float = REQUEST_TIMEOUT, max_connections: int = MAX_CONNECTIONS) -> MapHTTPServer:
+                request_timeout: float = REQUEST_TIMEOUT, max_connections: int = MAX_CONNECTIONS, header_timeout: float = HEADER_TIMEOUT,
+                max_per_address: int = MAX_PER_ADDRESS) -> MapHTTPServer:
   """The server over TLS with cert and cert_key, or plain HTTP without them (tests)."""
   context = None
   if cert is not None:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(cert, cert_key)
-  return MapHTTPServer((host, port), make_handler(maps, request_timeout), context, handshake_timeout, max_connections)
+  return MapHTTPServer((host, port), make_handler(maps, request_timeout, header_timeout), context, handshake_timeout, max_connections,
+                       max_per_address)
+
+
+def check_tmp_dir(path: Path):
+  """Refuse to start without a directory corridors can be built in, rather than fail the first one."""
+  if not path.is_dir():
+    raise SystemExit(f"--tmp-dir {path} is not a directory")
+  try:
+    with tempfile.TemporaryFile(dir=path, prefix='corridor-check-'):
+      pass
+  except OSError as e:
+    raise SystemExit(f"--tmp-dir {path}: corridors can't be written there: {e}") from None
 
 
 def main():
@@ -387,9 +478,12 @@ def main():
   ap.add_argument('--cert-key', type=Path, default=Path('/etc/turnpilot-maps/cert.key'))
   ap.add_argument('--host', default='0.0.0.0')
   ap.add_argument('--port', type=int, default=443)
-  ap.add_argument('--tmp-dir', type=Path, default=None, help="where corridors are built before they are sent (default: the system's)")
+  ap.add_argument('--tmp-dir', type=Path, required=True,
+                  help="where corridors are built before they are sent, on disk (setup_server.sh: /var/cache/turnpilot-maps). " +
+                       "Not /tmp, which may be a tmpfs that counts against the unit's MemoryMax")
   args = ap.parse_args()
   logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+  check_tmp_dir(args.tmp_dir)
 
   key = args.key_file.read_text().strip()
   if len(key) < 32:

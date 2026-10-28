@@ -185,7 +185,7 @@ def tls_server(server, tmp_path):
   (tmp_path / 'cert.pem').write_text(cert)
   (tmp_path / 'cert.key').write_text(key)
   httpd = make_server(maps, '127.0.0.1', 0, tmp_path / 'cert.pem', tmp_path / 'cert.key',
-                      handshake_timeout=1., request_timeout=1., max_connections=3)
+                      handshake_timeout=1., request_timeout=1., max_connections=3, header_timeout=1.5, max_per_address=2)
   threading.Thread(target=httpd.serve_forever, kwargs={'poll_interval': 0.05}, daemon=True).start()
   yield f"https://127.0.0.1:{httpd.server_address[1]}", httpd.server_address, str(tmp_path / 'cert.pem')
   httpd.shutdown()
@@ -214,8 +214,9 @@ def test_a_silent_client_is_dropped_after_the_handshake(tls_server):
 
 
 def test_connections_beyond_the_cap_are_turned_away(tls_server):
+  """Here the cap per address (2): the total cap is test_one_address_cannot_take_every_connection's."""
   base, address, cert = tls_server
-  idle = [socket.create_connection(address) for _ in range(3)]
+  idle = [socket.create_connection(address) for _ in range(2)]
   try:
     time.sleep(0.2)
     with pytest.raises(requests.ConnectionError):
@@ -225,6 +226,76 @@ def test_connections_beyond_the_cap_are_turned_away(tls_server):
       s.close()
   time.sleep(0.3)
   assert requests.get(base + '/v1/health', verify=cert, timeout=2).status_code == 200
+
+
+def test_one_address_cannot_take_every_connection():
+  """A total cap alone turns idle sockets from one host into a lockout of every car: each address gets a few."""
+  httpd = make_server(Maps([], KEY), '127.0.0.1', 0, max_connections=5, max_per_address=2)
+  try:
+    assert [httpd.take('6.6.6.6') for _ in range(3)] == ['', '', 'over 2 connections from it']
+    assert httpd.take('10.0.0.1') == '' and httpd.take('10.0.0.2') == ''  # the cars still get in
+    httpd.give_back('6.6.6.6')
+    assert httpd.take('6.6.6.6') == ''
+    assert httpd.take('10.0.0.3') == ''
+    assert httpd.take('10.0.0.4') == 'over 5 connections'
+    for a in ('6.6.6.6', '6.6.6.6', '10.0.0.1', '10.0.0.2', '10.0.0.3'):
+      httpd.give_back(a)
+    assert httpd.open == {}
+  finally:
+    httpd.server_close()
+
+
+def drip(sock, data, every, until):
+  """Send data a byte at a time; True if the server hung up before until seconds."""
+  t = time.monotonic()
+  for byte in data:
+    if time.monotonic() - t > until:
+      return False
+    try:
+      sock.sendall(bytes([byte]))
+    except OSError:
+      return True
+    time.sleep(every)
+    sock.setblocking(False)
+    try:
+      if sock.recv(1) == b'':
+        return True
+    except (BlockingIOError, ssl.SSLWantReadError):
+      pass
+    except OSError:
+      return True
+    finally:
+      sock.setblocking(True)
+  return False
+
+
+def test_a_request_sent_a_byte_at_a_time_is_cut_off_by_its_deadline(tls_server):
+  """Each byte comes well within the 1 s per-read timeout, but the whole request must be in within 1.5 s."""
+  _, address, cert = tls_server
+  context = ssl.create_default_context(cafile=cert)
+  for request in (b'GET /v1/health HTTP/1.1\r\nHost: x\r\n' + b'X-Pad: ' + b'a' * 200 + b'\r\n\r\n',
+                  b'POST /v1/corridor HTTP/1.1\r\nContent-Length: 4000\r\n\r\n' + b' ' * 4000):  # a body as slow
+    with socket.create_connection(address) as raw, context.wrap_socket(raw, server_hostname='127.0.0.1') as tls:
+      start = time.monotonic()
+      if request.startswith(b'POST'):
+        head, _, body = request.partition(b'\r\n\r\n')
+        tls.sendall(head + b'\r\n\r\n')
+        request = body
+      assert drip(tls, request, 0.25, 6), "the server kept a dripping request"
+      assert time.monotonic() - start < 3
+
+
+def test_a_client_hello_sent_a_byte_at_a_time_is_cut_off(tls_server):
+  _, address, _ = tls_server
+  incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+  client = ssl.create_default_context().wrap_bio(incoming, outgoing, server_hostname='127.0.0.1')
+  with pytest.raises(ssl.SSLWantReadError):
+    client.do_handshake()
+  hello = outgoing.read()
+  with socket.create_connection(address) as raw:
+    start = time.monotonic()
+    assert drip(raw, hello, 0.25, 6), "the server kept a dripping handshake"
+    assert time.monotonic() - start < 2.5
 
 
 def test_corridor_has_a_content_length(server):
@@ -337,3 +408,22 @@ def test_a_running_server_serves_the_region_it_loaded_through_a_swap(server):
     manifest = json.load(tar.extractfile('manifest.json'))
     assert tar.extractfile(near).read() == b'near'
     assert hashlib.sha256(b'near').hexdigest() == manifest['files'][near]
+
+
+def test_the_server_will_not_start_without_a_disk_tmp_dir(tmp_path):
+  """Corridors built in the system /tmp may land on a tmpfs that counts against MemoryMax: no default, and checked."""
+  r = subprocess.run([sys.executable, str(MAPSERVER / 'server.py'), '--regions', str(tmp_path)], capture_output=True, text=True,
+                     cwd=MAPSERVER, timeout=60)
+  assert r.returncode != 0 and '--tmp-dir' in r.stderr
+  with pytest.raises(SystemExit, match='not a directory'):
+    mapserver.check_tmp_dir(tmp_path / 'missing')
+  (tmp_path / 'ro').mkdir()
+  os.chmod(tmp_path / 'ro', 0o500)
+  try:
+    if os.access(tmp_path / 'ro', os.W_OK):
+      pytest.skip('running as root')
+    with pytest.raises(SystemExit, match="can't be written"):
+      mapserver.check_tmp_dir(tmp_path / 'ro')
+  finally:
+    os.chmod(tmp_path / 'ro', 0o700)
+  mapserver.check_tmp_dir(tmp_path)
