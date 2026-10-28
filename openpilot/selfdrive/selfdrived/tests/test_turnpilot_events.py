@@ -54,7 +54,7 @@ def test_lane_change_aborted():
 def test_turnpilot_chimes_on_skip_and_handback():
   a, = alerts(EventName.turnpilotTooFastToTurn, FakeSM(plan()))
   assert a.audible_alert == AudibleAlert.tpTooFastTurn
-  for name in (EventName.turnpilotDetectorStopped, EventName.turnpilotModelFellBack):
+  for name in (EventName.turnpilotDetectorStopped, EventName.turnpilotNoDetector, EventName.turnpilotModelFellBack):
     events = Events()
     events.add(name)
     a, = events.create_alerts([ET.SOFT_DISABLE], [car.CarParams.new_message(), car.CarState.new_message(), FakeSM(plan()), False, 300, 0])

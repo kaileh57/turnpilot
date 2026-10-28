@@ -13,10 +13,15 @@ logged and a disabled plan or an empty scene goes out instead.
 TurnPilot acts only while it can do its job (Kellen, 2026-10-27: no degraded mode, and every failure loud):
 - Not until the detector's first fresh results after TurnPilot is turned on (state unavailable, "waiting for the
   detector"): modeld loads it only while disengaged, so a mid-drive enable can't be handed back before it ever ran.
+  A detector with no results DETECTOR_START_DEADLINE_S of modelV2 frames after that (no pkl, a failed load, none for the
+  driving model) never started: handback noDetector. modeld publishes no modelV2 while it loads the detector, so the
+  load itself doesn't count against it.
 - Once it has run, DETECTOR_DEADLINE_S without fresh results is a stopped detector. modeld's own skips stay inside it: a
   slow spell forces a run after 1 s, a failed run retries after 1 s. A second forced wait (2 s) or failure in a row is
   past it.
 - A modelV2 from the small model after one from the big model is a fallback (modelV2.big), for the rest of the drive.
+  So is modeld's ChestnutActive False (read in main()): it outlives this process, which TurnPilot turned off and on
+  restarts, and covers a big model that failed to load.
 On either, plan.handback is set and selfdrived soft-disables (handback.py). TurnPilot stops at once: no new desire,
 lane change, signal prompt, skipped-turn reroute or wrong-lane flag, and the maneuver in hand is dropped. A turn whose
 desire already went out is never cancelled (desire_timing.py): its desire is held, with no new pulse, and cleared from
@@ -24,7 +29,8 @@ the model at the turn's angle as usual; a keep desire is dropped. On a fallback 
 cancels navd's route, once such a turn is over. The scene's stops in force stay, and so does the turn speed cap of a turn
 whose desire already went out: a handback must not speed the car up. Nor does the route going away under a committed
 turn cancel it (route_follower.py: gaps, navd going quiet, reroutes are dead-reckoned through).
-A fault (plan()) is a disabled plan; it carries a model fallback's handback, so a fault never hides one.
+A fault (plan()) is a disabled plan; it carries the handback, so a fault never hides one, and the detector's deadlines
+and the scene's stops in force run on through it (only turning TurnPilot off resets them).
 Once the detector is back and TurnPilot acts again, the dropped maneuver is taken up or skipped out loud, never left
 half driven (_take_up_dropped).
 A handback or a fault cancels a lane change that is offered and not yet started, with laneChangeAbort handedBack or
@@ -74,7 +80,11 @@ NO_JUNCTION_DATA_REASON = "no junction data: nominal turn angle"
 # no fresh detections for this long (the scene goes unavailable STALE_S after the last) and the detector has stopped:
 # past modeld's first forced run or retry (1 s), short of its second (2 s)
 DETECTOR_DEADLINE_S = 1.5
+# no fresh detections this long (in modelV2 frames) after TurnPilot is turned on: the detector never started. modeld
+# loads it at startup, or within a second of a mid-drive enable, and runs it from the next frame
+DETECTOR_START_DEADLINE_S = 15.
 HANDBACK_REASON = {Handback.detectorStopped: "detector stopped: take control",
+                   Handback.noDetector: "detector not running: take control",
                    Handback.modelFellBack: "driving model fell back: take control"}
 WAITING_REASON = "waiting for the detector"
 
@@ -100,9 +110,17 @@ class TurnPilot:
     self.fell_back = False  # ...and then from the small one
     self.cancel_route = False  # set once on a fallback: main() removes NavDestination, once no turn is committed
     self.stop_abort, self._stop_abort_t = 'none', 0.  # a lane change cancelled by a disabled plan: reset() can't hold it
+    self.handback_now: int | None = None  # this frame's handback, once handback() has run for it
     self.reset()
 
-  def reset(self):
+  def reset(self, detector: bool = True):
+    """Back to TurnPilot just turned on. detector False (a fault) keeps what the detector and the scene have shown: the
+    detector's deadlines and the scene's stops in force run on through a fault."""
+    if detector:
+      self.scene = ScenePolicy()
+      self.detector_seen = False   # fresh detections since TurnPilot was turned on
+      self.stale_s = 0.            # how long the scene has been unavailable
+      self.waited_s = 0.           # how long modeld has run since TurnPilot was turned on, before the first detection
     self.follower = RouteFollower()
     self.desires = DesireTiming()
     self.lanes = LanePlanner()
@@ -110,9 +128,6 @@ class TurnPilot:
     self.skip = TurnSkip()
     self.mismatch = LaneMismatch.none
     self._mismatch_candidate, self._mismatch_frames = LaneMismatch.none, 0
-    self.scene = ScenePolicy()
-    self.detector_seen = False   # fresh detections since TurnPilot was turned on
-    self.stale_s = 0.            # how long the scene has been unavailable
     self.acting = False
     self.dropped_id: int | None = None  # the maneuver in hand at a handback: not taken up again
     self.turn_cap_id: int | None = None  # ...whose turn speed cap stays, its desire having gone out
@@ -134,15 +149,33 @@ class TurnPilot:
       self.fell_back = True
       self.cancel_route = enabled  # the route TurnPilot was driving; with it off, navd's route isn't TurnPilot's
 
-  def handback(self, available: bool) -> int:
-    """Why TurnPilot can't act now, as a Handback: none while it can, and while the detector hasn't started yet."""
+  def big_model_failed(self, enabled: bool) -> None:
+    """modeld's ChestnutActive is False: the big model isn't running this drive (it fell back, or failed to load). A
+    fallback as watch_model's, but it outlives this process. The route is cancelled only by the process that saw the
+    big model drive it."""
+    if not self.fell_back:
+      self.fell_back = True
+      self.cancel_route = enabled and self.big_seen
+
+  def handback(self, available: bool, model_running: bool = True) -> int:
+    """Why TurnPilot can't act now, as a Handback: none while it can, and while the detector hasn't started yet, short of
+    DETECTOR_START_DEADLINE_S of modeld running (model_running: a modelV2 this frame). Once a frame: a fault after
+    update() already ran it takes this frame's."""
+    if self.handback_now is not None:
+      return self.handback_now
     self.detector_seen = self.detector_seen or available
     self.stale_s = 0. if available else self.stale_s + DT_MDL
+    if not self.detector_seen and model_running:
+      self.waited_s += DT_MDL
     if self.fell_back:
-      return Handback.modelFellBack
-    if self.detector_seen and self.stale_s > DETECTOR_DEADLINE_S - STALE_S:
-      return Handback.detectorStopped
-    return Handback.none
+      self.handback_now = Handback.modelFellBack
+    elif self.detector_seen and self.stale_s > DETECTOR_DEADLINE_S - STALE_S:
+      self.handback_now = Handback.detectorStopped
+    elif not self.detector_seen and self.waited_s >= DETECTOR_START_DEADLINE_S - DT_MDL / 2:
+      self.handback_now = Handback.noDetector
+    else:
+      self.handback_now = Handback.none
+    return self.handback_now
 
   def _lane_mismatch(self, found) -> int:
     """found, once it has held MISMATCH_CONFIRM_FRAMES; logged when it changes."""
@@ -158,10 +191,11 @@ class TurnPilot:
 
   def stop(self, reason: str) -> None:
     """TurnPilot goes disabled (turned off, or a fault: reason turnedOff or fault) and resets: an offered lane change is
-    cancelled out loud, its abort held ABORT_HOLD_S on the disabled plans (fill_stop_abort), as any abort."""
+    cancelled out loud, its abort held ABORT_HOLD_S on the disabled plans (fill_stop_abort), as any abort. A fault keeps
+    the detector's and the scene's state (reset())."""
     if self.lanes.cancel(reason):
       self.stop_abort, self._stop_abort_t = reason, ABORT_HOLD_S
-    self.reset()
+    self.reset(detector=reason == 'turnedOff')
 
   def fill_stop_abort(self, plan) -> None:
     if self._stop_abort_t > 0.:
@@ -173,6 +207,7 @@ class TurnPilot:
     """A turnpilotPlan message from sm's carState, navInstruction and modelV2, a TurnpilotScene, and the lane paint of
     modelV2's four lane lines (empty when unknown). paint_rule: TurnPilotLanePaintActive; inputs_valid: carState and
     modelV2 pass their checks."""
+    self.handback_now = None
     msg = messaging.new_message('turnpilotPlan')
     plan = msg.turnpilotPlan
     plan.shadow = shadow
@@ -196,7 +231,7 @@ class TurnPilot:
     available = scene.available
     objects = list(scene.objects) if available else []
 
-    handback = self.handback(available)
+    handback = self.handback(available, sm.updated['modelV2'])
     plan.handback = handback
     acting = self.detector_seen and handback == Handback.none
     if self.acting and not acting:
@@ -316,6 +351,7 @@ class TurnPilot:
     carries its fault, which selfdrived shows (turnpilotUnavailable): TurnPilot never stops working unannounced.
     It also carries a model fallback's handback, which outranks the fault (see the module docstring): a fallback lasts
     the drive, so it is noted here too, where update() isn't reached."""
+    self.handback_now = None
     if enabled and not long_control:
       self.stop('fault')
       self.watch_model(sm['modelV2'], enabled)
@@ -329,7 +365,13 @@ class TurnPilot:
     except Exception:
       log_error("turnpilotd.plan_failed")
       self.stop('fault')
-      msg = disabled_plan(shadow, ERROR_REASON, Fault.error, Handback.modelFellBack if self.fell_back else Handback.none)
+      # the detector's deadlines run on: a turnpilotd failing every frame still hands back a stopped detector
+      try:
+        handback = self.handback(scene.available, sm.updated['modelV2'])
+      except Exception:
+        log_error("turnpilotd.fault_handback_failed")
+        handback = Handback.modelFellBack if self.fell_back else Handback.none
+      msg = disabled_plan(shadow, ERROR_REASON, Fault.error, handback)
       self.fill_stop_abort(msg.turnpilotPlan)
       return msg
 
@@ -402,6 +444,8 @@ def main():
       right_hand_traffic = not params.get_bool("IsRhdDetected")
       driver_signals = driver_signals_for(params)
       long_control = long_control_for(params)
+      if params.get("ChestnutActive") is False:  # None: no big model expected this drive
+        tp.big_model_failed(enabled)
 
     scene_msg = messaging.new_message('turnpilotScene')
     try:

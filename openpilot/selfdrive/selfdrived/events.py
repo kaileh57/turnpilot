@@ -473,12 +473,18 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   },
 
   # TurnPilot handing control back (selfdrive/turnpilot/handback.py): openpilot's standard soft disable, with
-  # TurnPilot's handback chime. A stopped detector also blocks engaging while it stays stopped;
+  # TurnPilot's handback chime. A stopped detector, or one that never started, also blocks engaging while it stays so;
   # after a model fallback openpilot can be engaged again on the small model, without TurnPilot.
   EventName.turnpilotDetectorStopped: {
     ET.SOFT_DISABLE: turnpilot_handback_alert("TurnPilot unavailable: detector stopped"),
     ET.NO_ENTRY: NoEntryAlert("TurnPilot unavailable: detector stopped"),
     ET.PERMANENT: NormalPermanentAlert("TurnPilot Unavailable", "Detector stopped: take control", duration=10.),
+  },
+
+  EventName.turnpilotNoDetector: {
+    ET.SOFT_DISABLE: turnpilot_handback_alert("TurnPilot unavailable: detector not running"),
+    ET.NO_ENTRY: NoEntryAlert("TurnPilot unavailable: detector not running"),
+    ET.PERMANENT: NormalPermanentAlert("TurnPilot Unavailable", "Detector not running: take control", duration=10.),
   },
 
   EventName.turnpilotModelFellBack: {

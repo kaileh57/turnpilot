@@ -11,8 +11,8 @@ from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, NO_ACCEL_CAP
 from openpilot.selfdrive.turnpilot.tests.synthetic import FakeNavd, car_control, car_state, junction_of, model_v2, nav_instruction, scene
 from openpilot.selfdrive.turnpilot.desire_timing import TURN_DESIRE_LEAD_M
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, V_TURN_MIN
-from openpilot.selfdrive.turnpilot.turnpilotd import (CAR_UNKNOWN_REASON, DETECTOR_DEADLINE_S, NO_LONG_REASON, WAITING_REASON,
-                                                       TurnPilot, long_control_for)
+from openpilot.selfdrive.turnpilot.turnpilotd import (CAR_UNKNOWN_REASON, DETECTOR_DEADLINE_S, DETECTOR_START_DEADLINE_S, NO_LONG_REASON,
+                                                       WAITING_REASON, TurnPilot, long_control_for)
 from openpilot.selfdrive.turnpilot.handback import Handback
 from openpilot.selfdrive.turnpilot.scene.tracker import STALE_S
 
@@ -46,6 +46,7 @@ class Sim:
     self.s, self.v, self.cruise, self.t = 0., cruise, cruise, 0.
     self.model_lanes, self.shadow, self.driver_signals, self.long_control = model_lanes, shadow, driver_signals, long_control
     self.big = False
+    self.model_running = True  # modeld publishing modelV2 (it doesn't while it loads the detector)
     self.nav_filter = None  # (sim, instruction) -> (instruction, valid): what navd sends instead
     self.trace = []
 
@@ -57,7 +58,8 @@ class Sim:
       self.sm.put('navInstruction', instr, valid)
     self.sm.put('carState', car_state(self.v, steer, left_blinker=blinker, yaw_rate=yaw_rate))
     self.sm.put('carControl', car_control(lat_active))
-    self.sm.put('modelV2', model_v2(*self.model_lanes, big=self.big))
+    if self.model_running:
+      self.sm.put('modelV2', model_v2(*self.model_lanes, big=self.big))
     plan = self.tp.plan(self.sm, scene(objects, available), True, self.shadow, self.driver_signals, paint=self.paint,
                         paint_rule=self.paint_rule, inputs_valid=self.inputs_valid, long_control=self.long_control).as_reader().turnpilotPlan
     a = min(plan_accel(plan.accelCap, plan.speedCap, self.v), (self.cruise - self.v) / 2., 1.5)
@@ -320,12 +322,12 @@ def test_enabled_plan_has_no_fault():
 def test_waits_for_the_detector_before_acting():
   # TurnPilot turned on with no detections yet (modeld loads the detector only while disengaged): no desire, no lane
   # change, no turn cap, and no handback either, since nothing has stopped
-  sim = Sim([(200., "turn", "left"), (1500., "turn", "right")])
-  for _ in range(int(20. / DT_MDL)):
+  sim = Sim([(150., "turn", "left"), (1500., "turn", "right")])
+  for _ in range(int(DETECTOR_START_DEADLINE_S / DT_MDL) - 1):
     plan = sim.step(available=False)
     assert plan.state == State.unavailable and plan.reason == WAITING_REASON and plan.handback == Handback.none
     assert plan.desire == Desire.none and plan.laneChange == LaneChange.none and plan.speedCap == NO_SPEED_CAP
-  assert sim.s > 220.  # drove past the turn, nothing held it
+  assert sim.s > 170.  # drove past the turn, nothing held it
   plan = sim.step()  # first detections: acting
   assert plan.state != State.unavailable and plan.handback == Handback.none
 
@@ -653,3 +655,68 @@ def test_detector_back_after_a_stop_on_the_approach_keeps_the_turn():
   assert sim.s > 300.
   assert not any(p.tooFastToTurn for _, _, p in sim.trace)
   assert rising(sim.trace[stop:], 'desire', Desire.turnLeft)
+
+
+def test_detector_that_never_starts_hands_back():
+  # no pkl, a detector that fails to load, or a driving model with no detector: never a fresh detection. Past
+  # DETECTOR_START_DEADLINE_S of modeld running, that is a handback (selfdrived: soft disable while engaged, no engaging)
+  sim = Sim([(400., "turn", "left"), (1500., "turn", "right")])
+  sim.model_running = False  # modeld loading the detector: not counted
+  for _ in range(int(2 * DETECTOR_START_DEADLINE_S / DT_MDL)):
+    assert sim.step(available=False).handback == Handback.none
+  sim.model_running = True
+  plans = [sim.step(available=False) for _ in range(int((DETECTOR_START_DEADLINE_S + 5.) / DT_MDL))]
+  first = next(i for i, p in enumerate(plans) if p.handback != Handback.none)
+  assert abs((first + 1) * DT_MDL - DETECTOR_START_DEADLINE_S) <= 1.5 * DT_MDL
+  assert all(p.handback == Handback.noDetector and p.state == State.unavailable for p in plans[first:])
+  assert plans[-1].reason == "detector not running: take control"
+  assert all(p.desire == Desire.none and p.laneChange == LaneChange.none for p in plans)
+  # it starts after all: acting
+  assert sim.step().handback == Handback.none and sim.trace[-1][2].state != State.unavailable
+
+
+def test_fault_in_a_detector_gap_keeps_the_stop_and_the_handback():
+  # stopped short of a pedestrian, the detector goes quiet and the stop is carried. One failed frame in the gap must not
+  # drop the carried stop, nor forget that the detector ran (its handback would never come)
+  x_ped = 200.
+  sim = Sim([(1500., "turn", "right")])
+  def pedestrian(sim):
+    return ({'cls': 'pedestrian', 'x': x_ped - sim.s, 'y': 0.1, 'vx': 0., 'vy': 0., 'inPath': True},)
+  for _ in range(int(40. / DT_MDL)):
+    sim.step(pedestrian(sim))
+  assert sim.trace[-1][2].shouldStop and sim.v == 0.
+  for _ in range(6):
+    assert sim.step(available=False).shouldStop
+  sim.tp.update = mock.Mock(side_effect=RuntimeError("synthetic failure"))
+  assert sim.step(available=False).fault == Fault.error
+  del sim.tp.update
+  plans = [sim.step(available=False) for _ in range(int(10. / DT_MDL))]
+  assert all(p.shouldStop for p in plans) and sim.s < x_ped - PED_STOP_GAP_M + 1.
+  assert plans[-1].handback == Handback.detectorStopped
+  # failing on every frame: the disabled plans still carry the stopped detector's handback, by its deadline
+  sim = Sim([(1500., "turn", "right")])
+  sim.run(3.)
+  sim.tp.update = mock.Mock(side_effect=RuntimeError("synthetic failure"))
+  plans = [sim.step(available=False) for _ in range(int(3. / DT_MDL))]
+  assert all(p.fault == Fault.error and p.state == State.disabled for p in plans)
+  first = next(i for i, p in enumerate(plans) if p.handback != Handback.none)
+  assert abs((first + 1) * DT_MDL - (DETECTOR_DEADLINE_S - STALE_S)) <= 1.5 * DT_MDL
+  assert all(p.handback == Handback.detectorStopped for p in plans[first:])
+  # with the detector running, a failing frame is only the fault
+  assert sim.step().handback == Handback.none
+
+
+def test_model_fallback_outlives_turnpilotd():
+  # TurnPilot turned off and on runs a new turnpilotd, which never saw the big model: modeld's ChestnutActive (False:
+  # the big model isn't running this drive) still hands back, with no route cancel (the first process did that)
+  sim = Sim([(400., "turn", "left"), (1500., "turn", "right")])
+  sim.tp.big_model_failed(enabled=True)
+  plans = [sim.step() for _ in range(int(5. / DT_MDL))]
+  assert all(p.handback == Handback.modelFellBack and p.desire == Desire.none and p.laneChange == LaneChange.none for p in plans)
+  assert not sim.tp.cancel_route
+  # in the process that drove the route, the param read first is the fallback as much as modelV2 is: the route is cancelled
+  sim = Sim([(400., "turn", "left"), (1500., "turn", "right")])
+  sim.big = True
+  sim.run(2.)
+  sim.tp.big_model_failed(enabled=True)
+  assert sim.step().handback == Handback.modelFellBack and sim.tp.cancel_route

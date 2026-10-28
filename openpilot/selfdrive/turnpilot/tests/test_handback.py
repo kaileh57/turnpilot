@@ -71,6 +71,7 @@ def test_model_fallback_soft_disables_then_engages_on_the_small_model():
 def test_never_a_silent_disengage():
   # every way into a handback while engaged goes through a soft disable with its own event
   for handback, event in ((Handback.detectorStopped, EventName.turnpilotDetectorStopped),
+                          (Handback.noDetector, EventName.turnpilotNoDetector),
                           (Handback.modelFellBack, EventName.turnpilotModelFellBack)):
     sd = Selfdrived()
     sd.step(plan())
@@ -106,3 +107,18 @@ def test_the_driver_reads_turnpilots_alert_on_a_fallback():
   assert shown([(True, Handback.modelFellBack)]) == "TurnPilot unavailable: driving model fell back"
   assert shown([(True, Handback.none), (True, Handback.modelFellBack)]) == "TurnPilot unavailable: driving model fell back"
   assert shown([(True, Handback.none)]) == "Big Model Failed"  # TurnPilot off or in shadow mode: upstream's, unchanged
+
+
+def test_detector_that_never_started_is_loud_and_blocks_engaging():
+  # disengaged when the deadline passes: its alert, and engaging is refused (the refuse chime) while it lasts
+  sd = Selfdrived(engaged=False)
+  sd.step(plan(Handback.noDetector))
+  assert sd.events.names == [EventName.turnpilotNoDetector]
+  assert set(sd.run(plan(Handback.noDetector), 1., engage=True)) == {State.disabled}
+  assert sd.run(plan(), 0.1, engage=True)[-1] == State.enabled
+  # engaged: the soft disable, with TurnPilot's handback chime
+  sd = Selfdrived()
+  states = sd.run(plan(Handback.noDetector), SOFT_DISABLE_TIME + 1.)
+  assert states[0] == State.softDisabling and states[-1] == State.disabled
+  alert = EVENTS[EventName.turnpilotNoDetector][ET.SOFT_DISABLE](None, None, None, False, int(SOFT_DISABLE_TIME / DT_CTRL), None)
+  assert "detector not running" in alert.alert_text_2 and alert.audible_alert == log.SelfdriveState.AudibleAlert.tpHandback

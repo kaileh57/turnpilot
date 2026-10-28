@@ -137,6 +137,7 @@ struct OnroadEvent @0xc4fa6047f024e718 {
     turnpilotWrongLane @107;  # turnpilotPlan.laneMismatch
     turnpilotDetectorStopped @108;  # TurnPilot: the detector stopped, hand back to the driver
     turnpilotModelFellBack @109;    # TurnPilot: modeld fell back to the small model, which TurnPilot can't navigate on
+    turnpilotNoDetector @113;       # TurnPilot: the detector never started (no pkl, a failed load), hand back to the driver
 
     # TurnPilot: a planned lane change is coming (chime, countdown), and one was aborted before it started
     turnpilotLaneChangeLeft @110;

@@ -27,6 +27,7 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
     none @0;
     detectorStopped @1;  # the detector produced nothing fresh within its deadline
     modelFellBack @2;    # modeld fell back from the big driving model to the small one
+    noDetector @3;       # the detector never produced a result after TurnPilot was turned on
   }
   enum LaneChange {
     none @0;

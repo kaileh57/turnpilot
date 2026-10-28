@@ -77,13 +77,13 @@ class LoopSM:
     return self.checks(self.frame)
 
 
-def run_main(frames, failing_frames=0, tracker=None, checks=lambda frame: True):
+def run_main(frames, failing_frames=0, tracker=None, checks=lambda frame: True, **params):
   sent, sm = [], LoopSM(failing_frames, checks)
   pm = mock.MagicMock()
   pm.send.side_effect = lambda s, msg: sent.append((s, msg.as_reader()))
   rk = mock.MagicMock()
   rk.keep_time.side_effect = [None] * (frames - 1) + [Stop()]
-  params = FakeParams(TurnPilotEnabled=True, CarParams=car_params_bytes())
+  params = FakeParams(TurnPilotEnabled=True, CarParams=car_params_bytes(), **params)
   with mock.patch.object(messaging, 'SubMaster', return_value=sm), mock.patch.object(messaging, 'PubMaster', return_value=pm), \
        mock.patch.object(turnpilotd, 'Params', return_value=params), mock.patch.object(turnpilotd, 'Ratekeeper', return_value=rk), \
        mock.patch.object(turnpilotd, 'SceneTracker', return_value=tracker or mock.MagicMock()), \
@@ -127,3 +127,13 @@ def test_a_bad_input_frame_keeps_the_plan_valid():
   # and invalid from the start until the inputs first pass
   plans, _, _ = run_main(frames=5, checks=lambda frame: frame >= 3)
   assert [p.valid for p in plans] == [False, False, False, True, True]
+
+
+def test_a_model_fallback_before_this_process_still_hands_back():
+  # TurnPilot turned on after a fallback, or off and on after one: a new process. modeld's ChestnutActive says so
+  Handback = custom.TurnpilotPlan.Handback
+  plans, _, _ = run_main(frames=5, ChestnutActive=False)
+  assert all(p.turnpilotPlan.handback == Handback.modelFellBack for p in plans)
+  for active in (True, None):  # the big model running, or none expected (no chestnut): no fallback
+    plans, _, _ = run_main(frames=5, ChestnutActive=active)
+    assert all(p.turnpilotPlan.handback == Handback.none for p in plans)

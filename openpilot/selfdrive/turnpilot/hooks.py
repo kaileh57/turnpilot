@@ -46,7 +46,7 @@ def plan_events(sm, now: float | None = None) -> list[str]:
   """selfdrived's onroad event names from a fresh, valid turnpilotPlan (none while it is stale: a dead turnpilotd is
   processNotRunning already). sm is a SubMaster subscribed to turnpilotPlan.
   TurnPilot's alerts share one slot, at most one of them a frame, by this priority:
-  1. a handback (turnpilotDetectorStopped, turnpilotModelFellBack; handback.py): nothing here while one is set;
+  1. a handback (turnpilotDetectorStopped, turnpilotNoDetector, turnpilotModelFellBack; handback.py): nothing here while one is set;
   2. a fault (turnpilotUnavailable);
   3. too fast to turn (turnpilotTooFastToTurn);
   4. a planned lane change (turnpilotLaneChangeLeft/Right, LaneChangeEvents);
