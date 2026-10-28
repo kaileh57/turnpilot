@@ -39,7 +39,7 @@ from openpilot.tools.sim.bridge.beamng.driver import GasTaps, ground_truth_green
 from openpilot.tools.sim.bridge.beamng.pose import beamng_quat
 from openpilot.tools.sim.bridge.beamng.scenario import heading_quat
 from openpilot.tools.sim.bridge.beamng.scenarios import score
-from openpilot.tools.sim.bridge.beamng.scenarios.catalog import DATA_JSON, SCENARIOS, Plan, build, hold_distance
+from openpilot.tools.sim.bridge.beamng.scenarios.catalog import DATA_JSON, ROLL_FRACTION, SCENARIOS, Plan, build, hold_distance
 from openpilot.tools.sim.bridge.beamng.scenarios.director import Director, sweep
 from openpilot.tools.sim.bridge.beamng.scenarios.timing import oncoming_should_release, walker_should_start
 
@@ -47,7 +47,7 @@ SETTLE_S = 4.         # after the teleport: the car is back in D and the GPS has
 CLEAR_TIMEOUT_S = 5.  # wait this long for navd to drop the old route
 ROUTE_TIMEOUT_S = 30.
 ENGAGE_TIMEOUT_S = 30.
-ROLL_FRACTION = 0.8   # the driver rolls up to this much of the set speed before engaging, as gate1 does
+
 SERVICES = ['turnpilotPlan', 'selfdriveState', 'carState', 'navInstruction', 'navRoute', 'modelV2', 'turnpilotLights']
 OUT_ROOT = os.path.expanduser("~/turnpilot-artifacts/scenarios")
 POSE_FIELDS = ["wall_s", "t_s", "x", "y", "z", "qx", "qy", "qz", "qw"]  # route_drive's, which chase_render.py reads

@@ -52,11 +52,21 @@ Each scenario is an `Entry` in `catalog.py`. The builders there turn an entry in
 `lane_change` and `occupied_lane` read a JSON list, by default `lane_change_junctions.json` next to this file. Pick another file with `--data` and an entry with `--entry NAME`:
 
 ```json
-{"name": "wpTown_5_left", "junction": [-600.7, 220.9], "turn": "left",
- "spawn": [-357.39, 472.27, 89.98], "heading_deg": -134.3, "dest": [-558.34, 178.34, 104.36], "speed_kph": 45}
+{"name": "autojunction_1311_left", "junction": [-885.9, -407.3], "turn": "left",
+ "spawn": [-627.09, -201.98, 93.2], "heading_deg": -177.1, "dest": [-841.58, -447.58, 96.79], "speed_kph": 45}
 ```
 
-Positions are BeamNG world meters and `heading_deg` is counterclockwise from east. `junction` and `turn` are needed only for the pacer. The two entries shipped here come from the road graph, and both spawn 350 m out in the right lane of a two-lanes-each-way approach to a left turn. The set speed is 45 km/h because DesireHelper changes lanes only above 20 mph.
+Positions are BeamNG world meters and `heading_deg` is counterclockwise from east. `junction` and `turn` are needed for the pacer and for the checks against the mapped controls. The set speed is 45 km/h because DesireHelper changes lanes only above 20 mph. The two entries shipped here come from the road graph:
+
+- `autojunction_1311_left`, the default: a divided road with two lanes our way, spawn 350 m out in the right lane. The only mapped control on the approach is the junction's own stop sign, so nothing stops the car in the lane change window (250 to 75 m before the turn at 45 km/h).
+- `wpTown_5_left`: a four-lane road, spawn 460 m out in the right lane. A signal stands 160 m before the turn, inside the window, so the car stops there. It is kept for the lane planner's work on a change before a mapped stop. `DR290_1_left` was dropped: its approach has a signal in the window too, and the nearest spawn clear of the mapped controls is 600 m out, behind four signals.
+
+### Mapped controls
+
+The sim tiles (`west_coast_usa_signals`) map every signal and stop sign of the level, from the committed `../wcusa_map_node_signals.json` (`../mapsignals.py`). The catalog reads the same file:
+
+- Every spawn is more than `spawn_clear_m` before each control on its approach (the rolling start, a second to engage, then a map stop's engage distance: 65 m at 30 km/h, 118 m at 45 km/h), or at least 15 m past it. Otherwise the rolling start runs over the line before openpilot is engaged to stop for it ("Stop Line Passed"). A turn scenario's spawn moves to the nearest clear spot (`notes.approach_m`); a data entry that isn't clear is refused.
+- A plan's notes say which controls are on its approach (`controls_from_spawn`, m from the spawn), the junction's own control and its stop line (`junction_control`, `stop_line_m`), and for the data scenarios the controls that stop the car in the lane change window (`controls_in_window`).
 
 ## Results
 

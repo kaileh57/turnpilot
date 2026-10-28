@@ -1,17 +1,7 @@
 [
   {
-    "name": "wpTown_5_left",
-    "note": "4-lane road (--++) into the signalized junction at (-600.7, 220.9); spawn 350 m out in the right lane, so the left turn needs one lane change left",
-    "junction": [-600.7, 220.9],
-    "turn": "left",
-    "spawn": [-357.39, 472.27, 89.98],
-    "heading_deg": -134.3,
-    "dest": [-558.34, 178.34, 104.36],
-    "speed_kph": 45
-  },
-  {
     "name": "autojunction_1311_left",
-    "note": "divided road, two lanes our way (++), 530 m straight into autojunction_1311; spawn 350 m out in the right lane",
+    "note": "divided road, two lanes our way (++), 530 m straight into autojunction_1311; spawn 350 m out in the right lane. The only mapped control on the approach is the junction's own stop sign, 12.6 m before it: the lane change window (250-75 m at 45 km/h) is clear",
     "junction": [-885.9, -407.3],
     "turn": "left",
     "spawn": [-627.09, -201.98, 93.2],
@@ -20,13 +10,13 @@
     "speed_kph": 45
   },
   {
-    "name": "DR290_1_left",
-    "note": "4-lane road (--++) through wpTown_5 into the junction DR290_1 at (-389.0, 433.1), from demo_junctions.py; spawn 364 m out in the right lane, so the left turn needs one lane change left",
-    "junction": [-389.0, 433.1],
+    "name": "wpTown_5_left",
+    "note": "4-lane road (--++) into the signalized junction at (-600.7, 220.9); spawn 460 m out in the right lane (147 m before trafficLight 14, clear of its line), so the left turn needs one lane change left. trafficLight 10 stands 160 m before the turn, inside the lane change window: the car stops in the window, for the lane planner's work on a change before a mapped stop",
+    "junction": [-600.7, 220.9],
     "turn": "left",
-    "spawn": [-642.5, 171.8, 115.23],
-    "heading_deg": 45.1,
-    "dest": [-445.6, 489.6, 96.0],
+    "spawn": [-279.49, 550.06, 75.17],
+    "heading_deg": -135.2,
+    "dest": [-558.34, 178.34, 104.36],
     "speed_kph": 45
   }
 ]

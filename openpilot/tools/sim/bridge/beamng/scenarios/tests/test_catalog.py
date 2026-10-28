@@ -1,3 +1,4 @@
+import json
 import math
 import os
 
@@ -31,9 +32,10 @@ def test_every_scenario_builds(graph):
     assert plan.dest is not None, name
     near = min(math.hypot(*(graph.pos[j][:2] - np.asarray(plan.spawn[:2]))) for j in graph.junctions())
     assert near > 20.0, f"{name} spawns {near:.0f} m from a junction"
-    if plan.junction is not None:  # the car starts on its approach, facing the junction
-      bearing = math.atan2(plan.junction[1] - plan.spawn[1], plan.junction[0] - plan.spawn[0])
-      assert abs(math.degrees(wrap(bearing - plan.heading))) < 30.0, name
+    if plan.junction is not None:  # the car starts on its approach, facing the junction (along it: approaches bend)
+      toward, s, off = catalog.approach_arm(graph, plan.spawn, plan.heading, plan.junction)
+      _, _, h = catalog.project(toward, np.asarray(plan.spawn))
+      assert abs(math.degrees(wrap(h - plan.heading))) < 10.0 and abs(off) < 8.0, name
 
 
 def test_crosswalk_junctions(graph):
@@ -89,7 +91,7 @@ def test_standing_pedestrian_in_the_lane(graph):
   assert 60.0 < x < 120.0 and abs(y) < 0.5
 
 
-@pytest.mark.parametrize("entry", ['wpTown_5_left', 'autojunction_1311_left'])
+@pytest.mark.parametrize("entry", ["wpTown_5_left", "autojunction_1311_left"])
 def test_pacer_lane(graph, entry):
   plan = catalog.build('occupied_lane', graph, entry=entry)
   pacer = plan.actors[0]
@@ -117,4 +119,79 @@ def test_every_scenario_carries_a_road_model_and_starts_on_its_own_side(graph):
     plan = catalog.build(name, graph)
     assert plan.road is not None and plan.road['links'], name
     past = score.oncoming_offsets([{'x': plan.spawn[0], 'y': plan.spawn[1], 'heading': plan.heading}], plan.road)[0]
+    if past is None and plan.notes.get('data_entry') == 'autojunction_1311_left':
+      continue  # a divided road, two lanes our way: no oncoming lane beside it
     assert past is not None and past < -0.5, f"{name}: the spawn is {past} m left of the road's divider"
+
+
+# *** the signal tiles' controls (wcusa_map_node_signals.json, which the sim tiles were built from) ***
+def data_entries():
+  with open(catalog.DATA_JSON) as f:
+    return [d['name'] for d in json.load(f)]
+
+
+def every_plan(graph):
+  for name, e in catalog.SCENARIOS.items():
+    for entry in (data_entries() if e.kind == 'data' else ['']):
+      if e.kind != 'route':  # route_demo drives a whole route from the bridge's default spawn
+        yield name, entry, catalog.build(name, graph, entry=entry)
+
+
+def test_mapped_controls_load_with_their_direction(graph):
+  controls = catalog.mapped_controls(graph)
+  assert len(controls) > 300 and {c.kind for c in controls} == {'signal', 'stop'}
+  tl46 = next(c for c in controls if c.instance == 'trafficLight 46')  # unprotected_left's own signal, DR297_2 -> DR307_1
+  assert math.hypot(tl46.x + 655.7, tl46.y - 470.6) < 0.5
+  b, a = graph.pos['DR307_1'][:2], graph.pos['DR297_2'][:2]
+  assert abs(wrap(tl46.heading - math.atan2(b[1] - a[1], b[0] - a[0]))) < 1e-6
+
+
+def test_no_spawn_starts_inside_braking_distance_of_a_mapped_control(graph):
+  # BeamNG smoke 2026-10-28: lane_change, occupied_lane and unprotected_left_visible spawned 20-37 m before a mapped signal,
+  # and the rolling start ran over its line ("Stop Line Passed") before openpilot was engaged to stop for it. Every spawn
+  # is more than the roll plus a map stop's engage distance before each control on its approach, or past it
+  for name, entry, plan in every_plan(graph):
+    clear = catalog.spawn_clear_m(plan.speed_kph)
+    assert clear > 60.
+    for d, c in plan.notes['controls_from_spawn']:
+      assert d >= clear or d <= -catalog.SPAWN_PAST_M, f"{name} {entry}: {c} {d:.0f} m from the spawn"
+
+
+def test_turn_scenarios_know_their_junctions_own_control(graph):
+  for name in ('ped_crosswalk_right', 'unprotected_left', 'unprotected_left_visible'):
+    plan = catalog.build(name, graph)
+    assert plan.notes['junction_control'] == 'signal', name
+    assert 10. < plan.notes['stop_line_m'] < 14., name  # the mapped line, m before the junction along the approach
+
+
+def test_lane_change_entries_have_no_mapped_control_in_the_window(graph):
+  # BeamNG smoke 2026-10-28: wpTown_5_left's approach has a signal 160 m before the turn, inside the 250-75 m lane change
+  # window at 45 km/h: the car stood at it and was below DesireHelper's minimum speed for most of the window. The default
+  # entry (the one a plain run takes) and every entry but the one kept for the lane planner's stop-in-window work are clear
+  first = data_entries()[0]
+  for name in ('lane_change', 'occupied_lane'):
+    plan = catalog.build(name, graph)
+    assert plan.notes['data_entry'] == first and plan.notes['controls_in_window'] == [], name
+  for entry in data_entries():
+    plan = catalog.build('lane_change', graph, entry=entry)
+    assert (plan.notes['controls_in_window'] == []) != (entry == 'wpTown_5_left'), entry
+
+
+def test_a_data_entry_spawned_before_a_control_is_refused(graph, tmp_path):
+  with open(catalog.DATA_JSON) as f:
+    items = json.load(f)
+  bad = dict(items[0], name='too_close')
+  near = next(d for d in data_entries() if d == 'wpTown_5_left')
+  bad.update(next(i for i in items if i['name'] == near))
+  bad['spawn'] = [-357.39, 472.27, 89.98]  # 37 m before trafficLight 14
+  bad['heading_deg'] = -134.3
+  p = tmp_path / 'data.json'
+  p.write_text(json.dumps([bad]))
+  with pytest.raises(ValueError, match="trafficLight 14"):
+    catalog.build('lane_change', graph, data_path=str(p))
+
+
+def test_the_spawn_clearance_rolls_as_the_bridge_does():
+  pytest.importorskip("beamngpy")
+  from openpilot.tools.sim.bridge.beamng.bridge import ROLLING_START_ACCEL
+  assert catalog.ROLL_ACCEL == ROLLING_START_ACCEL

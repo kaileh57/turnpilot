@@ -6,6 +6,12 @@ Turn scenarios name a signalized junction from piston_assets.md; the junctions w
 turn in the road graph. Data scenarios (lane_change, occupied_lane) read a JSON list of
   {"name", "spawn": [x, y, z], "heading_deg", "dest": [x, y, z], "junction": [x, y], "turn": "left"|"right", "speed_kph"}
 (junction, turn and speed_kph optional), from lane_change_junctions.json next to this file unless --data says otherwise.
+
+The sim tiles (west_coast_usa_signals) map a stop line for every signal and stop sign of the level, from the committed
+wcusa_map_node_signals.json (mapsignals.py). Every spawn is clear of them: more than the rolling start plus a map stop's
+engage distance before each one on its approach (spawn_clear_m), or past it, so the car never runs over a line before
+openpilot is engaged to stop for it (the smoke's "Stop Line Passed"). A turn scenario's spawn moves to the nearest
+clear spot, a data entry that isn't clear is refused.
 """
 import json
 import math
@@ -14,12 +20,15 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from openpilot.selfdrive.turnpilot.control_tracker import DROP_PAST_M
 from openpilot.selfdrive.turnpilot.lane_planner import LANE_WIDTH, lane_change_window
+from openpilot.selfdrive.turnpilot.map_controls import MAP_STOP_DECEL, PROTECT_BEFORE_M, engage_distance
 from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M
 from openpilot.tools.sim.bridge.beamng.roadgraph import RoadGraph, wrap
 from openpilot.tools.sim.bridge.beamng.scenarios.timing import WALK_SPEED, arc_lengths, point_at
 
 DATA_JSON = os.path.join(os.path.dirname(__file__), "lane_change_junctions.json")
+SIGNALS_JSON = os.path.join(os.path.dirname(os.path.dirname(__file__)), "wcusa_map_node_signals.json")
 PREFIX = "tp_sc_"  # every actor a scenario spawns; the cleanup sweep deletes anything named like this
 TURN_TOLERANCE_DEG = 15.
 STRAIGHT_TOLERANCE_DEG = 25.
@@ -29,6 +38,13 @@ WALK_AWAY_M = 10.        # after crossing, the walker goes this far along the fa
 PACER_END_BEFORE_M = 50.  # the pacer's lane ends this far before the junction
 CLEAR_OF_JUNCTION_M = 25.  # a spawn this close to another junction moves up the approach
 ROAD_MARGIN_M = 150.     # the road model covers the box around spawn, junction and destination, this much bigger
+ROLL_FRACTION = 0.8      # the driver rolls up to this much of the set speed before engaging, as gate1 does (run.py)
+ROLL_ACCEL = 1.0         # m/s^2 of that roll (bridge.ROLLING_START_ACCEL)
+ENGAGE_LAG_S = 1.        # s from rolled to engaged (bridge.engage_step: the stalk once engageable)
+SPAWN_PAST_M = DROP_PAST_M  # a spawn more than spawn_clear_m before a control, or this far past it (the tracker drops it here)
+MIN_APPROACH_M = 60.     # a turn scenario's spawn no closer to its junction than this
+LINE_LATERAL_M = 8.      # a control's stop line within this of the approach's centreline is on it (lanes either side)
+LINE_ALIGNED_DEG = 40.   # ...if it controls traffic within this of the approach's direction
 
 
 @dataclass(frozen=True)
@@ -77,6 +93,18 @@ SCENARIOS = {
   # DR249_3 about 850 m east-southeast
   'route_demo': Entry('route', spawn=(-888.82, 659.66, 111.4), heading_deg=0., dest=(-84.9, 377.0, 101.5), speed_kph=40., timeout_s=600.),
 }
+
+
+@dataclass(frozen=True)
+class MappedControl:
+  x: float
+  y: float
+  heading: float  # rad, the direction of the traffic it controls
+  kind: str       # 'signal' or 'stop'
+  instance: str   # the level's signal instance ('trafficLight 46', 'stop 71')
+
+  def __str__(self):
+    return self.instance
 
 
 @dataclass
@@ -185,6 +213,71 @@ def lane_pose(arm, s: float, lanes: str, radius: float, which: str):
   return (float(xy[0]), float(xy[1]), float(p[2]) + 0.3), heading
 
 
+def mapped_controls(graph: RoadGraph, path: str = SIGNALS_JSON) -> list[MappedControl]:
+  """The level's stop lines as the sim tiles map them (mapsignals.py): mapNodeSignals[a][b] controls traffic a -> b, its
+  pos the stop line. A pair whose nodes the road graph lacks has no direction here, and is left out."""
+  with open(path) as f:
+    signals = json.load(f)['mapNodeSignals']
+  out = []
+  for a, by_b in signals.items():
+    for b, items in by_b.items():
+      if a not in graph.pos or b not in graph.pos:
+        continue
+      h = heading_of(graph.pos[a], graph.pos[b])
+      for it in items:
+        kind = 'signal' if it['instance'].startswith('trafficLight') else 'stop'
+        out.append(MappedControl(float(it['pos']['x']), float(it['pos']['y']), h, kind, it['instance']))
+  return out
+
+
+def controls_along(pts, controls) -> list[tuple[float, MappedControl]]:
+  """(arc length, control) of the controls on a polyline in its direction of travel, nearest its start first: the line
+  within LINE_LATERAL_M of it, for traffic its way. Lines that project onto an end are past it (another approach's)."""
+  pts = np.asarray(pts, dtype=float)
+  total = float(arc_lengths(pts)[-1])
+  out = []
+  for c in controls:
+    if min(np.hypot(pts[:, 0] - c.x, pts[:, 1] - c.y)) > total:
+      continue
+    s, off, h = project(pts, np.array([c.x, c.y]))
+    if 0.5 < s < total - 0.5 and abs(off) < LINE_LATERAL_M and abs(math.degrees(wrap(c.heading - h))) < LINE_ALIGNED_DEG:
+      out.append((s, c))
+  return sorted(out, key=lambda sc: sc[0])
+
+
+def spawn_clear_m(speed_kph: float) -> float:
+  """m a spawn must be before a mapped control: the rolling start up to ROLL_FRACTION of the set speed, ENGAGE_LAG_S at
+  that speed until openpilot is engaged, and from there a map stop's engage distance (map_controls.engage_distance: its
+  comfortable curve, a second's lag and 15 m to spare). BeamNG smoke 2026-10-28: 20.5 m ran over the line."""
+  v = ROLL_FRACTION * speed_kph / 3.6
+  return v ** 2 / (2. * ROLL_ACCEL) + ENGAGE_LAG_S * v + engage_distance(v)
+
+
+def spawn_conflicts(s_spawn: float, along, speed_kph: float) -> list[tuple[float, MappedControl]]:
+  """(m from the spawn, control) of the controls along the approach too close to it: ahead within spawn_clear_m, or behind
+  by less than SPAWN_PAST_M."""
+  clear = spawn_clear_m(speed_kph)
+  return [(s - s_spawn, c) for s, c in along if -SPAWN_PAST_M < s - s_spawn < clear]
+
+
+def junction_control(along, total: float) -> tuple[str, float] | None:
+  """(kind, m before the junction) of the junction's own control on its approach: a line within PROTECT_BEFORE_M before
+  it (map_controls.protected's reach), or None."""
+  own = [(total - s, c) for s, c in along if -2. < total - s <= PROTECT_BEFORE_M]
+  if not own:
+    return None
+  d, c = min(own, key=lambda dc: dc[0])
+  return c.kind, round(float(d), 1)
+
+
+def window_controls(along, total: float, v: float) -> list[tuple[float, str]]:
+  """(m before the junction, instance) of the controls that stop the car in the lane change window, or so close before it
+  that it isn't back up to speed when the window opens (at MAP_STOP_DECEL, as gently as it braked)."""
+  start, end = lane_change_window(v)
+  reach = start + v ** 2 / (2. * MAP_STOP_DECEL)
+  return [(round(float(total - s), 1), c.instance) for s, c in along if end < total - s <= reach]
+
+
 @dataclass
 class Junction:
   node: str
@@ -280,9 +373,9 @@ def project(pts, p) -> tuple[float, float, float]:
   return best[1], best[2], best[3]
 
 
-def pacer_lane(graph: RoadGraph, spawn, heading: float, junction_xy, direction: str):
-  """The lane next to the car's toward the turn side, from 30 m behind the spawn to PACER_END_BEFORE_M before the
-  junction, and how far along it the junction is."""
+def approach_arm(graph: RoadGraph, spawn, heading: float, junction_xy):
+  """(the approach the spawn is on, in the car's direction of travel and ending at the junction; the spawn's arc length
+  along it; its offset right of the centreline)."""
   j = graph.nearest_junction(*junction_xy)
   best = None
   for a in graph.adj[j]:
@@ -294,7 +387,13 @@ def pacer_lane(graph: RoadGraph, spawn, heading: float, junction_xy, direction: 
       best = (toward, s, off)
   if best is None:
     raise ValueError(f"the spawn isn't on an approach to {j}")
-  toward, s_spawn, off = best
+  return best
+
+
+def pacer_lane(graph: RoadGraph, spawn, heading: float, junction_xy, direction: str):
+  """The lane next to the car's toward the turn side, from 30 m behind the spawn to PACER_END_BEFORE_M before the
+  junction, and how far along it the junction is."""
+  toward, s_spawn, off = approach_arm(graph, spawn, heading, junction_xy)
   lane = offset_polyline(toward, off + (-LANE_WIDTH if direction == 'left' else LANE_WIDTH))
   start, total = max(s_spawn - 30., 0.), float(arc_lengths(lane)[-1])
   return section(lane, start, total - PACER_END_BEFORE_M), total - start
@@ -304,13 +403,25 @@ def pacer_lane(graph: RoadGraph, spawn, heading: float, junction_xy, direction: 
 def _turn_plan(name: str, e: Entry, graph: RoadGraph) -> Plan:
   jn = find_turn(graph, e.junction, e.turn, from_heading=None if e.from_heading_deg is None else math.radians(e.from_heading_deg))
   lanes, radius = graph.lanes_toward(jn.node, jn.a), graph.radius[jn.a]
-  s = e.approach_m
-  while True:
+  toward = jn.approach[::-1]  # in the car's direction of travel, ending at the junction
+  total = float(arc_lengths(toward)[-1])
+  along = controls_along(toward, mapped_controls(graph))
+  # the spawn approach_m out, else the nearest clear of other junctions and of the mapped controls: toward the junction
+  # first (as far as MIN_APPROACH_M), then further out
+  tries = list(np.arange(e.approach_m, MIN_APPROACH_M - 1e-6, -10.)) + list(np.arange(e.approach_m + 10., total - 5., 10.))
+  for s in tries:
     spawn, heading = lane_pose(jn.approach, s, lanes, radius, ego_lane(e.turn))
-    if s < 60. or not any(np.hypot(*(graph.pos[j][:2] - spawn[:2])) < CLEAR_OF_JUNCTION_M for j in graph.junctions()):
+    if not any(np.hypot(*(graph.pos[j][:2] - spawn[:2])) < CLEAR_OF_JUNCTION_M for j in graph.junctions()) and \
+       not spawn_conflicts(total - s, along, e.speed_kph):
       break
-    s -= 10.
-  actors, notes = [], {'junction_node': jn.node, 'approach_m': s}
+  else:
+    raise ValueError(f"{name}: no spawn on the approach to {jn.node} clear of the junctions and the mapped controls " +
+                     f"({[(round(float(total - s), 1), str(c)) for s, c in along]} m before it)")
+  s = float(s)
+  actors, notes = [], {'junction_node': jn.node, 'approach_m': s,
+                       'controls_from_spawn': [(round(float(sc - (total - s)), 1), str(c)) for sc, c in along]}
+  own = junction_control(along, total)
+  notes['junction_control'], notes['stop_line_m'] = own if own is not None else ('none', None)
   if e.kind == 'straight':
     if jn.straight is None:
       dest = None
@@ -358,6 +469,18 @@ def _data_plan(name: str, e: Entry, graph: RoadGraph, data: dict) -> Plan:
   junction = tuple(float(v) for v in data['junction']) if data.get('junction') else None
   speed = float(data.get('speed_kph', e.speed_kph))
   actors, notes = [], {'data_entry': data['name']}
+  if junction is not None:
+    toward, s_spawn, _ = approach_arm(graph, spawn, heading, junction)
+    total = float(arc_lengths(toward)[-1])
+    along = controls_along(toward, mapped_controls(graph))
+    bad = spawn_conflicts(s_spawn, along, speed)
+    if bad:
+      raise ValueError(f"{name} entry {data['name']}: spawns {[(round(float(d), 1), str(c)) for d, c in bad]} m from mapped " +
+                       f"controls, inside {spawn_clear_m(speed):.0f} m (the roll and a map stop's engage distance): move it")
+    notes['controls_from_spawn'] = [(round(float(s - s_spawn), 1), str(c)) for s, c in along]
+    notes['controls_in_window'] = window_controls(along, total, speed / 3.6)
+    own = junction_control(along, total)
+    notes['junction_control'], notes['stop_line_m'] = own if own is not None else ('none', None)
   if e.actor == 'pacer':
     if junction is None:
       raise ValueError("occupied_lane needs a junction in its data entry")
