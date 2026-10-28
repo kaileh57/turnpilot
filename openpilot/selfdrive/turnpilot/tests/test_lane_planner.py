@@ -1,11 +1,15 @@
+import json
+from pathlib import Path
+
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal import custom, log
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S
-from openpilot.selfdrive.turnpilot.lane_planner import (LC_ABORT_COOLDOWN_S, LC_ABORT_SETTLE_S, LC_CONFIRM_FRAMES, LC_REQUEST_TIMEOUT_S,
+from openpilot.selfdrive.turnpilot.lane_planner import (LANE_UNKNOWN_REASON, LC_ABORT_COOLDOWN_S, LC_ABORT_SETTLE_S, LC_CONFIRM_FRAMES, LC_REQUEST_TIMEOUT_S,
                                                         LC_SIGNAL_TIMEOUT_S, LC_WARN_S, YELLOW_HOLD_S, LanePlanner, ModelLanes, Phase,
-                                                        YellowHold, change_blocker, desired_changes, lane_change_window, lane_mismatch,
+                                                        YellowHold, change_blocker, desired_changes, ego_lane_index, lane_change_window,
+                                                        lane_mismatch,
                                                         lane_changes_needed, model_lanes, model_lanes_from_msg, stopped_in_lane,
                                                         target_lane_blocked)
 from openpilot.selfdrive.turnpilot.route_follower import LEFT, NOMINAL_ANGLE_DEG, RIGHT, Maneuver, classify
@@ -176,10 +180,12 @@ def test_target_lane_blocked_and_stopped_sides():
 
 class Drive:
   """A car on a road of lanes, with the real DesireHelper executing nav lane change requests."""
-  def __init__(self, lanes_left, lanes_right, v=15., driver_signals=False, paint=striped, paint_rule=True, lag=0):
+  def __init__(self, lanes_left, lanes_right, v=15., driver_signals=False, paint=striped, paint_rule=True, lag=0, curb_unpainted=False):
     """paint: (lanes left, lanes right) -> the four lines' paint where the car is now, or None for none read. lag: frames
-    the planner sees DesireHelper's state late by (turnpilotd isn't synced to modeld, whose modelV2 carries it)."""
+    the planner sees DesireHelper's state late by (turnpilotd isn't synced to modeld, whose modelV2 carries it).
+    curb_unpainted: the curb lane has no edge line, so one lane from the curb the model sees room there but no line."""
     self.lanes_left, self.lanes_right, self.v = lanes_left, lanes_right, v
+    self.curb_unpainted = curb_unpainted
     self.lag, self._lc_seen = lag, []
     self.paint = paint
     self.lp, self.dh = LanePlanner(paint_rule), DesireHelper()
@@ -188,7 +194,10 @@ class Drive:
     self.requests, self.prompts, self.offers, self.aborts, self.decisions = [], [], [], [], []
 
   def step(self, m, distance, objects=(), blinker=None, blindspot=None, maneuver_id=0, inputs_valid=True):
-    lanes = model_lanes(*road(self.lanes_left, self.lanes_right))
+    line_ys, probs, edges, stds = road(self.lanes_left, self.lanes_right)
+    if self.curb_unpainted and self.lanes_right == 1:
+      probs[3] = 0.05
+    lanes = model_lanes(line_ys, probs, edges, stds)
     left_blinker, right_blinker = blinker == LaneChange.left, blinker == LaneChange.right
     lc_state = self.dh.lane_change_state if not self.lag else \
       (self._lc_seen[-self.lag] if len(self._lc_seen) >= self.lag else LaneChangeState.off)
@@ -546,3 +555,94 @@ def test_wrong_lane_for_the_turn():
   assert lane_mismatch(right_turn, 40., (), 0., model_lanes(*road(1, 0)), 10.) == LaneMismatch.none
   assert lane_mismatch(right_turn, 40., (), 0., model_lanes(*road(0, 1)), 10.) == LaneMismatch.wrongLaneForTurn
 
+
+
+# BeamNG shakedown lane_change (wpTown_5_left, 2026-10-27): a left turn from a road of two lanes each way, a double solid
+# yellow centreline and no edge line on the curb lane. TurnPilot changed left once, into the turn lane, then again across
+# the double yellow, and drove ~100 m in the oncoming lane to the junction. Rows: modelV2 at SAMPLE_IDX, as logged.
+XING = json.loads(Path(__file__).with_name('lane_change_xing.json').read_text())['rows']
+XING_PRE = ([-4.68, -1.3, 1.96, 3.73], [0.79, 0.88, 0.11, 0.0], [-10.05, 2.74], [1.38, 0.5])   # 22.0 s, in the curb lane
+XING_POST = ([-4.94, -1.44, 2.0, 4.92], [0.55, 0.98, 0.69, 0.15], [-7.62, 6.39], [1.09, 0.88])  # 31.0 s, in the turn lane
+TWO_LANES_LEFT_TURN = ((("left",), True), (("straight", "right"), False))
+
+
+def test_an_unpainted_curb_side_is_unknown():
+  pre, post = model_lanes(*XING_PRE), model_lanes(*XING_POST)
+  # in the curb lane the trusted road edge is right beside the ego line: nothing that way, known
+  assert pre.right_known and ego_lane_index(2, pre, True) == 1
+  # one lane in, the next line out is unpainted but the trusted edge is a lane away: the model can't count that lane
+  assert counts(post) == (2, 0) and not post.right_known and ego_lane_index(2, post, True) is None
+  assert model_lanes(*road(1, 1)).right_known and model_lanes(*road(0, 0)).right_known
+  assert not model_lanes(*road(1, 1, edge_std=2.)).right_known  # an unsure edge: the paint alone can't say how many
+  assert not model_lanes_from_msg(messaging.new_message('modelV2').modelV2).right_known
+
+
+def test_logged_crossing_rows():
+  m = maneuver("turn", "left", TWO_LANES_LEFT_TURN)
+  pre, post = model_lanes(*XING_PRE), model_lanes(*XING_POST)
+  misread = paint(left=BW, right=BW)  # the double yellow misread broken white: the paint gate is the only other barrier
+  assert lane_changes_needed(m, pre, paint=misread) == 1  # the first, right, change
+  # after it: the curb side can't be counted, and the one change the two lanes ever need is done
+  assert desired_changes(m, post) == 0
+  assert desired_changes(m, post, done=1) == 0 and lane_changes_needed(m, post, paint=misread, done=1) == 0
+  # the model's two lanes to the left are the oncoming ones: the map's lane list has none there
+  assert change_blocker(LEFT, post, misread) == ''
+  assert change_blocker(LEFT, post, misread, nav_room=0) == 'noLane'
+
+
+def replay_xing(paint_fn):
+  lp, m = LanePlanner(), maneuver("turn", "left", TWO_LANES_LEFT_TURN)
+  out = []
+  for t, md, v, lb, rb, lcs, ly, lpr, ey, es in XING:
+    state = getattr(LaneChangeState, lcs if lcs in ('off', 'preLaneChange') else 'laneChange' + lcs)
+    d = lp.update(m, md, model_lanes(ly, lpr, ey, es), state, v, bool(lb), bool(rb), (), False, True, DT_MDL, paint_fn(t),
+                  maneuver_id=0)
+    out.append((t, d))
+  return lp, out
+
+
+def test_logged_crossing_replay_changes_once():
+  # every line misread broken white: only the lane planner itself stands between the car and the oncoming lane
+  lp, out = replay_xing(lambda t: paint(left=BW, right=BW))
+  first = [t for t, d in out if d.offer == LaneChange.left and t < 22.6]
+  assert first  # the change into the turn lane is still offered
+  first_end = next(t for t, _, _, _, _, lcs, *_ in XING if t > 23. and lcs == 'off')
+  second_start = next(t for t, _, _, _, _, lcs, *_ in XING if t > first_end and lcs == 'Starting')
+  between = [(t, d) for t, d in out if first_end <= t < second_start]
+  assert not [t for t, d in between if d.offer != LaneChange.none or d.lane_change != LaneChange.none], \
+    'a second change offered across the centreline'
+  assert not lp.lane_unknown  # dead reckoned: the turn lane, confirmed
+
+
+def test_unpainted_curb_two_way_road_changes_once():
+  # two lanes each way, the model's left edge beyond the oncoming lanes, every line read broken white
+  drive = Drive(lanes_left=3, lanes_right=0, curb_unpainted=True, paint=lambda left, right: paint(left=BW, right=BW))
+  drive.run(maneuver("turn", "left", TWO_LANES_LEFT_TURN), 400., 30.)
+  assert [r for r, _, _ in drive.requests] == [LaneChange.left] and (drive.lanes_left, drive.lanes_right) == (2, 1)
+
+
+def test_unpainted_curb_three_lanes_dead_reckons_both_changes():
+  drive = Drive(lanes_left=2, lanes_right=0, curb_unpainted=True)
+  drive.run(maneuver("turn", "left", THREE_LANES_LEFT_TURN), 500., 40.)
+  assert [r for r, _, _ in drive.requests] == [LaneChange.left] * 2 and (drive.lanes_left, drive.lanes_right) == (0, 2)
+  assert not drive.aborts
+
+
+def test_lane_not_confirmed_is_said_not_changed():
+  # one lane in from an unpainted curb with nothing to dead reckon from: the curb lane or the turn lane, it can't say
+  drive = Drive(lanes_left=1, lanes_right=1, curb_unpainted=True, paint=lambda left, right: paint(left=BW, right=BW))
+  m = maneuver("turn", "left", ((("left",), True), (("straight",), False), (("straight", "right"), False)))
+  drive.run(m, 250., 3.)
+  assert not drive.offers and drive.lp.lane_unknown and drive.decisions[-1].reason == LANE_UNKNOWN_REASON
+  # outside the window it says nothing
+  drive = Drive(lanes_left=1, lanes_right=1, curb_unpainted=True)
+  drive.run(m, 900., 1.)
+  assert not drive.lp.lane_unknown
+
+
+def test_completed_changes_are_counted_per_maneuver():
+  drive = Drive(lanes_left=1, lanes_right=0)
+  drive.run(maneuver("turn", "left", TWO_LANES_LEFT_TURN), 300., 15.)
+  assert drive.lp.done == 1 and drive.lp.changes == 1
+  drive.step(maneuver("turn", "left", TWO_LANES_LEFT_TURN), 100., maneuver_id=1)  # a new maneuver: counted afresh
+  assert drive.lp.done == 0

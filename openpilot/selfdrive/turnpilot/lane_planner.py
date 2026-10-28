@@ -10,7 +10,13 @@ is a lane going the same way, solid white an edge, shoulder, bike or parking lan
 divided road's left edge.
 
 Where to go (desired_changes): with the map's lane list (NavInstruction.lanes) the car's lane is counted from the curb
-side, which is always its own direction's, and lanes beyond a yellow line count 0. Without it (the usual case: OSM tags
+side, which is always its own direction's, and lanes beyond a yellow line count 0. That count is known only where the model
+can make it: a curb lane often has no edge line, and one lane in from it the model sees room for a lane but no line, so it
+can't tell the curb lane from the one beside it. The changes made for the maneuver are counted too (LanePlanner.done), and
+the lane dead reckoned from where the first of them started: no more changes than the lane list needs from there, and none
+from a lane it can't place, which is said out loud (lane_unknown: turnpilotPlan.laneMismatch laneUnknown) instead. On the
+far side from the curb only the list's own lanes are lanes (nav_room): on an undivided road the model's far road edge lies
+beyond the oncoming lanes (BeamNG, 2026-10-27: a second change left across a double yellow into the oncoming lane). Without it (the usual case: OSM tags
 lanes on few roads) an exit moves toward the curb by the model's lane count, but not across a curb-side line read solid
 white, and a turn, or an exit away from the curb, moves one lane toward its side at a time, looked at again after each
 change.
@@ -88,6 +94,8 @@ LC_BLOCK_X_M = 15.          # a vehicle in the target lane within this, ahead or
 LC_CLOSING_T_S = 3.         # ...as does one that closes to that distance within this
 LC_LANE_MARGIN_M = 0.5
 
+LANE_UNKNOWN_REASON = "can't confirm lane"
+
 SIDE_DIRECTIONS = {LEFT: ("left", "slightLeft"), RIGHT: ("right", "slightRight")}
 OPENPILOT_SIGNALS_BRANDS = ("hyundai",)  # ports that forward CarControl blinkers (CAN-FD); everyone else is prompted
 
@@ -100,10 +108,16 @@ class ModelLanes:
   keep_right_ok: bool = False
   width: float = LANE_WIDTH
   measured: bool = field(default=False, compare=False)  # the model reads both ego lane lines: the counts mean something
+  # the count that way is what is there: every lane counted from a painted line and a trusted edge, or no room for one. Not
+  # where the next line out is unpainted but the trusted edge leaves room for a lane (a curb lane with no edge line, seen
+  # from the lane beside it), nor where the edge is unsure (the paint alone says at least one)
+  left_known: bool = field(default=True, compare=False)
+  right_known: bool = field(default=True, compare=False)
 
 
 def _side(ego_y, ego_prob, outer_y, outer_prob, edge_y, edge_std, sign, width):
-  """(lanes counted on one side, keep ok that way); sign is +1 for the right, -1 for the left (modelV2 y is right)."""
+  """(lanes counted on one side, keep ok that way, the count known: ModelLanes); sign is +1 for the right, -1 for the left
+  (modelV2 y is right)."""
   room = sign * (edge_y - ego_y)
   painted = outer_prob > LINE_PROB_MIN and LANE_MIN * width <= sign * (outer_y - ego_y) <= 1.5 * width
   edge_ok = edge_std < EDGE_STD_MAX
@@ -112,50 +126,111 @@ def _side(ego_y, ego_prob, outer_y, outer_prob, edge_y, edge_std, sign, width):
   else:
     lanes = max(int(math.floor(room / width + 0.25)), 1) if edge_ok else 1
   keep_ok = ego_prob > LINE_PROB_MIN and not (lanes == 0 and edge_ok and room < KEEP_MIN_ROOM_M)
-  return lanes, keep_ok
+  known = edge_ok and (painted or room < SHOULDER_LANES * width)
+  return lanes, keep_ok, known
 
 
 def model_lanes(line_ys, line_probs, edge_ys, edge_stds) -> ModelLanes:
   """From modelV2 laneLines [far left, left, right, far right] and roadEdges [left, right] at one distance ahead."""
   measured = line_ys[2] - line_ys[1]
   width = measured if min(line_probs[1], line_probs[2]) > LINE_PROB_MIN and 2.5 <= measured <= 4.8 else LANE_WIDTH
-  left, keep_left = _side(line_ys[1], line_probs[1], line_ys[0], line_probs[0], edge_ys[0], edge_stds[0], -1., width)
-  right, keep_right = _side(line_ys[2], line_probs[2], line_ys[3], line_probs[3], edge_ys[1], edge_stds[1], 1., width)
+  left, keep_left, left_known = _side(line_ys[1], line_probs[1], line_ys[0], line_probs[0], edge_ys[0], edge_stds[0], -1., width)
+  right, keep_right, right_known = _side(line_ys[2], line_probs[2], line_ys[3], line_probs[3], edge_ys[1], edge_stds[1], 1., width)
   measured = min(line_probs[1], line_probs[2]) > LINE_PROB_MIN
-  return ModelLanes(left, right, keep_left, keep_right, width, measured)
+  return ModelLanes(left, right, keep_left, keep_right, width, measured, left_known, right_known)
 
 
 def model_lanes_from_msg(model) -> ModelLanes:
   lines, edges = model.laneLines, model.roadEdges
   if len(lines) < 4 or len(edges) < 2 or len(model.laneLineProbs) < 4 or len(model.roadEdgeStds) < 2 or \
      any(len(e.y) <= SAMPLE_IDX for e in list(lines) + list(edges)):
-    return ModelLanes()
+    return ModelLanes(left_known=False, right_known=False)
   return model_lanes([ln.y[SAMPLE_IDX] for ln in lines], list(model.laneLineProbs),
                      [e.y[SAMPLE_IDX] for e in edges], list(model.roadEdgeStds))
 
 
-def ego_lane_index(lane_count: int, lanes: ModelLanes, right_hand_traffic: bool) -> int:
+def ego_lane_index(lane_count: int, lanes: ModelLanes, right_hand_traffic: bool) -> int | None:
   """The car's lane in a nav lane list of lane_count, from the left, counted from the curb side (always its own
-  direction's): modelV2's far road edge on an undivided road lies beyond the oncoming lanes."""
+  direction's): modelV2's far road edge on an undivided road lies beyond the oncoming lanes. None when the model's count on
+  the curb side isn't known (ModelLanes.right_known)."""
+  if not (lanes.right_known if right_hand_traffic else lanes.left_known):
+    return None
   idx = lane_count - 1 - lanes.right if right_hand_traffic else lanes.left
   return min(max(idx, 0), lane_count - 1)
+
+
+def _nav_lanes(maneuver) -> tuple:
+  """The maneuver's lane list when the lane planner goes by it: a turn's or an exit's, of two lanes or more."""
+  if maneuver is None or not (maneuver.kind == TURN or (maneuver.kind == KEEP and maneuver.type == "off ramp")):
+    return ()
+  return maneuver.lanes if len(maneuver.lanes) >= 2 else ()
+
+
+def _valid_lanes(maneuver, nav) -> list[int]:
+  return ([i for i, (_, active) in enumerate(nav) if active] or
+          [i for i, (dirs, _) in enumerate(nav) if any(d in SIDE_DIRECTIONS[maneuver.side] for d in dirs)] or
+          [0 if maneuver.side == LEFT else len(nav) - 1])
+
+
+def nav_lane_span(lane_count: int, lanes: ModelLanes, right_hand_traffic: bool, done: int | None = 0, start=None) -> tuple[int, int]:
+  """(first, last): the lanes of a nav lane list of lane_count, from the left, the car may be in. done: lane changes
+  completed for this maneuver, positive left, None when one went a way that wasn't seen; start: (lane, done) where the
+  first change of ours for it started, None before. From the model's count (ego_lane_index) and the lane dead reckoned
+  from start, each within where done changes can have taken the car from anywhere in the list; where they disagree the car
+  may be in either, and with neither, anywhere done allows. lanes: paint_lanes' already."""
+  lo, hi = (max(-done, 0), min(lane_count - 1 - done, lane_count - 1)) if done is not None else (0, lane_count - 1)
+  if lo > hi:  # more changes one way than the list has lanes: it doesn't describe the road here
+    lo, hi = 0, lane_count - 1
+  found = []
+  idx = ego_lane_index(lane_count, lanes, right_hand_traffic)
+  if idx is not None:
+    found.append(idx)
+  if start is not None and done is not None:
+    found.append(start[0] - (done - start[1]))
+  found = [min(max(i, lo), hi) for i in found]
+  return (min(found), max(found)) if found else (lo, hi)
+
+
+def nav_room(maneuver, lanes: ModelLanes, direction: int, right_hand_traffic: bool = True, paint=(), done: int | None = 0,
+             start=None) -> int | None:
+  """Lanes of the maneuver's lane list beyond the car toward direction (LEFT or RIGHT), wherever in it the car may be
+  (nav_lane_span): the only lanes that way known to go its way. None without a lane list."""
+  nav = _nav_lanes(maneuver)
+  if not nav or direction not in (LEFT, RIGHT):
+    return None
+  lo, hi = nav_lane_span(len(nav), paint_lanes(lanes, paint), right_hand_traffic, done, start)
+  return lo if direction == LEFT else len(nav) - 1 - hi
+
+
+def lane_unconfirmed(maneuver, lanes: ModelLanes, right_hand_traffic: bool = True, paint=(), done: int | None = 0, start=None) -> bool:
+  """The maneuver has a lane list, and the car may be in a lane it doesn't leave from or in one it does, which can't be
+  told apart (nav_lane_span): no change is planned, and the driver is told (LanePlanner.lane_unknown)."""
+  nav = _nav_lanes(maneuver)
+  if not nav:
+    return False
+  lo, hi = nav_lane_span(len(nav), paint_lanes(lanes, paint), right_hand_traffic, done, start)
+  valid = _valid_lanes(maneuver, nav)
+  return lo < hi and not all(i in valid for i in range(lo, hi + 1))
 
 
 def lane_mismatch(maneuver, distance: float, through_lanes: tuple, through_distance: float, lanes: ModelLanes, v_ego: float,
                   right_hand_traffic: bool = True):
   """The car is in a turn-only lane where the route goes straight through, or not in a lane that turns where the route
   turns, closer than the lane planner still changes lanes (lane_change_window's end). Only flagged, never acted on:
-  LaneMismatch.none without the map's lane list or without the model reading the ego lane's lines."""
+  LaneMismatch.none without the map's lane list, without the model reading the ego lane's lines or counting the lanes on
+  the curb side."""
   if not lanes.measured:
     return LaneMismatch.none
   near = lane_change_window(v_ego)[1]
   turn = maneuver is not None and maneuver.kind == TURN
   if len(through_lanes) >= 2 and 0. < through_distance < near and not (turn and distance < through_distance):
-    directions, active = through_lanes[ego_lane_index(len(through_lanes), lanes, right_hand_traffic)]
+    idx = ego_lane_index(len(through_lanes), lanes, right_hand_traffic)
+    directions, active = through_lanes[idx] if idx is not None else ((), True)
     if not active and directions and "straight" not in directions:
       return LaneMismatch.turnOnlyGoingStraight
   if turn and len(maneuver.lanes) >= 2 and 0. < distance < near:
-    directions, active = maneuver.lanes[ego_lane_index(len(maneuver.lanes), lanes, right_hand_traffic)]
+    idx = ego_lane_index(len(maneuver.lanes), lanes, right_hand_traffic)
+    directions, active = maneuver.lanes[idx] if idx is not None else ((), True)
     if not active and not any(d in SIDE_DIRECTIONS[maneuver.side] for d in directions):
       return LaneMismatch.wrongLaneForTurn
   return LaneMismatch.none
@@ -200,20 +275,19 @@ def _direction(lc) -> int:
   return LEFT if lc == LaneChange.left else RIGHT if lc == LaneChange.right else 0
 
 
-def desired_changes(maneuver, lanes: ModelLanes, right_hand_traffic: bool = True, paint=()) -> int:
+def desired_changes(maneuver, lanes: ModelLanes, right_hand_traffic: bool = True, paint=(), done: int | None = 0, start=None) -> int:
   """Lane changes the route wants before the maneuver, positive left, negative right, before change_blocker has a say.
-  paint: as for paint_lanes."""
+  paint: as for paint_lanes; done, start: as for nav_lane_span. With a lane list, the fewest changes any lane the car may
+  be in needs, and none when it may already be in one the maneuver leaves from."""
   if maneuver is None or not (maneuver.kind == TURN or (maneuver.kind == KEEP and maneuver.type == "off ramp")):
     return 0
   lanes = paint_lanes(lanes, paint)
   curb = RIGHT if right_hand_traffic else LEFT
-  nav = maneuver.lanes
-  if len(nav) >= 2:
-    valid = ([i for i, (_, active) in enumerate(nav) if active] or
-             [i for i, (dirs, _) in enumerate(nav) if any(d in SIDE_DIRECTIONS[maneuver.side] for d in dirs)] or
-             [0 if maneuver.side == LEFT else len(nav) - 1])
-    idx = ego_lane_index(len(nav), lanes, right_hand_traffic)
-    return idx - max(valid) if idx > max(valid) else idx - min(valid) if idx < min(valid) else 0
+  nav = _nav_lanes(maneuver)
+  if nav:
+    valid = _valid_lanes(maneuver, nav)
+    lo, hi = nav_lane_span(len(nav), lanes, right_hand_traffic, done, start)
+    return lo - max(valid) if lo > max(valid) else hi - min(valid) if hi < min(valid) else 0
   if maneuver.side == curb and maneuver.kind == KEEP:  # an exit: over to the curb lane by the model's count
     n = lanes.left if curb == LEFT else lanes.right
     if len(paint) == 4:  # not across a curb-side line read solid white: a shoulder or a bike lane is beyond it
@@ -223,9 +297,11 @@ def desired_changes(maneuver, lanes: ModelLanes, right_hand_traffic: bool = True
   return 1 if maneuver.side == LEFT else -1  # a turn, or an exit away from the curb: one toward its side at a time
 
 
-def change_blocker(direction: int, lanes: ModelLanes, paint=(), objects=(), right_hand_traffic: bool = True) -> str:
+def change_blocker(direction: int, lanes: ModelLanes, paint=(), objects=(), right_hand_traffic: bool = True,
+                   nav_room: int | None = None) -> str:
   """'' when one lane change toward direction (LEFT or RIGHT) is into a valid travel lane, else the abort reason why not
-  (a TurnpilotPlan.LaneChangeAbort name). paint: as for paint_lanes, held yellow included; objects: as for stopped_in_lane."""
+  (a TurnpilotPlan.LaneChangeAbort name). paint: as for paint_lanes, held yellow included; objects: as for stopped_in_lane;
+  nav_room: as nav_room() returns it, None without the map's lane list."""
   if direction not in (LEFT, RIGHT):
     return 'noLane'
   if not right_hand_traffic and direction == RIGHT:
@@ -234,16 +310,22 @@ def change_blocker(direction: int, lanes: ModelLanes, paint=(), objects=(), righ
     return 'lineNotBroken'
   if (paint_lanes(lanes, paint).left if direction == LEFT else paint_lanes(lanes, paint).right) == 0:
     return 'noLane'  # the model sees no lane that way, or only beyond a yellow line
+  if nav_room is not None and nav_room <= 0:
+    return 'noLane'  # the map's lane list has no lane that way: the model's are oncoming, or not where it can place the car
   if stopped_in_lane(objects, direction, lanes.width):
     return 'laneParked'
   return ''
 
 
-def lane_changes_needed(maneuver, lanes: ModelLanes, right_hand_traffic: bool = True, paint=(), objects=()) -> int:
+def lane_changes_needed(maneuver, lanes: ModelLanes, right_hand_traffic: bool = True, paint=(), objects=(), done: int | None = 0,
+                        start=None) -> int:
   """Lane changes the maneuver still needs, positive left, negative right, or 0 when the next one may not go
-  (change_blocker). paint: as for paint_lanes; objects: as for stopped_in_lane, empty when unknown."""
-  need = desired_changes(maneuver, lanes, right_hand_traffic, paint)
-  if need and change_blocker(LEFT if need > 0 else RIGHT, lanes, paint, objects, right_hand_traffic):
+  (change_blocker). paint: as for paint_lanes; objects: as for stopped_in_lane, empty when unknown; done, start: as for
+  nav_lane_span."""
+  need = desired_changes(maneuver, lanes, right_hand_traffic, paint, done, start)
+  direction = LEFT if need > 0 else RIGHT
+  room = nav_room(maneuver, lanes, direction, right_hand_traffic, paint, done, start)
+  if need and change_blocker(direction, lanes, paint, objects, right_hand_traffic, room):
     return 0
   return need
 
@@ -328,6 +410,12 @@ class LanePlanner:
     self.abort = 'none'               # the last abort's reason, held for ABORT_HOLD_S
     self.ours = False                 # a DesireHelper lane change we asked for is under way
     self.changes = 0                  # nav lane changes completed
+    self.done: int | None = 0         # lane changes completed for this maneuver, ours or the driver's, positive left; None
+                                      # once one went a way that wasn't seen
+    self.lane_unknown = False         # in the window, the car's lane in the maneuver's lane list can't be confirmed
+    self._done_id = None              # the maneuver done counts for
+    self._start = None                # (lane, done) where our first change for it started: nav_lane_span
+    self._from_lane: int | None = None  # the lane in the lane list the change wanted now is counted from
     self.yellow = YellowHold()
     self._lc_dir: int | None = None   # direction of the DesireHelper lane change under way, 0 when unknown
     self._maneuver_id = None          # the maneuver the offer is for
@@ -355,6 +443,8 @@ class LanePlanner:
       self._abort_t -= dt
       if self._abort_t <= 0.:
         self.abort = 'none'
+    if maneuver_id != self._done_id:  # a new maneuver: its changes are counted from here
+      self._done_id, self.done, self._start = maneuver_id, 0, None
     changing = lc_state in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing)
     paint = self.yellow.update(paint, v_ego, dt, changing)
     if changing:  # never cancelled once started: the car is already moving over
@@ -362,11 +452,18 @@ class LanePlanner:
         req = self.offer if self.phase == Phase.REQUEST else \
           LaneChange.left if left_blinker and not right_blinker else LaneChange.right if right_blinker and not left_blinker else LaneChange.none
         self._lc_dir = _direction(req)
+        if self.phase == Phase.REQUEST and self._start is None and self._from_lane is not None and self.done is not None:
+          self._start = (self._from_lane, self.done)  # the first of ours for this maneuver: dead reckoned from here
       self.ours = self.ours or self.phase == Phase.REQUEST
+      self.lane_unknown = False
       self._reset()
       return self._decision()
     if self._lc_dir is not None:  # a change just ended, ours or the driver's: the lines have renumbered
       self.yellow.shift(self._lc_dir)
+      if self._lc_dir and self.done is not None:
+        self.done += self._lc_dir
+      else:  # a way not seen: nothing to dead reckon from for the rest of this maneuver
+        self.done, self._start = None, None
       self._lc_dir = None
       self._cooldown = max(self._cooldown, LC_COOLDOWN_S)
     if self.ours:  # DesireHelper is done with it, whether or not a held blinker keeps it in preLaneChange
@@ -374,9 +471,18 @@ class LanePlanner:
       self.changes += 1
 
     fast = v_ego > LANE_CHANGE_SPEED_MIN + LC_SPEED_MARGIN
-    want = desired_changes(maneuver, lanes, right_hand_traffic, paint) if fast else 0
+    want = desired_changes(maneuver, lanes, right_hand_traffic, paint, self.done, self._start) if fast else 0
     start, end = lane_change_window(v_ego, abs(want))
     want_dir = LEFT if want > 0 else RIGHT if want < 0 else 0
+    nav = _nav_lanes(maneuver)
+    if nav and want_dir:
+      lo, hi = nav_lane_span(len(nav), paint_lanes(lanes, paint), right_hand_traffic, self.done, self._start)
+      self._from_lane = lo if want_dir == LEFT else hi
+    else:
+      self._from_lane = None
+    self.lane_unknown = self.paint_rule and maneuver is not None and end < distance < start and \
+      lane_unconfirmed(maneuver, lanes, right_hand_traffic, paint, self.done, self._start)
+    idle_reason = LANE_UNKNOWN_REASON if self.lane_unknown else ""
 
     if self._pending:  # the request is withdrawn; DesireHelper didn't start the change (else `changing` above): abort
       self._pending_t -= dt
@@ -393,16 +499,17 @@ class LanePlanner:
     if self._cooldown > 0.:
       self._cooldown -= dt
       self._confirm = 0
-      return self._decision()
+      return self._decision(idle_reason)
     if not self.paint_rule or not inputs_valid or not (end < distance < start):
       want_dir = 0
-    if want_dir and change_blocker(want_dir, lanes, paint, objects, right_hand_traffic):
+    if want_dir and change_blocker(want_dir, lanes, paint, objects, right_hand_traffic,
+                                   nav_room(maneuver, lanes, want_dir, right_hand_traffic, paint, self.done, self._start)):
       want_dir = 0
     direction = _toward(want_dir)
     self._confirm = self._confirm + 1 if direction == self._candidate else 1
     self._candidate = direction
     if direction == LaneChange.none or self._confirm < LC_CONFIRM_FRAMES:
-      return self._decision()
+      return self._decision(idle_reason)
     if left_blindspot if want_dir == LEFT else right_blindspot:
       return self._decision("car in blind spot")
     if target_lane_blocked(objects, want_dir, v_ego, lanes.width):
@@ -427,7 +534,8 @@ class LanePlanner:
       return self._abort('tooSlow')
     if distance <= end:
       return self._abort('tooLate')
-    reason = change_blocker(d, lanes, paint, objects, right_hand_traffic)
+    reason = change_blocker(d, lanes, paint, objects, right_hand_traffic,
+                            nav_room(maneuver, lanes, d, right_hand_traffic, paint, self.done, self._start))
     if reason:
       return self._abort(reason)
     if want_dir != d:
