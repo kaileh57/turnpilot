@@ -41,7 +41,18 @@ def parse_args(add_args=None):
                  help='on exit, set the shared game back: signals running, HUD and particles on, the light as it was')
   p.add_argument('--duration', type=float, default=0.0, help='quit after this many seconds (0: run until q or Ctrl-C)')
   p.add_argument('--no-keyboard', action='store_true')
+  p.add_argument('--light-oracle', action='store_true',
+                 help="publish the game's light states ahead as turnpilotLights (light_oracle.py; SIM ONLY: turnpilotd takes them " +
+                      "only with TURNPILOT_LIGHT_ORACLE=1 in launch_openpilot.sh)")
+  p.add_argument('--light-latency', type=float, default=0.3, help='with --light-oracle, publish the lights this late, s')
   return p.parse_args(add_args)
+
+
+def start_light_oracle(args):
+  """light_oracle.py in its own process, on its own BeamNGpy connection (never the bridge's world lock)."""
+  import subprocess
+  return subprocess.Popen([sys.executable, '-m', 'openpilot.tools.sim.bridge.beamng.light_oracle', '--host', args.host,
+                           '--port', str(args.port), '--light-latency', str(args.light_latency)])
 
 
 def config_from_args(args) -> BeamNGConfig:
@@ -53,6 +64,7 @@ def config_from_args(args) -> BeamNGConfig:
 
 def main():
   args = parse_args()
+  oracle = start_light_oracle(args) if args.light_oracle else None
   q: Queue = Queue()
   bridge = BeamNGBridge(config_from_args(args), engage=args.engage, set_speed_kph=args.set_speed, rolling_start_kph=args.rolling_start)
   p = bridge.run(q)
@@ -81,6 +93,8 @@ def main():
           q.put(control_cmd_gen(line.strip()))
     threading.Thread(target=read_commands, daemon=True).start()
   p.join()
+  if oracle is not None:
+    oracle.terminate()
 
 
 if __name__ == "__main__":

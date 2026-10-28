@@ -33,3 +33,69 @@ class PromptedDriver:
     elif self.started or prompt != self.side:
       self.side = LaneChange.none
     return self.side == LaneChange.left, self.side == LaneChange.right
+
+
+TAP_GAS, TAP_S = 0.25, 1.0  # the driver's go: this much gas for this long, an override (DisengageOnAccelerator off)
+PROMPT_TAP_S = 1.0          # TurnPilot asks for a go (controlPrompt): the driver looks for a second, then taps
+STALL_S = 4.0               # standing engaged this long with nothing held (the model stopped on its own): a tap to go on
+TAP_GAP_S = 2.0             # s after a tap ends before another
+STANDING = 0.3              # m/s
+
+
+class GasTaps:
+  """The sim driver's gas taps, where a driver would give one, each logged with its reason:
+  - stopSignGo: TurnPilot holds the car at a stop sign past its dwell and asks for the driver's go: after PROMPT_TAP_S;
+  - signalGo: a signal whose light TurnPilot hasn't checked: only when the ground-truth light (the bridge's own reading
+    of the game) is green, after PROMPT_TAP_S, never on red, yellow or a light it can't read; signal_tap False never taps
+    it (the stop-at-the-line runs);
+  - stall: standing engaged STALL_S with nothing held and no prompt (plan not holding, no shouldStop): the model stopped
+    on its own (a stop sign it saw, or no pull-away after a hold let go, as BeamNG ped_crosswalk_right did).
+  Never while TurnPilot holds the car for anything else: a pedestrian, the stop sign's dwell."""
+
+  def __init__(self, signal_tap: bool = True):
+    self.signal_tap = signal_tap
+    self.log: list[dict] = []
+    self._since = None      # (reason, t) the current reason to tap began
+    self._tap_until = -1.
+    self._next_ok = -1.
+
+  def update(self, t: float, plan, engaged: bool, v: float, green: bool | None = None) -> float:
+    """The gas to hold now (0..1). plan: turnpilotPlan (None if none); green: the ground-truth light ahead is green
+    (None: unknown)."""
+    if t < self._tap_until:
+      return TAP_GAS
+    reason = None
+    if engaged and v < STANDING and plan is not None:
+      prompt = str(plan.controlPrompt)
+      if prompt == 'stopSignGo':
+        reason = 'stopSignGo'
+      elif prompt == 'signalGo':
+        reason = 'signalGo' if self.signal_tap and green is True else None
+      elif str(plan.state) != 'holding' and not plan.shouldStop:
+        reason = 'stall'
+    if reason is None:
+      self._since = None
+      return 0.
+    if self._since is None or self._since[0] != reason:
+      self._since = (reason, t)
+    wait = STALL_S if reason == 'stall' else PROMPT_TAP_S
+    if t - self._since[1] + 1e-6 >= wait and t >= self._next_ok:
+      self._tap_until, self._next_ok, self._since = t + TAP_S, t + TAP_S + TAP_GAP_S, None
+      self.log.append({'t': round(t, 2), 'reason': reason})
+      print(f"driver: gas tap ({reason})", flush=True)
+      return TAP_GAS
+    return 0.
+
+
+LIGHTS_FRESH_S = 1.  # the light oracle's reading (light_oracle.py) is the driver's ground truth this long
+
+
+def ground_truth_green(cfg, sm, now: float) -> bool | None:
+  """The light ahead really is green: every light is, forced and held, unless the bridge runs with --signals; then the
+  light oracle's fresh reading of the nearest one ahead, if it runs. None: not known, so never tapped on."""
+  if getattr(cfg, 'green', False):
+    return True
+  if not sm.seen.get('turnpilotLights') or now - sm.recv_time['turnpilotLights'] > LIGHTS_FRESH_S:
+    return None
+  lights = [lt for lt in sm['turnpilotLights'].lights if lt.distance >= -2.]
+  return None if not lights else str(min(lights, key=lambda lt: lt.distance).state) == 'green'

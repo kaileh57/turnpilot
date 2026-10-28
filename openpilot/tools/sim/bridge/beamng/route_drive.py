@@ -27,6 +27,7 @@ from openpilot.common.params import Params
 from openpilot.tools.sim.bridge.beamng import scenario
 from openpilot.tools.sim.bridge.beamng.bridge import BeamNGBridge
 from openpilot.tools.sim.bridge.beamng.frame import from_latlon
+from openpilot.tools.sim.bridge.beamng.driver import GasTaps, ground_truth_green
 from openpilot.tools.sim.bridge.beamng.gate1 import CANCEL_WAIT
 from openpilot.tools.sim.bridge.beamng.pose import beamng_quat
 from openpilot.tools.sim.bridge.beamng.routes import ROUTES
@@ -41,8 +42,6 @@ ARRIVE_M = 25.0       # navInstruction.distanceRemaining under this is the leg's
 STUCK_S = 45.0        # standing this long, not holding for anything, ends the run
 MIN_SPEED = 2.5       # m/s, the slowest average a run may take before it times out
 REENGAGE_WAIT = 2.0   # s after a disengagement before the driver engages again
-CONFIRM_S = 4.0       # standing engaged this long, not held by TurnPilot, the driver taps the gas to go on...
-CONFIRM_GAS, CONFIRM_TAP_S = 0.25, 1.0  # ...this hard, this long: the model stops for stop signs and waits for that
 
 
 def post(method, path, body=None):
@@ -57,7 +56,8 @@ def post(method, path, body=None):
 class RouteDrive:
   """Runs in the bridge process, called at 100 Hz (BeamNGBridge scenario hook)."""
 
-  def __init__(self, routes: list, speed_kph: float, rolling_kph: float, traffic: int, out: str):
+  def __init__(self, routes: list, speed_kph: float, rolling_kph: float, traffic: int, out: str, signal_tap: bool = True):
+    self.signal_tap = signal_tap
     """routes: the route of each run, in order."""
     self.plan, self.runs, self.speed_kph, self.rolling_kph, self.traffic, self.out = routes, len(routes), speed_kph, rolling_kph, traffic, out
     self.route = routes[0]
@@ -99,13 +99,13 @@ class RouteDrive:
     self.engaged_once, self.enabled_prev, self.dis_t, self.still_t = False, False, None, 0.0
     self.dist, self.last_xy, self.rem_min = 0.0, None, float('inf')
     self.nav_lost_t = None
-    self.confirmations, self.stand_t, self.tap_t, self.stuck_ref = [], 0.0, None, None
+    self.taps, self.stuck_ref = GasTaps(self.signal_tap), None
     print(f"route_drive run {self.run + 1}/{self.runs}: {self.route.name} ({self.route.maneuvers})", flush=True)
     return True
 
   def __call__(self, b) -> bool:
     if self.sm is None:
-      self.sm = messaging.SubMaster(['selfdriveState', 'onroadEvents', 'navInstruction', 'turnpilotPlan', 'carState'])
+      self.sm = messaging.SubMaster(['selfdriveState', 'onroadEvents', 'navInstruction', 'turnpilotPlan', 'carState', 'turnpilotLights'])
       if self.traffic:
         with b.world.bng_lock:
           scenario.remove_traffic(b.world.bng)  # leftovers from a session that died
@@ -202,14 +202,13 @@ class RouteDrive:
     if self.stuck_ref is None or holding or float(np.linalg.norm(xy - self.stuck_ref[1])) > 5.0:
       self.stuck_ref = (t, xy)
     self.still_t = t - self.stuck_ref[0]
-    # the driver confirms a stop the model made on its own (a stop sign): a gas tap, an override, not a disengagement
-    self.stand_t = self.stand_t + 0.01 if enabled and s.wheel_speed < 0.3 and not holding else 0.0
-    if self.tap_t is not None and t - self.tap_t > CONFIRM_TAP_S:
-      b.driver_gas, self.tap_t = 0.0, None
-    if self.stand_t > CONFIRM_S and self.tap_t is None:
-      b.driver_gas, self.tap_t, self.stand_t = CONFIRM_GAS, t, 0.0
-      self.confirmations.append({"t": round(t, 1), "x": round(float(xy[0]), 1), "y": round(float(xy[1]), 1), "leg": self.leg + 1})
-      print(f"route_drive: driver confirms a stop at ({xy[0]:.0f}, {xy[1]:.0f}) with the gas", flush=True)
+    # the driver's go (driver.GasTaps): at a stop sign TurnPilot holds past its dwell, at a signal it hasn't checked when
+    # the light really is green, and standing with nothing held (the model stopped on its own): a gas tap, an override,
+    # not a disengagement. Each logged with its reason and where
+    n = len(self.taps.log)
+    b.driver_gas = self.taps.update(t, plan, enabled, s.wheel_speed, ground_truth_green(b.cfg, sm, time.monotonic()))
+    for tap in self.taps.log[n:]:
+      tap.update(x=round(float(xy[0]), 1), y=round(float(xy[1]), 1), leg=self.leg + 1)
     timeout = SETTLE + ROUTE_TIMEOUT + 60.0 + route_length(self.route) / MIN_SPEED
     stuck_s = 25.0 if self.screen else STUCK_S
     if self.still_t > stuck_s or t > timeout:
@@ -226,7 +225,7 @@ class RouteDrive:
     res = {"run": self.run + 1, "route": self.route.name, "end": reason, "wall_start": self.wall0, "mono_start": self.t0,
            "mono_end": self.t_end, "duration_s": round(t, 1), "distance_m": round(self.dist, 1),
            "engaged_at_s": getattr(self, "engage_t", None), "legs_reached": self.legs_done, "legs": len(self.route.legs),
-           "disengagements": self.disengagements, "stop_confirmations": self.confirmations, "lane_change_prompts_signalled": b.driver.signals, "web": self.web,
+           "disengagements": self.disengagements, "stop_confirmations": self.taps.log, "lane_change_prompts_signalled": b.driver.signals, "web": self.web,
            "traffic": self.traffic, "speed_kph": self.speed_kph, "path": self.rows,
            "pose_fields": ["wall_s", "t_s", "x", "y", "z", "qx", "qy", "qz", "qw"], "poses": self.poses}
     self.results.append(res)
@@ -269,6 +268,8 @@ def main():
   ap.add_argument('--only', default='', help='with --screen, only maneuvers whose name contains one of these (comma-separated)')
   ap.add_argument('--start-at', type=int, default=0, help='skip this many runs of the plan (a session cut short)')
   ap.add_argument('--out', default='route_drive.json')
+  ap.add_argument('--signal-tap', choices=('on', 'off'), default='on',
+                  help="off: the driver never gives the go at a signal TurnPilot hasn't checked (the stop-at-the-line runs)")
   args, rest = ap.parse_known_args()
   route = ROUTES[args.route]
   if args.screen:
@@ -277,7 +278,7 @@ def main():
   else:
     plan = [route] * args.runs
   plan = plan[args.start_at:]
-  drive = RouteDrive(plan, args.speed, args.rolling, args.traffic, args.out)
+  drive = RouteDrive(plan, args.speed, args.rolling, args.traffic, args.out, signal_tap=args.signal_tap == 'on')
   drive.screen = args.screen
   bargs = parse_args(rest)
   bargs.spawn, bargs.rot = plan[0].start, scenario.heading_quat(plan[0].heading)

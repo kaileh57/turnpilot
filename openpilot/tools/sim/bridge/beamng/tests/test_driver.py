@@ -38,3 +38,60 @@ def test_stalk_waits_for_the_countdown():
   driver.sm['modelV2'] = messaging.new_message('modelV2').as_reader().modelV2  # the change is done
   driver.sm.plan(LaneChange.none, 0.)
   assert driver.update() == (False, False)
+
+
+# --- the driver's go at a stop (driver.GasTaps) ---
+
+def plan_msg(prompt='none', state='following', should_stop=False):
+  msg = messaging.new_message('turnpilotPlan')
+  p = msg.turnpilotPlan
+  p.controlPrompt, p.state, p.shouldStop = prompt, state, should_stop
+  return msg.as_reader().turnpilotPlan
+
+
+def run_taps(taps, plan, seconds, v=0., engaged=True, green=None, t0=0.):
+  out = []
+  for k in range(int(seconds / 0.05)):
+    out.append(taps.update(t0 + k * 0.05, plan, engaged, v, green))
+  return out
+
+
+def test_stop_sign_go_is_tapped_after_a_second():
+  from openpilot.tools.sim.bridge.beamng.driver import TAP_GAS, GasTaps
+  taps = GasTaps()
+  out = run_taps(taps, plan_msg('stopSignGo', 'holding', True), 3.)
+  first = out.index(TAP_GAS)
+  assert abs(first * 0.05 - 1.0) < 0.06 and taps.log[0]['reason'] == 'stopSignGo'
+
+
+def test_signal_go_only_on_a_ground_truth_green():
+  from openpilot.tools.sim.bridge.beamng.driver import GasTaps
+  for green in (False, None):  # red or yellow, or not known: never
+    taps = GasTaps()
+    assert max(run_taps(taps, plan_msg('signalGo', 'holding', True), 5., green=green)) == 0. and not taps.log
+  taps = GasTaps()
+  assert max(run_taps(taps, plan_msg('signalGo', 'holding', True), 3., green=True)) > 0. and taps.log[0]['reason'] == 'signalGo'
+  taps = GasTaps(signal_tap=False)  # the stop-at-the-line path: never tapped
+  assert max(run_taps(taps, plan_msg('signalGo', 'holding', True), 5., green=True)) == 0.
+
+
+def test_standing_with_nothing_held_is_tapped_but_a_hold_never_is():
+  from openpilot.tools.sim.bridge.beamng.driver import STALL_S, GasTaps
+  taps = GasTaps()
+  out = run_taps(taps, plan_msg('none', 'turning'), STALL_S + 1.)
+  assert max(out) > 0. and taps.log[0]['reason'] == 'stall'
+  # a pedestrian hold, or a stop sign's dwell before its prompt: the car waits, no tap
+  taps = GasTaps()
+  assert max(run_taps(taps, plan_msg('none', 'holding', True), 20.)) == 0.
+  taps = GasTaps()
+  assert max(run_taps(taps, plan_msg('none', 'turning'), 20., engaged=False)) == 0.
+  taps = GasTaps()
+  assert max(run_taps(taps, plan_msg('none', 'turning'), 20., v=3.)) == 0.
+
+
+def test_taps_are_short_and_spaced():
+  from openpilot.tools.sim.bridge.beamng.driver import TAP_S, GasTaps
+  taps = GasTaps()
+  out = run_taps(taps, plan_msg('stopSignGo', 'holding', True), 10.)
+  pressed = sum(1 for g in out if g > 0.) * 0.05
+  assert len(taps.log) >= 2 and abs(pressed - len(taps.log) * TAP_S) < 0.11

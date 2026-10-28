@@ -26,7 +26,11 @@ cd "$OPENPILOT_ROOT"
 export PYTHONPATH="$OPENPILOT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 # navd routes on the sim map's own tiles, never on real roads (the default 'auto' falls back to Mapbox);
-# TURNPILOT_TILES picks the tiles, e.g. ~/turnpilot_data/valhalla/west_coast_usa_lanes for the turn-lane demos
+# TURNPILOT_TILES picks the tiles, e.g. ~/turnpilot_data/valhalla/west_coast_usa_lanes for the turn-lane demos. Without it,
+# the tiles with the level's stop signs and signals (tools/turnpilot/build_sim_tiles.sh) when they are built.
+# The driver's gas tap is the go at a map stop: DisengageOnAccelerator must be off (turnpilotd refuses to run with it on).
+# TURNPILOT_LIGHT_ORACLE=1 lets turnpilotd take the sim's light oracle (run_bridge.py --light-oracle); SIM ONLY, it needs
+# SIMULATION=1 too, and the param clears on every manager start.
 python3 -c "
 import os
 from openpilot.common.params import Params
@@ -34,9 +38,19 @@ from openpilot.selfdrive.test.helpers import set_params_enabled
 set_params_enabled()
 p = Params()
 p.put_bool('AlphaLongitudinalEnabled', True)
+p.put_bool('DisengageOnAccelerator', False)
 p.put('TurnPilotRouteSource', 'valhalla')
-tiles = os.environ.get('TURNPILOT_TILES') or p.get('TurnPilotValhallaTiles') or os.path.expanduser('~/turnpilot_data/valhalla/west_coast_usa')
+signals = os.path.expanduser('~/turnpilot_data/valhalla/west_coast_usa_signals')
+default = signals if os.path.exists(os.path.join(signals, 'controls_built')) else os.path.expanduser('~/turnpilot_data/valhalla/west_coast_usa')
+tiles = os.environ.get('TURNPILOT_TILES') or p.get('TurnPilotValhallaTiles') or default
 p.put('TurnPilotValhallaTiles', tiles)
+print(f'TurnPilotValhallaTiles: {tiles}')
 "
+
+# after the manager clears TurnPilotSimLightOracle at its start (CLEAR_ON_MANAGER_START)
+if [[ "$TURNPILOT_LIGHT_ORACLE" == "1" ]]; then
+  (sleep 5 && python3 -c "from openpilot.common.params import Params; Params().put_bool('TurnPilotSimLightOracle', True)" \
+    && echo "TurnPilotSimLightOracle set: turnpilotd takes the sim's light oracle") &
+fi
 
 cd openpilot/system/manager && exec ./manager.py

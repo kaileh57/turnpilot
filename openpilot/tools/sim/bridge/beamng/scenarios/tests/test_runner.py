@@ -199,3 +199,28 @@ def test_runs_end_to_end(tmp_path, monkeypatch, name, runs, trigger, failure):
     assert set(r['actor_poses']) == {a.name for a in plan.actors}
     for a in r['actor_poses'].values():
       assert len(a['rows'][0]) == len(run.ACTOR_FIELDS)
+
+
+def test_driver_taps_the_gas_where_turnpilot_asks_for_a_go(monkeypatch):
+  # held at a stop sign past its dwell, TurnPilot prompts for the driver's go: the scenario driver gives it, logged
+  from openpilot.tools.sim.bridge.beamng.driver import TAP_GAS, GasTaps
+  clock = Clock()
+  runner = run.Runner(catalog.build('ped_crosswalk_right'), 1, '/tmp', 'http://127.0.0.1:8088', 'tok', 'host', 0)
+  monkeypatch.setattr(run, 'time', SimpleNamespace(monotonic=clock.monotonic, strftime=lambda *a: 'now'))
+  runner.taps = GasTaps()
+  msgs = {}
+  ss = messaging.new_message('selfdriveState')
+  ss.selfdriveState.enabled = True
+  tp = messaging.new_message('turnpilotPlan')
+  tp.turnpilotPlan.controlPrompt, tp.turnpilotPlan.state, tp.turnpilotPlan.shouldStop = 'stopSignGo', 'holding', True
+  msgs['selfdriveState'], msgs['turnpilotPlan'] = ss, tp
+  runner.sm = type('SM', (), {'seen': {'turnpilotPlan': True, 'turnpilotLights': False},
+                              '__getitem__': lambda self, s: getattr(msgs[s].as_reader(), s)})()
+  b = bridge()
+  b.simulator_state.wheel_speed = 0.
+  gas = []
+  for _ in range(60):
+    runner.driver(b)
+    gas.append(b.driver_gas)
+    clock.t += 0.05
+  assert TAP_GAS in gas and runner.taps.log[0]['reason'] == 'stopSignGo'

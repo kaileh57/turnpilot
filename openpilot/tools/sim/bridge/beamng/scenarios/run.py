@@ -35,6 +35,7 @@ from openpilot.common.params import Params
 from openpilot.selfdrive.turnpilot.web.pairing import PORT
 from openpilot.selfdrive.turnpilot.web.store import ensure_token
 from openpilot.tools.sim.bridge.beamng import frame
+from openpilot.tools.sim.bridge.beamng.driver import GasTaps, ground_truth_green
 from openpilot.tools.sim.bridge.beamng.pose import beamng_quat
 from openpilot.tools.sim.bridge.beamng.scenario import heading_quat
 from openpilot.tools.sim.bridge.beamng.scenarios import score
@@ -47,7 +48,7 @@ CLEAR_TIMEOUT_S = 5.  # wait this long for navd to drop the old route
 ROUTE_TIMEOUT_S = 30.
 ENGAGE_TIMEOUT_S = 30.
 ROLL_FRACTION = 0.8   # the driver rolls up to this much of the set speed before engaging, as gate1 does
-SERVICES = ['turnpilotPlan', 'selfdriveState', 'carState', 'navInstruction', 'navRoute', 'modelV2']
+SERVICES = ['turnpilotPlan', 'selfdriveState', 'carState', 'navInstruction', 'navRoute', 'modelV2', 'turnpilotLights']
 OUT_ROOT = os.path.expanduser("~/turnpilot-artifacts/scenarios")
 POSE_FIELDS = ["wall_s", "t_s", "x", "y", "z", "qx", "qy", "qz", "qw"]  # route_drive's, which chase_render.py reads
 ACTOR_FIELDS = ["wall_s", "x", "y", "z", "heading"]
@@ -81,8 +82,9 @@ class Runner:
   """The scenario, run in the bridge process at 100 Hz (BeamNGBridge scenario hook). Built in the parent and pickled into
   the bridge process, so everything live (SubMaster, the director thread and its client) starts on the first call."""
 
-  def __init__(self, plan: Plan, runs: int, out_dir: str, web_url: str, token: str, host: str, port: int):
+  def __init__(self, plan: Plan, runs: int, out_dir: str, web_url: str, token: str, host: str, port: int, signal_tap: bool = True):
     self.plan, self.runs, self.out_dir, self.web_url, self.token = plan, runs, out_dir, web_url, token
+    self.signal_tap = signal_tap
     self.host, self.port = host, port
     self.sm = self.director = None
     self.results: list[dict] = []
@@ -189,6 +191,7 @@ class Runner:
     self.route_pts, self.route_id, self.nav_cleared = None, 0, False
     self.t_engaged = self.t_engaged_wall = None
     self.end_check = score.EndCheck(plan.timeout_s, plan.end_on_stop_s)
+    self.taps = GasTaps(self.signal_tap)
 
   def engage(self, b):
     b.set_speed_kph, b.rolling_start_kph, b.auto_engage = self.plan.speed_kph, self.plan.speed_kph * ROLL_FRACTION, True
@@ -261,18 +264,25 @@ class Runner:
 
   def driver(self, b):
     """The driver taps the stalk when TurnPilot asks for a signal (PLAN: Tesla can't signal for openpilot), and lets go
-    when it stops asking, which it does as soon as the lane change starts."""
-    p = str(self.sm['turnpilotPlan'].signalPrompt)
+    when it stops asking, which it does as soon as the lane change starts. And taps the gas where a driver gives the go
+    (driver.GasTaps): at a stop sign TurnPilot holds past its dwell, at a signal it hasn't checked when the light really
+    is green, and standing with nothing held (the model not pulling away)."""
+    plan = self.sm['turnpilotPlan'] if self.sm.seen['turnpilotPlan'] else None
+    p = str(plan.signalPrompt) if plan is not None else 'none'
     b.blinker = (p == 'left', p == 'right')
+    b.driver_gas = self.taps.update(time.monotonic(), plan, self.sm['selfdriveState'].enabled, b.simulator_state.wheel_speed,
+                                    ground_truth_green(b.cfg, self.sm, time.monotonic()))
 
   def end_run(self, b, outcome: str, detail: str = ''):
     b.auto_engage = False
+    b.driver_gas = 0.
     b.car.cancel()
     b.blinker = (False, False)
     end_wall = wall()
     failed = [f"{name}: {f.exception()!r}" for name, f in getattr(self, 'jobs', []) if f.done() and f.exception() is not None]
     detail = '; '.join([detail] * bool(detail) + failed)
     res = score.summarize(self.plan.name, self.rows, outcome)
+    res['gas_taps'] = getattr(self, 'taps', GasTaps()).log  # every go the driver gave, with its reason
     res.update(run=self.run_idx + 1, detail=detail, t_start_wall=self.t0_wall, t_engaged_wall=self.t_engaged_wall, t_end_wall=end_wall,
                duration_s=round(end_wall - (self.t_engaged_wall or self.t0_wall), 1), rlog_segments=rlog_segments(self.t0_wall - 60.),
                rows=self.rows, pose_fields=POSE_FIELDS, poses=self.poses, actor_fields=ACTOR_FIELDS, actor_poses=self.actor_poses)
@@ -330,6 +340,8 @@ def main():
   ap.add_argument('--entry', default='', help='entry of --data by name (default: the first)')
   ap.add_argument('--web', default=f'http://127.0.0.1:{PORT}', help='turnpilot_web, where the destination goes')
   ap.add_argument('--cleanup', action='store_true', help='only remove leftover scenario actors from the game')
+  ap.add_argument('--signal-tap', choices=('on', 'off'), default='on',
+                  help="off: the driver never gives the go at a signal TurnPilot hasn't checked (the stop-at-the-line runs)")
   args, rest = ap.parse_known_args()
 
   from openpilot.tools.sim.bridge.beamng.run_bridge import config_from_args, parse_args
@@ -359,7 +371,8 @@ def main():
   sweep_game(bargs.host, bargs.port)
   ui = start_ui_recording(os.path.join(run_dir, 'ui.mp4')) if args.record and not args.no_ui else None
   q: Queue = Queue()
-  bridge = BeamNGBridge(cfg, scenario=Runner(plan, args.runs, run_dir, args.web.rstrip('/'), token, bargs.host, bargs.port))
+  bridge = BeamNGBridge(cfg, scenario=Runner(plan, args.runs, run_dir, args.web.rstrip('/'), token, bargs.host, bargs.port,
+                                             signal_tap=args.signal_tap == 'on'))
   p = bridge.run(q)
   try:
     p.join()

@@ -229,6 +229,38 @@ Later on 2026-10-27 (H3), same setup, 19.2-20.0 model runs a second in every run
 `route_stats.py` also says whether the detector was still running at the end of each run (`detector_up`: a
 `turnpilotDetections` in the last 5 s). Count a run only with the detector up and the model at 18 Hz or more.
 
+## Map stops and signals
+
+The driving model doesn't stop for red lights (0 of 31 in the phase 3 eval) and rarely for stop signs, so TurnPilot stops
+for the route's mapped controls (`selfdrive/turnpilot/map_controls.py`). In the sim the controls come from tiles built
+with the level's own stop signs and signals:
+
+```bash
+tools/turnpilot/build_sim_tiles.sh   # -> ~/turnpilot_data/valhalla/west_coast_usa_signals (seconds, no game needed)
+```
+
+It runs `maplanes.py`, then `mapsignals.py` on the committed `wcusa_map_node_signals.json` and `wcusa_stop_props.json`
+(re-dump them with `probe_signals.py` after a game or level update), builds the tiles, and adds `controls.json` (each
+control's real stop line) and the `controls_built` marker. Tiles without the marker are reported unsupported: on the old
+`west_coast_usa` and `west_coast_usa_lanes` tiles navd sends no controls, and TurnPilot says so on screen.
+`launch_openpilot.sh` uses the signals tiles by default once they are built, and turns `DisengageOnAccelerator` off:
+the driver's gas tap is the go at a stop sign or an unchecked signal, and turnpilotd refuses to run with it on.
+
+Signals are held for the driver's go whatever the light (no light source on the car). The sim's light oracle gives
+turnpilotd the game's light states instead, SIM ONLY:
+
+```bash
+TURNPILOT_LIGHT_ORACLE=1 OPENPILOT_PREFIX=tpsim openpilot/tools/sim/bridge/beamng/launch_openpilot.sh
+python -m openpilot.tools.sim.bridge.beamng.run_bridge --signals --light-oracle   # or the scenario runner, same flags
+```
+
+turnpilotd takes the oracle only with `SIMULATION=1` and `TurnPilotSimLightOracle` (which the launch sets, and which
+clears on every manager start); otherwise it rejects it out loud and holds. The scenario runner and `route_drive.py` tap
+the gas where a driver gives the go (`driver.GasTaps`, each tap logged with its reason in the results): at a stop sign
+TurnPilot holds past its dwell, at an unchecked signal only when the ground-truth light is green (`--signal-tap off`
+never), and standing engaged with nothing held. `light_oracle.py` and `probe_signals.py` haven't been run against the
+game yet: check the published states against the HUD first.
+
 ## Chase view
 
 A live chase camera (`--capture`) costs the driving cameras 6 to 9 pairs a second at any frame rate, and the model's
