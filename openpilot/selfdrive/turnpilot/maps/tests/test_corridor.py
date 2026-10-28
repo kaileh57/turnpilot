@@ -184,3 +184,31 @@ def test_a_pack_covers_the_places_its_level_2_tiles_do(tmp_path):
   assert pack.covers(*INDY) and pack.covers(-86.01, 39.99)
   assert not pack.covers(-86.4, 40.3)  # inside the 1 and 4 degree level 0 and 1 tiles, which cover nearly anything
   assert not pack.covers(INDY_EAST[0] + 0.3, INDY_EAST[1])
+
+
+def test_prune_and_packs_ignore_files_another_job_removes(tmp_path, monkeypatch):
+  import errno
+  from openpilot.selfdrive.turnpilot.maps import corridor
+  (tmp_path / '.download-gone.tar').write_bytes(b'x')
+  (tmp_path / '.staging-gone').mkdir()
+  real_stat = corridor.Path.stat
+
+  def vanishing_stat(self, *a, **kw):
+    if self.name in ('.download-gone.tar', '.staging-gone') or self.name == corridor.MANIFEST:
+      raise FileNotFoundError(errno.ENOENT, "removed by another job", str(self))
+    return real_stat(self, *a, **kw)
+  pack = tmp_path / '20260101-000000-abcdef'
+  pack.mkdir()
+  (pack / corridor.MANIFEST).write_text('{}')
+  monkeypatch.setattr(corridor.Path, 'stat', vanishing_stat)
+  assert corridor.packs(tmp_path) == []
+  corridor.prune(tmp_path)
+
+
+def test_a_path_component_longer_than_a_filename_is_a_bad_pack():
+  import pytest
+  from openpilot.selfdrive.turnpilot.maps.client import MapError
+  from openpilot.selfdrive.turnpilot.maps.corridor import member_path
+  with pytest.raises(MapError) as e:
+    member_path('tiles/2/' + 'a' * 300 + '.gph')
+  assert e.value.code == 'bad_pack'

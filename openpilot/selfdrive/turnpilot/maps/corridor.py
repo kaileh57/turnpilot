@@ -75,6 +75,8 @@ def member_path(name: str) -> str:
     parts = parts[1:]
   if not parts or any(p in ('..', '') for p in parts) or ':' in parts[0]:
     raise bad_pack(f"unsafe path {name!r}")
+  if any(len(p.encode()) > 255 for p in parts):  # longer than a filename can be: the server's mistake, not the comma's storage
+    raise bad_pack(f"path component too long in {name[:80]!r}")
   path = '/'.join(parts)
   if path != MANIFEST and parts[0] != TILES:
     raise bad_pack(f"unexpected file {path!r}")
@@ -186,19 +188,31 @@ def packs(packs_dir: Path) -> list[Path]:
   """Unpacked packs, oldest first: by when the manifest was written, the last step of an unpack."""
   if not packs_dir.is_dir():
     return []
-  found = [p for p in packs_dir.iterdir() if p.is_dir() and not p.name.startswith('.') and (p / MANIFEST).is_file()]
-  return sorted(found, key=lambda p: ((p / MANIFEST).stat().st_mtime_ns, p.name))
+  found = []
+  for p in packs_dir.iterdir():
+    if p.is_dir() and not p.name.startswith('.'):
+      if (mtime := mtime_ns(p / MANIFEST)) is not None:  # another job may delete a pack while we look
+        found.append((mtime, p.name, p))
+  return [p for _, _, p in sorted(found)]
+
+
+def mtime_ns(path: Path) -> int | None:
+  try:
+    return path.stat().st_mtime_ns
+  except FileNotFoundError:
+    return None
 
 
 def prune(packs_dir: Path, keep: int = KEEP_PACKS, in_use: Path | None = None):
   """Delete all but the newest keep packs, never the one in use, and staging directories and downloads left by a crash.
   A recent one may be another route job's, still in progress (navd doesn't wait for a cancelled job), so it stays."""
   stale_before = time.time() - STALE_DOWNLOAD_S  # noqa: TID251  # file times are wall clock
+  # another route job may rename or delete its files between the glob and the stat; a vanished file needs no pruning
   for stale in packs_dir.glob('.staging-*') if packs_dir.is_dir() else []:
-    if stale.stat().st_mtime < stale_before:
+    if (mtime := mtime_ns(stale)) is not None and mtime < stale_before * 1e9:
       shutil.rmtree(stale, ignore_errors=True)
   for stale in packs_dir.glob('.download-*.tar') if packs_dir.is_dir() else []:
-    if stale.stat().st_mtime < stale_before:
+    if (mtime := mtime_ns(stale)) is not None and mtime < stale_before * 1e9:
       stale.unlink(missing_ok=True)
   for old in packs(packs_dir)[:-keep] if keep > 0 else packs(packs_dir):
     if in_use is None or old.resolve() != in_use.resolve():
