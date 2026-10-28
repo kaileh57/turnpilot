@@ -91,6 +91,7 @@ CROSSWALK_STEADY_S = 1.0
 CROSSWALK_LEAVING_SPEED = 0.8
 CROSSWALK_LEAVING_PAST_M = 3.
 CROSSWALK_LEAVING_RATIO = 0.5
+CROSSWALK_LEAVING_FRAMES = 10  # ScenePolicy: leaving on this many frames in a row (0.5 s), not a frame of velocity noise
 KEEP_EVIDENCE_S = max(MAX_AGE_S, CLOSE_HOLD_S)  # the longest the tracker keeps a track it no longer matches
 
 ONCOMING_TTA_S = 5.         # hold while an oncoming vehicle reaches the junction sooner than this
@@ -208,8 +209,9 @@ def leaving_crosswalk(obj, distance: float, side: int) -> bool:
 
 
 def junction_stops(objects, maneuver, distance, v_ego, right_hand_traffic, is_walker=crosswalk_walker,
-                   is_confirmed=confirmed_track) -> list[Stop]:
-  """Holds at the hold line before a turn: the crosswalk of a curb-side turn, oncoming traffic across a far-side one."""
+                   may_leave=confirmed_track) -> list[Stop]:
+  """Holds at the hold line before a turn: the crosswalk of a curb-side turn, oncoming traffic across a far-side one.
+  may_leave: whether a walker's velocity is trusted to let it go when it is leaving the crosswalk."""
   if not hold_line_stop(maneuver, distance, v_ego, ""):
     return []
   side = maneuver.side  # the crosswalk and the oncoming lanes are both on the turn side; y is positive left
@@ -218,7 +220,7 @@ def junction_stops(objects, maneuver, distance, v_ego, right_hand_traffic, is_wa
     walkers = [obj for obj in objects if str(obj.cls) == "pedestrian" and is_walker(obj) and
                distance - CROSSWALK_X_BEFORE_M < obj.x < distance + CROSSWALK_X_AFTER_M and
                CROSSWALK_Y_NEAR_M < obj.y * side < CROSSWALK_Y_FAR_M and
-               not (is_confirmed(obj) and leaving_crosswalk(obj, distance, side))]
+               not (may_leave(obj) and leaving_crosswalk(obj, distance, side))]
     return hold_line_stop(maneuver, distance, v_ego, "pedestrian in crosswalk") if walkers else []
   for obj in objects:
     toward = -obj.vx
@@ -255,6 +257,7 @@ class TrackEvidence:
   recent: deque = field(default_factory=deque)  # times of its hits in the last CROSSWALK_STEADY_S
   confirmed: bool = False                       # earned a hard stop
   walker: bool = False                          # earned a crosswalk hold
+  leaving: int = 0                              # frames in a row leaving the turn's crosswalk
 
 
 class ScenePolicy:
@@ -278,9 +281,13 @@ class ScenePolicy:
     if available:
       objects = list(objects)
       self.update_evidence(objects)
+      for obj in objects:
+        ev = self.tracks[obj.trackId]
+        leaving = maneuver is not None and maneuver.kind == TURN and leaving_crosswalk(obj, distance, maneuver.side)
+        ev.leaving = ev.leaving + 1 if leaving else 0
       peds = pedestrian_stops(objects, v_ego, lambda obj: self.tracks[obj.trackId].confirmed)
       junction = junction_stops(objects, maneuver, distance, v_ego, right_hand_traffic, lambda obj: self.tracks[obj.trackId].walker,
-                                lambda obj: self.tracks[obj.trackId].confirmed)
+                                lambda obj: self.tracks[obj.trackId].confirmed and self.tracks[obj.trackId].leaving >= CROSSWALK_LEAVING_FRAMES)
       self.carried = peds
       self.carried_junction = (maneuver_id, junction[0].reason) if junction else None
     else:

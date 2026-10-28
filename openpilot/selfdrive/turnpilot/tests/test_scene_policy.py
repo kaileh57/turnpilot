@@ -1,7 +1,7 @@
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot.hooks import plan_accel
 from openpilot.selfdrive.turnpilot.route_follower import NOMINAL_ANGLE_DEG, Maneuver, classify
-from openpilot.selfdrive.turnpilot.scene_policy import (ACCEL_CAP_JERK, GAS_RELEASE_M, HOLD_LINE_M, NO_ACCEL_CAP, NO_SPEED_CAP,
+from openpilot.selfdrive.turnpilot.scene_policy import (ACCEL_CAP_JERK, CROSSWALK_LEAVING_FRAMES, GAS_RELEASE_M, HOLD_LINE_M, NO_ACCEL_CAP, NO_SPEED_CAP,
                                                         PED_STOP_GAP_M, STOP_DECEL, ScenePolicy, scene_policy)
 from openpilot.selfdrive.turnpilot.tests.synthetic import scene
 
@@ -363,3 +363,21 @@ def test_crosswalk_hold_lets_a_walker_leaving_it_go():
   assert not scene_policy(sc.objects, True, LEFT_TURN, HOLD_LINE_M, 0., right_hand_traffic=False).holding
   sc = scene([ped(15., 10.)])
   assert scene_policy(sc.objects, True, left_line['maneuver'], HOLD_LINE_M, 0., right_hand_traffic=False).holding
+
+
+def test_crosswalk_hold_needs_a_walker_steadily_leaving():
+  # a Kalman velocity on a person standing at the corner can read a walking pace away for a frame or two: the hold stays.
+  # Walking away for CROSSWALK_LEAVING_FRAMES in a row lets it go
+  def walker(sp, k, x, y, vy):  # a confirmed walker the detector sees on each 10 Hz run
+    sc = scene([ped(x, y, vy=vy, age=10 + k // 2)])
+    return sp.update(sc.objects, True, RIGHT_TURN, HOLD_LINE_M, 0., maneuver_id=0)
+  warm_up = int(1. / DT_MDL)
+  sp, noisy = ScenePolicy(), (-1.2, 0.1, 0.0, -1.1, 0.2)
+  for k in range(int(6. / DT_MDL)):
+    d = walker(sp, k, 5., -6., 0. if k < warm_up else noisy[k % len(noisy)])
+    assert k < warm_up or (d.should_stop and d.reason == "pedestrian in crosswalk"), k
+  sp = ScenePolicy()
+  for k in range(warm_up):
+    walker(sp, k, 10., -9., 0.)
+  holds = [walker(sp, warm_up + k, 10., -9., -1.3).holding for k in range(2 * CROSSWALK_LEAVING_FRAMES)]
+  assert all(holds[:CROSSWALK_LEAVING_FRAMES - 1]) and not any(holds[CROSSWALK_LEAVING_FRAMES:])

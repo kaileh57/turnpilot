@@ -432,11 +432,14 @@ def test_model_fallback_hands_back_and_cancels_the_route():
 
 def test_small_model_from_the_start_is_not_a_fallback():
   # no chestnut: modeld runs the small model from the start. That is no fallback; with no detector pkl for the small
-  # model there are no detections, so TurnPilot waits for them
+  # model there are no detections: TurnPilot waits for them, then hands back as a detector that never started
   sim = Sim([(400., "turn", "left")])
   for _ in range(int(5. / DT_MDL)):
     plan = sim.step(available=False)
   assert plan.handback == Handback.none and plan.reason == WAITING_REASON and not sim.tp.cancel_route
+  for _ in range(int(DETECTOR_START_DEADLINE_S / DT_MDL)):
+    plan = sim.step(available=False)
+  assert plan.handback == Handback.noDetector and not sim.tp.cancel_route
 
 
 def offered_sim(**kwargs):
