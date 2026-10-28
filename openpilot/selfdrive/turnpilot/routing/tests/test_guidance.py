@@ -101,8 +101,8 @@ class TestGuidance(unittest.TestCase):
   def test_junction_or_bend(self):
     # recorded from Valhalla: a left at a four-way junction, then the road bending right where no other road meets it
     steps = steps_of('valhalla_left_then_right.json')
-    self.assertEqual(maneuver_junction(steps, 0), {'before': 90., 'after': 0., 'branches': 2})
-    self.assertEqual(maneuver_junction(steps, 1), {'before': 0., 'after': 90., 'branches': 0})
+    self.assertEqual(maneuver_junction(steps, 0), {'before': 90., 'after': 0., 'branches': 2, 'opposing': 'present'})
+    self.assertEqual(maneuver_junction(steps, 1), {'before': 0., 'after': 90., 'branches': 0, 'opposing': 'none'})
     self.assertIsNone(maneuver_junction(steps, 2))  # the arrival has no exit
     self.assertIsNone(maneuver_junction(steps, 3))  # nothing after the last step
     instruction = messaging.new_message('navInstruction').navInstruction
@@ -139,6 +139,38 @@ class TestGuidance(unittest.TestCase):
             'intersections': [{'bearings': [71, 200], 'entry': [True, False], 'in': 1, 'out': 0}]}
     self.assertEqual(maneuver_junction([{}, bend], 0)['branches'], 0)
     self.assertIsNone(maneuver_junction([{}, {'maneuver': {'type': 'turn'}, 'intersections': []}], 0))
+
+  def test_opposing_approach(self):
+    # a road leaving the junction straight ahead (within OPPOSING_DEG of the way the car comes in) carries the oncoming
+    # traffic a far-side turn crosses; the one-way-away road isn't told apart from a two-way one, so it counts too
+    def junction(bearings, entry, i_in, out, before, after):
+      step = {'maneuver': {'type': 'turn', 'modifier': 'left', 'bearing_before': before, 'bearing_after': after},
+              'intersections': [{'bearings': bearings, 'entry': entry, 'in': i_in, 'out': out}]}
+      return maneuver_junction([{}, step], 0)
+    # recorded from Valhalla: the left at a four-way junction has a road straight ahead
+    self.assertEqual(maneuver_junction(steps_of('valhalla_left_then_right.json'), 0)['opposing'], 'present')
+    # a left off the through road of a T, the road going on ahead
+    self.assertEqual(junction([0, 90, 270], [True, True, False], 2, 0, 90, 0)['opposing'], 'present')
+    # a left from a T's stem: nothing ahead (cross traffic only)
+    self.assertEqual(junction([24, 203, 294], [True, False, False], 2, 0, 114, 24)['opposing'], 'none')
+    # the road ahead kinks 30 degrees: still ahead; a road 60 degrees off isn't
+    self.assertEqual(junction([0, 120, 270], [True, True, False], 2, 0, 90, 0)['opposing'], 'present')
+    self.assertEqual(junction([0, 150, 270], [True, True, False], 2, 0, 90, 0)['opposing'], 'none')
+    # one-way toward the junction (entry false): oncoming traffic all the same
+    self.assertEqual(junction([0, 90, 270], [True, False, False], 2, 0, 90, 0)['opposing'], 'present')
+    # into navInstruction, and onto the Maneuver; no junction data is unknown, never none
+    instruction = messaging.new_message('navInstruction').navInstruction
+    fill_guidance(instruction, steps_of('valhalla_left_then_right.json'), 0, 300)
+    self.assertEqual(instruction.maneuverOpposing, 'present')
+    self.assertEqual(instruction.allManeuvers[0].opposing, 'present')
+    self.assertEqual(instruction.allManeuvers[2].opposing, 'unknown')  # the arrival: no junction
+    instruction.maneuverType, instruction.maneuverModifier = 'turn', 'left'
+    self.assertEqual(maneuver_from_instruction(instruction).opposing, 'present')
+    fill_guidance(instruction, steps_of('valhalla_left_then_right.json'), 2, 0)
+    self.assertEqual(instruction.maneuverOpposing, 'unknown')
+    blank = messaging.new_message('navInstruction').navInstruction
+    blank.maneuverType, blank.maneuverModifier = 'turn', 'left'
+    self.assertEqual(maneuver_from_instruction(blank).opposing, 'unknown')
 
   def test_real_angle_and_side(self):
     instruction = messaging.new_message('navInstruction').navInstruction

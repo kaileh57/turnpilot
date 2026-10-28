@@ -95,6 +95,7 @@ class Maneuver:
   bend: bool = False      # the road bends here and no other road meets it: left to the model (kind NONE)
   bearing_side: int = 0   # LEFT or RIGHT as the bearings turn, 0 without them or under SIDE_MIN_DEG
   bearings: tuple = ()    # (bearing_before, bearing_after) with geometry
+  opposing: str = 'unknown'  # NavInstruction.Opposing: a road straight ahead whose traffic a far-side turn crosses
 
   @property
   def ramp(self) -> bool:
@@ -135,25 +136,28 @@ def turn_angle(bearing_before: float, bearing_after: float) -> float:
 def maneuver_from_instruction(instruction) -> Maneuver:
   return make_maneuver(instruction.maneuverType, instruction.maneuverModifier, lanes_from_instruction(instruction),
                        instruction.maneuverGeometryValid, instruction.maneuverBearingBefore, instruction.maneuverBearingAfter,
-                       instruction.maneuverBranches)
+                       instruction.maneuverBranches, str(instruction.maneuverOpposing))
 
 
 def maneuver_from_ahead(ahead) -> Maneuver:
   """A Maneuver from a NavInstruction.Maneuver (allManeuvers), which has no lanes."""
-  return make_maneuver(ahead.type, ahead.modifier, (), ahead.geometryValid, ahead.bearingBefore, ahead.bearingAfter, ahead.branches)
+  return make_maneuver(ahead.type, ahead.modifier, (), ahead.geometryValid, ahead.bearingBefore, ahead.bearingAfter, ahead.branches,
+                       str(ahead.opposing))
 
 
 def make_maneuver(mtype: str, modifier: str, lanes: tuple, geometry_valid: bool, bearing_before: float, bearing_after: float,
-                  branches: int) -> Maneuver:
+                  branches: int, opposing: str = 'unknown') -> Maneuver:
   kind, side = classify(mtype, modifier)
   if not geometry_valid:
-    return Maneuver(kind, side, mtype, modifier, NOMINAL_ANGLE_DEG.get(modifier, 0.), lanes)
+    return Maneuver(kind, side, mtype, modifier, NOMINAL_ANGLE_DEG.get(modifier, 0.), lanes)  # opposing unknown
   angle = turn_angle(bearing_before, bearing_after)
   bearing_side = 0 if abs(angle) < SIDE_MIN_DEG else RIGHT if angle > 0 else LEFT
   bearings = (float(bearing_before), float(bearing_after))
   if kind in (TURN, KEEP) and branches == 0:
-    return Maneuver(NONE, 0, mtype, modifier, abs(angle), lanes, geometry=True, bend=True, bearing_side=bearing_side, bearings=bearings)
-  return Maneuver(kind, side, mtype, modifier, abs(angle), lanes, geometry=True, bearing_side=bearing_side, bearings=bearings)
+    return Maneuver(NONE, 0, mtype, modifier, abs(angle), lanes, geometry=True, bend=True, bearing_side=bearing_side, bearings=bearings,
+                    opposing=opposing)
+  return Maneuver(kind, side, mtype, modifier, abs(angle), lanes, geometry=True, bearing_side=bearing_side, bearings=bearings,
+                  opposing=opposing)
 
 
 def same_bearings(a: Maneuver, b: Maneuver) -> bool:

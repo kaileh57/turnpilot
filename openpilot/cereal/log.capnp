@@ -2477,6 +2477,15 @@ struct NavInstruction {
   # controlsStatus is set on every valid message: zero controls with a status other than ok is never "clear".
   controls @20 :List(MapControl);
   controlsStatus @21 :ControlsStatus;
+  # TurnPilot: whether a road leaves the maneuver's junction straight ahead, against which a far-side turn (a left on the
+  # right) crosses its oncoming traffic (routing/guidance.py). unknown without junction data: never read as none
+  maneuverOpposing @22 :Opposing;
+
+  enum Opposing {
+    unknown @0;  # no intersection data for the junction (or a navd from before the field)
+    none @1;     # no road straight ahead: no oncoming approach
+    present @2;  # a road straight ahead, two-way or one-way (one-way away isn't told apart: counted)
+  }
 
   struct MapControl {
     id @0 :UInt16;            # index along the route; the identity is (routeCount, id)
@@ -2529,6 +2538,7 @@ struct NavInstruction {
     bearingBefore @4 :Float32;
     bearingAfter @5 :Float32;
     branches @6 :UInt8;
+    opposing @7 :Opposing;
   }
 }
 

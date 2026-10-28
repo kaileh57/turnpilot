@@ -15,7 +15,8 @@ def set_lanes(builder, field, lanes):
 def nav_instruction(distance, mtype="turn", modifier="left", remaining=None, lanes=(), valid=True, junction=None,
                     through=None, route_count=0, ahead=(), controls=(), controls_status=None):
   """A navInstruction reader. lanes: ((directions, active), ...) left to right. junction: (bearing_before,
-  bearing_after, branches) from Valhalla, or None for a route without intersection data. through: (lanes, distance).
+  bearing_after, branches[, opposing]) from Valhalla, or None for a route without intersection data; opposing is
+  NavInstruction.Opposing's name, unknown when left out. through: (lanes, distance).
   route_count: navd's routeCount. ahead: the maneuvers after this one for allManeuvers, [(distance, type, modifier[,
   junction]), ...]; allManeuvers starts with this one, as navd's does. controls: map stop controls, [(id, kind, distance[,
   line_mapped, junction, cross_suspect]), ...]; controls_status: navd's controlsStatus ('ok' when there are controls)."""
@@ -28,7 +29,8 @@ def nav_instruction(distance, mtype="turn", modifier="left", remaining=None, lan
     m.distance, m.type, m.modifier = float(m_distance), m_type, m_modifier
     if m_junction is not None:
       m.geometryValid = True
-      m.bearingBefore, m.bearingAfter, m.branches = m_junction
+      m.bearingBefore, m.bearingAfter, m.branches = m_junction[:3]
+      m.opposing = m_junction[3] if len(m_junction) > 3 else 'unknown'
   ni.maneuverDistance = float(distance)
   ni.maneuverType = mtype
   ni.maneuverModifier = modifier
@@ -37,7 +39,8 @@ def nav_instruction(distance, mtype="turn", modifier="left", remaining=None, lan
     set_lanes(ni, 'lanes', lanes)
   if junction is not None:
     ni.maneuverGeometryValid = True
-    ni.maneuverBearingBefore, ni.maneuverBearingAfter, ni.maneuverBranches = junction
+    ni.maneuverBearingBefore, ni.maneuverBearingAfter, ni.maneuverBranches = junction[:3]
+    ni.maneuverOpposing = junction[3] if len(junction) > 3 else 'unknown'
   if through is not None:
     set_lanes(ni, 'throughLanes', through[0])
     ni.throughLanesDistance = float(through[1])
@@ -50,10 +53,11 @@ def nav_instruction(distance, mtype="turn", modifier="left", remaining=None, lan
   return msg.as_reader().navInstruction
 
 
-def junction_of(modifier, branches=2, angle=None):
-  """(bearing_before, bearing_after, branches) for a turn heading north: a right turns to 90, a left to 270 (or by angle)."""
+def junction_of(modifier, branches=2, angle=None, opposing='present'):
+  """(bearing_before, bearing_after, branches, opposing) for a turn heading north: a right turns to 90, a left to 270 (or
+  by angle). opposing: a road straight ahead (a four-way junction's), 'none' for a T's stem."""
   side = -1 if 'left' in modifier else 1
-  return 0., (side * (angle if angle is not None else 90.)) % 360., branches
+  return 0., (side * (angle if angle is not None else 90.)) % 360., branches, opposing
 
 
 class FakeNavd:
