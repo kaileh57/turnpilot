@@ -267,6 +267,16 @@ class TestOncomingLane:
     for name in ('route_demo', 'ped_crosswalk_right', 'unprotected_left', 'occupied_lane', 'ped_in_path'):
       assert any('oncoming lane' in f for f in score.summarize(name, self.lane_run(1.75), 'arrived', road=self.ROAD)['failures'])
 
+  def test_straddling_the_divider_fails(self):
+    # the car's centre short of the divider by less than half its width less the road model's error: its left wheels are
+    # in the oncoming lane, as with its centre over the divider. Every one fails, however far it drives so
+    for y in (-0.3, 0.0, 0.5, 0.9):
+      res = score.summarize('lane_change', self.lane_run(y), 'arrived', road=self.ROAD)
+      assert res['wrong_side_m'] == pytest.approx(100.0, abs=1.0), y
+      assert any('oncoming lane' in f for f in res['failures']), y
+    # wandering in its own lane, its left side still short of the divider, passes
+    assert score.summarize('lane_change', self.lane_run(-1.2), 'arrived', road=self.ROAD)['wrong_side_m'] == 0.0
+
   def test_its_own_lane_passes(self):
     res = score.summarize('lane_change', self.lane_run(-1.75), 'arrived', road=self.ROAD)
     assert res['wrong_side_m'] == 0.0 and not any('oncoming' in f for f in res['failures'])

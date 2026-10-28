@@ -65,6 +65,9 @@ class FakeDirector:
     self.calls.append(('close', ()))
 
 
+LANE_OFFSET_M = 1.75  # the fake car drives this far right of the line between the plan's points: in its own lane
+
+
 class World:
   """The car and navd: drives spawn -> junction -> destination at 8 m/s once engaged."""
   def __init__(self, plan, clock):
@@ -75,10 +78,13 @@ class World:
     self.msgs, self.updated, self.next_nav = {}, set(), 0.0
 
   def pos(self):
+    """On the way from one point to the next, kept a lane's width (LANE_OFFSET_M) right of the line between them: driving
+    the straight line to the junction's centre would put the car on the divider the last 40 m of the way."""
     i = min(int(np.searchsorted(self.seg, self.s, side='right')), len(self.path) - 1)
     a, b = self.path[i - 1], self.path[i]
     f = (self.s - self.seg[i - 1]) / (self.seg[i] - self.seg[i - 1])
-    return a + min(f, 1.0) * (b - a), math.atan2(b[1] - a[1], b[0] - a[0])
+    h = math.atan2(b[1] - a[1], b[0] - a[0])
+    return a + min(f, 1.0) * (b - a) + LANE_OFFSET_M * np.array([math.sin(h), -math.cos(h)]), h
 
   def web(self, url, token, method, body=None):
     assert token == 'tok' and url.endswith('/api/destination')

@@ -40,7 +40,10 @@ CAUSE_WINDOW_S = 5.    # a disengagement's cause is the last alert this soon bef
 COLLISION_GAP_M = 2.5  # camera mount to object: about where the bumper touches (the mount sits ~2 m behind it)
 PED_STOP_GAP = (3., 8.)
 CAR_MIN_GAP_M = 4.     # camera mount to the other car's centre
-WRONG_SIDE_PAST_M = 1.0  # the camera mount (the car's centreline) this far left of the road's divider: in the oncoming lane
+# the camera mount (the car's centreline) past this far left of the road's divider (negative: short of it): the car is in the
+# oncoming lane. Half the car's width (0.95 m) less the road model's error (clean runs keep the centre 1.45-1.65 m short of
+# it, p99): straddling the divider with the left wheels over it counts, not only a car wholly across
+WRONG_SIDE_PAST_M = -0.5
 WRONG_SIDE_MIN_M = 3.  # driving this far in the oncoming lane, outside every junction box, fails the run
 ON_ROAD_M = 1.5        # within the road's half width plus this of a link's centreline: on that road
 ALIGNED_DEG = 35.      # the car's heading within this of a link's direction (either way): driving along it
