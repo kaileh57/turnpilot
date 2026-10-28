@@ -81,8 +81,11 @@ python3 -m openpilot.selfdrive.turnpilot.preflight --set TurnPilotEnabled=1 --se
 | --- | --- | --- |
 | `TurnPilotEnabled` | 1 | Starts `turnpilot_web` (the phone app) within a few seconds, makes `turnpilotd` produce a plan, and makes modeld load the detector the next time the car turns on. |
 | `TurnPilotShadowMode` | 1 | TurnPilot computes the plan and publishes it marked as shadow. modeld and the planner ignore it, so the car drives as stock openpilot. Set it to 0 only from the second rung of the car ladder. |
-| `TurnPilotRouteSource` | `auto` (default) | Routes with Valhalla when `TurnPilotValhallaTiles` is usable, and with Mapbox otherwise. `valhalla` and `mapbox` force one. |
-| `TurnPilotValhallaTiles` | a path | Where the tiles are. Set below. |
+| `TurnPilotMapHost` | `https://<ip>` | TurnPilot's map server. Set it in the phone app's Map server section. |
+| `TurnPilotMapKey` | the API key | Sent as a Bearer token. Set it in the phone app, which never shows it again (only its last 4 characters). |
+| `TurnPilotMapCert` | PEM | The server's self-signed certificate. Every request is verified against it. |
+| `TurnPilotValhallaTiles` | unset | Developer and sim override (BeamNG sets it): route on these local tiles, with no geofence and no download. Leave it unset in the car. |
+| `TurnPilotRouteSource` | `auto` | Left over from Mapbox routing. `mapbox` is now an error; anything else is ignored. |
 | `TurnPilotWebToken` | generated | The phone's password. `turnpilot_web` creates it on its first run. |
 
 ## Install Valhalla for offline routing
@@ -95,26 +98,16 @@ bash tools/turnpilot/install_valhalla_device.sh
 
 The script checks the wheel's sha256, unpacks it, and imports it as a test. It needs 300 MB free. For an install with no internet on the comma, copy the wheel over with `scp` and run `PYVALHALLA_WHEEL=/path/to/wheel bash tools/turnpilot/install_valhalla_device.sh`.
 
-## Copy the Indiana tiles
+## Set up the map server
 
-Put your computer and the comma on one network. Your phone's hotspot works for this; so does home Wi-Fi, with the same commands. Nobody has tried the hotspot path yet. If the hotspot blocks traffic between devices, use home Wi-Fi.
+TurnPilot routes only inside its mapped areas, around Indianapolis and Seattle. There is no Mapbox and no fallback.
 
-On your computer:
+1. Open the phone app, then **Map server**. Enter the address, the API key and the server's certificate (PEM), and tap **Save and check**. The comma fetches the mapped area at once, so the comma must be online. It then refreshes it every 6 hours while online and keeps it in `/data/turnpilot/maps/coverage.json`.
+2. The **Mapped area** section draws the areas, the car and the destination. A destination outside them is refused with "Outside TurnPilot's mapped area". Until the comma has fetched the mapped area once, every destination is refused.
+3. When a destination is set, navd downloads that drive's map (a corridor of tiles around the route, 20-50 MB) from the server, checks every file's SHA-256, and unpacks it under `/data/turnpilot/maps/corridors/`. The phone shows "Downloading map for this drive…" and then "Ready". Reroutes run on the comma with no internet. The last 3 corridors are kept.
+4. Any failure means no route, with the reason on the phone and on the comma's onroad screen ("No route"): server unreachable, wrong key, certificate mismatch, a corridor that fails its check, or the server refusing the drive.
 
-```
-ssh comma@<address> mkdir -p /data/turnpilot/valhalla/indiana
-scp ~/turnpilot_data/valhalla/indiana/tiles.tar comma@<address>:/data/turnpilot/valhalla/indiana/
-```
-
-Copy only `tiles.tar`. The other files in that folder (`tiles/`, `valhalla.json`, `admin.sqlite`, `build.log`) are for building, and routing works without them.
-
-On the comma:
-
-```
-python3 -m openpilot.selfdrive.turnpilot.preflight --set TurnPilotValhallaTiles=/data/turnpilot/valhalla/indiana
-```
-
-Preflight then loads the tiles and routes about 2 km across downtown Indianapolis, which proves pyvalhalla and the tiles work together.
+The developer override is `TurnPilotValhallaTiles`: point it at a tile directory or `tiles.tar` (as the sim does) and navd routes on those tiles with no geofence and no download. Preflight then routes about 2 km across downtown Indianapolis on them.
 
 ## Restart the car
 
@@ -149,13 +142,14 @@ Each line starts with PASS, FAIL, WARN or INFO. A FAIL line is followed by a `fi
 | `car` | The comma has identified the car, and it is not in dashcam mode |
 | `alpha longitudinal` | The toggle is on, and the last drive started with it |
 | `navigation`, `TurnPilot` | `NavigationEnabled` and `TurnPilotEnabled` are on |
-| `pyvalhalla`, `valhalla tiles`, `routing test` | pyvalhalla imports, the tiles are usable, and a real route comes back |
+| `map server` | The address, key and certificate are set and the mapped area has been fetched |
+| `pyvalhalla`, `valhalla tiles`, `routing test` | pyvalhalla imports; with `TurnPilotValhallaTiles` set, those tiles are usable and a real route comes back |
 | `big driving model` | The 775 MB pickle and both warps are real files, not LFS pointers. If they are pointers, modeld quietly runs the small model |
 | `detector pkl` | `big_detector_1344x760_tinygrad.pkl` exists. Without it the planner holds every left turn |
 | `chestnut` | The chestnut is present with its firmware and a USB 3 link |
 | `web token`, `pairing URL`, `web server` | The token exists, the comma has a network address, and `turnpilot_web` answers on port 8088 |
 
-`shadow mode` and `route source` are INFO lines. If you set `TurnPilotRouteSource` to `mapbox`, preflight skips the Valhalla checks.
+`shadow mode` and `route source` are INFO lines. `route source` warns when `TurnPilotValhallaTiles` is set, since the car should use the map server.
 
 ## Update
 
@@ -171,7 +165,7 @@ The updater applies a downloaded update at the next boot, and the comma boots ev
 python3 -m openpilot.selfdrive.turnpilot.preflight --set DisableUpdates=1
 ```
 
-Set it to 0 when you want to update. The files in `/data/turnpilot` (pyvalhalla and the tiles) stay through updates, but not through an uninstall.
+Set it to 0 when you want to update. The files in `/data/turnpilot` (pyvalhalla and the maps) stay through updates, but not through an uninstall.
 
 ## When something fails
 
