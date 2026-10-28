@@ -28,6 +28,7 @@ CROSSWALK_PAST_EDGE_M = 2.5  # the crosswalk across the exit road, this far past
 WALK_AWAY_M = 10.        # after crossing, the walker goes this far along the far sidewalk, out of the crosswalk zone
 PACER_END_BEFORE_M = 50.  # the pacer's lane ends this far before the junction
 CLEAR_OF_JUNCTION_M = 25.  # a spawn this close to another junction moves up the approach
+ROAD_MARGIN_M = 150.     # the road model covers the box around spawn, junction and destination, this much bigger
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,7 @@ class Plan:
   end_on_stop_s: float
   actors: list
   notes: dict
+  road: dict | None = None  # road_model() around the run, for the score's oncoming-lane check
 
 
 # *** road geometry ***
@@ -370,14 +372,39 @@ def _data_plan(name: str, e: Entry, graph: RoadGraph, data: dict) -> Plan:
   return Plan(name, spawn, heading, dest, junction, speed, e.timeout_s, e.end_on_stop_s, actors, notes)
 
 
+def road_model(graph: RoadGraph, points, margin: float = ROAD_MARGIN_M) -> dict:
+  """The roads in the box around points, grown by margin, for score.oncoming_offsets: each link as
+  [ax, ay, bx, by, ra, rb, lanes] (lanes for travel a -> b, left to right, as RoadGraph.lanes_toward reads them), and each
+  junction as [x, y, box]: within box m of its node a turn may cross the road's divider (the hold line, plus the widest
+  road at it)."""
+  pts = np.array([p[:2] for p in points if p is not None], dtype=float)
+  lo, hi = pts.min(axis=0) - margin, pts.max(axis=0) + margin
+  def inside(n):
+    return bool((graph.pos[n][:2] >= lo).all() and (graph.pos[n][:2] <= hi).all())
+  links, seen = [], set()
+  for link in graph.links.values():
+    a, b = link['inNode'], link['outNode']
+    if (a, b) in seen or not (inside(a) or inside(b)):
+      continue
+    seen.add((a, b))
+    links.append([*(round(float(v), 2) for v in graph.pos[a][:2]), *(round(float(v), 2) for v in graph.pos[b][:2]),
+                  round(graph.radius[a], 2), round(graph.radius[b], 2), graph.lanes_toward(b, a)])
+  junctions = [[round(float(graph.pos[j][0]), 2), round(float(graph.pos[j][1]), 2),
+                round(HOLD_LINE_M + max(graph.radius[n] for n in (j, *graph.adj[j])), 2)] for j in graph.junctions() if inside(j)]
+  return {'links': links, 'junctions': junctions}
+
+
 def build(name: str, graph: RoadGraph | None = None, data_path: str = DATA_JSON, entry: str = '') -> Plan:
   e = SCENARIOS[name]
-  if e.kind == 'route':
-    return Plan(name, e.spawn, math.radians(e.heading_deg), e.dest, None, e.speed_kph, e.timeout_s, e.end_on_stop_s, [], {})
   graph = RoadGraph() if graph is None else graph
-  if e.kind == 'data':
-    return _data_plan(name, e, graph, load_data(data_path, entry))
-  return _turn_plan(name, e, graph)
+  if e.kind == 'route':
+    plan = Plan(name, e.spawn, math.radians(e.heading_deg), e.dest, None, e.speed_kph, e.timeout_s, e.end_on_stop_s, [], {})
+  elif e.kind == 'data':
+    plan = _data_plan(name, e, graph, load_data(data_path, entry))
+  else:
+    plan = _turn_plan(name, e, graph)
+  plan.road = road_model(graph, [plan.spawn, plan.junction, plan.dest])
+  return plan
 
 
 def hold_distance(plan: Plan, x: float, y: float) -> float:

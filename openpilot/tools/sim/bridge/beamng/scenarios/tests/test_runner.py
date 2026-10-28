@@ -189,8 +189,10 @@ def test_runs_end_to_end(tmp_path, monkeypatch, name, runs, trigger, failure):
   actors = sum(a.trigger == {'walk': 'walk', 'release': 'oncoming', 'release_pacer': 'pace'}[trigger] for a in plan.actors)
   assert names.count('setup') == runs and names.count(trigger) == runs * actors and names.count('cleanup') >= runs and names[-1] == 'close'
   assert [c[1][2] for c in runner.director.calls if c[0] == 'web'] == ['DELETE', 'POST'] * runs
+  assert out['road'] == plan.road
   for r in out['runs']:
     assert r['maneuvers_attempted'] == 1 and not r['disengagements']
+    assert r['wrong_side_m'] == 0.0  # checked against the plan's road model, saved beside the runs for a rescore
     assert r['failures'][0] == failure
     gap = 'ped_gap' if name.startswith('ped') else 'car_gap'
     assert any(row[gap] is not None for row in r['rows'])
@@ -199,6 +201,13 @@ def test_runs_end_to_end(tmp_path, monkeypatch, name, runs, trigger, failure):
     assert set(r['actor_poses']) == {a.name for a in plan.actors}
     for a in r['actor_poses'].values():
       assert len(a['rows'][0]) == len(run.ACTOR_FIELDS)
+
+
+def test_a_plan_without_a_road_model_is_refused():
+  plan = catalog.build('unprotected_left')
+  plan.road = None
+  with pytest.raises(ValueError, match="no road model"):
+    run.Runner(plan, 1, '/tmp', 'http://127.0.0.1:8088', 'tok', 'host', 0)
 
 
 def test_driver_taps_the_gas_where_turnpilot_asks_for_a_go(monkeypatch):

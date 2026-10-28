@@ -10,7 +10,7 @@ DT = 0.05
 
 
 def row(t, **kw):
-  r = {'t': t, 'x': 0.0, 'y': 0.0, 'v': 8.0, 'enabled': True, 'alert': '', 'alert_text': '', 'steer': False, 'gas': False, 'brake': False,
+  r = {'t': t, 'x': None, 'y': None, 'heading': None, 'v': 8.0, 'enabled': True, 'alert': '', 'alert_text': '', 'steer': False, 'gas': False, 'brake': False,
        'state': 'following', 'reason': '', 'lc': 'none', 'prompt': 'none', 'lc_state': 'off', 'nav_valid': True, 'nav_type': 'turn',
        'nav_mod': 'right', 'nav_dist': 100.0, 'nav_remaining': 300.0, 'route': 1, 'dest_dist': 200.0, 'ped_gap': None, 'car_gap': None,
        'pacer_dx': None, 'blinker': '', 'control_prompt': 'none'}
@@ -235,6 +235,58 @@ class TestGasTaps:
   def test_an_unprotected_left_that_never_stops_at_its_line_fails(self):
     res = score.summarize('unprotected_left', self.left_run(stop=False), 'arrived')
     assert "never stopped at the unprotected left's hold line for the driver's go" in res['failures']
+
+
+class TestOncomingLane:
+  """A two-way road east-west along y = 0, two 3.5 m lanes ('-+' for eastbound travel: the westbound lane on the left,
+  north), with a junction at x = 0 whose box reaches 11.5 m."""
+  ROAD = {'links': [[-500.0, 0.0, 0.0, 0.0, 3.5, 3.5, '-+'], [0.0, 0.0, 500.0, 0.0, 3.5, 3.5, '-+'],
+                    [0.0, 0.0, 0.0, 500.0, 3.5, 3.5, '-+']],
+          'junctions': [[0.0, 0.0, 11.5]]}
+
+  def lane_run(self, y, heading=0.0, x0=-400.0, metres=100.0, road=None):
+    sign = 1.0 if math.cos(heading) > 0 else -1.0
+    return drive([(metres / 10.0, {'x': lambda tau: x0 + sign * 10.0 * tau, 'y': y, 'heading': heading, 'v': 10.0})])
+
+  def test_driving_in_the_oncoming_lane_fails(self):
+    res = score.summarize('lane_change', self.lane_run(1.75), 'arrived', road=self.ROAD)
+    assert res['wrong_side_m'] == pytest.approx(100.0, abs=1.0)
+    assert any(f.startswith("drove 100 m in the oncoming lane") for f in res['failures']), res['failures']
+    for name in ('route_demo', 'ped_crosswalk_right', 'unprotected_left', 'occupied_lane', 'ped_in_path'):
+      assert any('oncoming lane' in f for f in score.summarize(name, self.lane_run(1.75), 'arrived', road=self.ROAD)['failures'])
+
+  def test_its_own_lane_passes(self):
+    res = score.summarize('lane_change', self.lane_run(-1.75), 'arrived', road=self.ROAD)
+    assert res['wrong_side_m'] == 0.0 and not any('oncoming' in f for f in res['failures'])
+
+  def test_travel_the_other_way_flips_the_sides(self):
+    west = score.summarize('lane_change', self.lane_run(-1.75, heading=math.pi, x0=-100.0), 'arrived', road=self.ROAD)
+    assert west['wrong_side_m'] == pytest.approx(100.0, abs=1.0)
+    assert score.summarize('lane_change', self.lane_run(1.75, heading=math.pi, x0=-100.0), 'arrived', road=self.ROAD)['wrong_side_m'] == 0.0
+
+  def test_inside_the_junction_box_a_turn_may_cross(self):
+    rows = self.lane_run(1.75, x0=-11.0, metres=22.0)
+    assert score.summarize('lane_change', rows, 'arrived', road=self.ROAD)['wrong_side_m'] == 0.0
+
+  def test_a_one_way_road_has_no_oncoming_lane_but_against_it_all_of_it_is(self):
+    ours = {'links': [[-500.0, 0.0, 500.0, 0.0, 3.5, 3.5, '++']], 'junctions': []}
+    assert score.summarize('lane_change', self.lane_run(1.75), 'arrived', road=ours)['wrong_side_m'] == 0.0
+    against = {'links': [[-500.0, 0.0, 500.0, 0.0, 3.5, 3.5, '--']], 'junctions': []}
+    assert score.summarize('lane_change', self.lane_run(-1.75), 'arrived', road=against)['wrong_side_m'] == pytest.approx(100.0, abs=1.0)
+
+  def test_off_the_road_or_across_it_is_not_judged(self):
+    assert score.summarize('lane_change', self.lane_run(30.0), 'arrived', road=self.ROAD)['wrong_side_m'] == 0.0
+    across = drive([(5.0, {'x': 100.0, 'y': lambda tau: -2.0 + tau, 'heading': math.pi / 2, 'v': 1.0})])  # crossing at 90 degrees
+    assert score.summarize('lane_change', across, 'arrived', road={'links': self.ROAD['links'][:2], 'junctions': []})['wrong_side_m'] == 0.0
+
+  def test_positions_without_a_road_model_fail_loudly(self):
+    res = score.summarize('lane_change', self.lane_run(-1.75), 'arrived')
+    assert res['wrong_side_m'] is None
+    assert "no road model: the oncoming lane was not checked" in res['failures']
+
+  def test_a_recorded_drive_without_positions_is_not_judged(self):
+    res = score.summarize('route_demo', drive([(2.0, {})]), 'arrived')
+    assert res['wrong_side_m'] is None and not any('road model' in f or 'oncoming' in f for f in res['failures'])
 
 
 def msg(service, t, **fields):

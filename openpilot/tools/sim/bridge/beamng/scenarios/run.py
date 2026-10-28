@@ -83,6 +83,8 @@ class Runner:
   the bridge process, so everything live (SubMaster, the director thread and its client) starts on the first call."""
 
   def __init__(self, plan: Plan, runs: int, out_dir: str, web_url: str, token: str, host: str, port: int, signal_tap: bool = True):
+    if plan.road is None:
+      raise ValueError(f"scenario {plan.name} has no road model: its runs could not be checked for the oncoming lane")
     self.plan, self.runs, self.out_dir, self.web_url, self.token = plan, runs, out_dir, web_url, token
     self.signal_tap = signal_tap
     self.host, self.port = host, port
@@ -281,7 +283,7 @@ class Runner:
     end_wall = wall()
     failed = [f"{name}: {f.exception()!r}" for name, f in getattr(self, 'jobs', []) if f.done() and f.exception() is not None]
     detail = '; '.join([detail] * bool(detail) + failed)
-    res = score.summarize(self.plan.name, self.rows, outcome)
+    res = score.summarize(self.plan.name, self.rows, outcome, road=self.plan.road)
     # every go the sim driver gave, with its reason (the score's gas_taps are the presses openpilot saw, from the rows)
     res['driver_taps'] = getattr(self, 'taps', GasTaps()).log
     res.update(run=self.run_idx + 1, detail=detail, t_start_wall=self.t0_wall, t_engaged_wall=self.t_engaged_wall, t_end_wall=end_wall,
@@ -297,7 +299,7 @@ class Runner:
     os.makedirs(self.out_dir, exist_ok=True)
     plan = self.plan
     out = {'scenario': plan.name, 'started_wall': self.started_wall, 'spawn': plan.spawn, 'heading': plan.heading, 'dest': plan.dest,
-           'junction': plan.junction, 'speed_kph': plan.speed_kph, 'notes': plan.notes,
+           'junction': plan.junction, 'speed_kph': plan.speed_kph, 'notes': plan.notes, 'road': plan.road,
            'actors': [{'name': a.name, 'kind': a.kind, 'trigger': a.trigger, 'path': a.path, 'params': a.params} for a in plan.actors],
            'passed': sum(r['passed'] for r in self.results), 'runs': self.results}
     with open(os.path.join(self.out_dir, 'result.json'), 'w') as f:

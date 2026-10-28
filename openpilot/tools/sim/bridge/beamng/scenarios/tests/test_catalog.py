@@ -109,3 +109,12 @@ def test_unprotected_lefts_give_the_car_3_to_4_s_before_the_oncoming_cars():
   assert set(lefts) >= {'unprotected_left', 'unprotected_left_visible'}
   for n, e in lefts.items():
     assert 3.0 <= e.arrive_after_s <= 4.0, n
+
+
+def test_every_scenario_carries_a_road_model_and_starts_on_its_own_side(graph):
+  from openpilot.tools.sim.bridge.beamng.scenarios import score
+  for name in catalog.SCENARIOS:
+    plan = catalog.build(name, graph)
+    assert plan.road is not None and plan.road['links'], name
+    past = score.oncoming_offsets([{'x': plan.spawn[0], 'y': plan.spawn[1], 'heading': plan.heading}], plan.road)[0]
+    assert past is not None and past < -0.5, f"{name}: the spawn is {past} m left of the road's divider"

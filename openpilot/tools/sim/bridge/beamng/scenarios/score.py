@@ -40,6 +40,10 @@ CAUSE_WINDOW_S = 5.    # a disengagement's cause is the last alert this soon bef
 COLLISION_GAP_M = 2.5  # camera mount to object: about where the bumper touches (the mount sits ~2 m behind it)
 PED_STOP_GAP = (3., 8.)
 CAR_MIN_GAP_M = 4.     # camera mount to the other car's centre
+WRONG_SIDE_PAST_M = 1.0  # the camera mount (the car's centreline) this far left of the road's divider: in the oncoming lane
+WRONG_SIDE_MIN_M = 3.  # driving this far in the oncoming lane, outside every junction box, fails the run
+ON_ROAD_M = 1.5        # within the road's half width plus this of a link's centreline: on that road
+ALIGNED_DEG = 35.      # the car's heading within this of a link's direction (either way): driving along it
 
 
 def msg_fields(ss, cs, tp, nav, model) -> dict:
@@ -227,6 +231,76 @@ def min_gap(rows, key):
   return round(min(vals), 2) if vals else None
 
 
+def oncoming_offsets(rows, road) -> list:
+  """For each row, m the car's centreline is left of the divider between the two directions of the road it drives along
+  (negative: on its own side); None inside a junction box (a turn crosses there), off the roads, across a road, or with
+  no position. road: catalog.road_model's {'links': [[ax, ay, bx, by, ra, rb, lanes], ...], 'junctions': [[x, y, box], ...]},
+  lanes as BeamNG's lane string for travel a -> b, left to right ('+' that way, '-' the other). A road with no '-' lane
+  our way has no oncoming lane; one with only '-' lanes is all oncoming (the wrong way down a one-way road)."""
+  links = road['links']
+  if not links:
+    return [None] * len(rows)
+  L = np.array([lk[:6] for lk in links], dtype=float)
+  lanes = [lk[6] for lk in links]
+  a, d = L[:, 0:2], L[:, 2:4] - L[:, 0:2]
+  length = np.maximum(np.linalg.norm(d, axis=1), 1e-6)
+  u = d / length[:, None]
+  J = np.array([j[:3] for j in road['junctions']], dtype=float).reshape(-1, 3)
+  cos_aligned = np.cos(np.radians(ALIGNED_DEG))
+  out = []
+  for r in rows:
+    if r.get('x') is None or r.get('y') is None or r.get('heading') is None:
+      out.append(None)
+      continue
+    p = np.array([r['x'], r['y']])
+    if len(J) and (np.hypot(J[:, 0] - p[0], J[:, 1] - p[1]) < J[:, 2]).any():
+      out.append(None)
+      continue
+    h = np.array([np.cos(r['heading']), np.sin(r['heading'])])
+    f = np.clip(((p - a) * u).sum(axis=1) / length, 0., 1.)
+    radius = L[:, 4] + f * (L[:, 5] - L[:, 4])
+    rel = p - (a + f[:, None] * d)
+    dist = np.linalg.norm(rel, axis=1)
+    along = u @ h
+    ok = (np.abs(along) >= cos_aligned) & (dist <= radius + ON_ROAD_M)
+    if not ok.any():
+      out.append(None)
+      continue
+    k = int(np.argmin(np.where(ok, dist, np.inf)))
+    fwd = 1. if along[k] > 0 else -1.
+    lane_str = lanes[k] if fwd > 0 else ''.join('+' if c == '-' else '-' for c in reversed(lanes[k]))
+    n_against = lane_str.count('-')
+    if n_against == 0:
+      out.append(None)
+      continue
+    ux, uy = u[k] * fwd
+    right = rel[k, 0] * uy - rel[k, 1] * ux  # m right of the centreline, for our travel
+    divider = -radius[k] + 2 * radius[k] / len(lane_str) * n_against  # right of the centreline, for our travel
+    out.append(round(float(divider - right), 2))
+  return out
+
+
+def wrong_side(rows, road) -> tuple[float | None, list[dict]]:
+  """m driven in an oncoming lane (WRONG_SIDE_PAST_M past the divider, outside the junction boxes), and each stretch of
+  it; None without positions (a recorded drive) or without a road model."""
+  if road is None or not any(r.get('x') is not None for r in rows):
+    return None, []
+  past = oncoming_offsets(rows, road)
+  total, spans, cur = 0., [], None
+  for i, r in enumerate(rows):
+    if past[i] is not None and past[i] > WRONG_SIDE_PAST_M:
+      dm = r['v'] * (r['t'] - rows[i - 1]['t']) if i else 0.
+      total += dm
+      if cur is None:
+        cur = {'t': r['t'], 'x': r['x'], 'y': r['y'], 'm': 0., 'max_past_m': past[i]}
+        spans.append(cur)
+      cur['m'] = round(cur['m'] + dm, 1)
+      cur['max_past_m'] = max(cur['max_past_m'], past[i])
+    else:
+      cur = None
+  return round(total, 1), spans
+
+
 def lane_changes(rows) -> list[dict]:
   """Each start of a DesireHelper lane change, with where the pacer car was then."""
   out, prev = [], None
@@ -285,6 +359,12 @@ def check(name: str, res: dict) -> list[str]:
   fails = []
   if res['disengagements']:
     fails.append(f"{len(res['disengagements'])} disengagement(s): {res['disengagements'][0]['cause']}")
+  if res['positions'] and res['wrong_side_m'] is None:
+    fails.append("no road model: the oncoming lane was not checked")
+  elif res['wrong_side_m'] is not None and res['wrong_side_m'] >= WRONG_SIDE_MIN_M:
+    w = res['wrong_side'][0]
+    fails.append(f"drove {res['wrong_side_m']:.0f} m in the oncoming lane outside the junctions, first at t={w['t']:.1f} s " +
+                 f"({w['x']:.0f}, {w['y']:.0f}), up to {max(x['max_past_m'] for x in res['wrong_side']):.1f} m past the divider")
   taken, attempted = res['maneuvers_taken'], res['maneuvers_attempted']
   hs = res['holds']
   if name == 'ped_crosswalk_right':
@@ -331,8 +411,10 @@ def check(name: str, res: dict) -> list[str]:
   return fails
 
 
-def summarize(name: str, rows, outcome: str) -> dict:
+def summarize(name: str, rows, outcome: str, road: dict | None = None) -> dict:
+  """road: catalog.road_model's roads around the run, for the oncoming-lane check (rows with positions need one)."""
   ms = maneuvers(rows)
+  wrong_m, wrong_spans = wrong_side(rows, road)
   res = {
     'outcome': outcome,
     'maneuvers_taken': sum(m['taken'] for m in ms),
@@ -346,6 +428,9 @@ def summarize(name: str, rows, outcome: str) -> dict:
     'gap_reference': "camera mount (top of the windshield) to the mannequin, or to the other car's centre",
     'lane_changes': lane_changes(rows),
     'gas_taps': gas_taps(rows),
+    'positions': any(r.get('x') is not None for r in rows),
+    'wrong_side_m': wrong_m,
+    'wrong_side': wrong_spans,
     # the gos TurnPilot asked for with the car standing (stopSignGo, unprotectedTurnGo, signalGo)
     'stopped_for_go': sorted({r['control_prompt'] for r in rows if r.get('control_prompt', 'none') not in ('', 'none') and r['v'] < STOPPED_V}),
     'lane_blocked': any(r.get('reason') == 'car in target lane' for r in rows),
@@ -360,7 +445,8 @@ def report(label: str, res: dict) -> str:
   holds = [(h['reason'], h['duration_s']) for h in res['holds']]
   taps = [(x['prompt'], x['stopped_s']) for x in res.get('gas_taps', [])]
   line = f"{label}: {'PASS' if res['passed'] else 'FAIL'} {res['outcome']}, {res['maneuvers_taken']}/{res['maneuvers_attempted']} maneuvers, " + \
-         f"{len(res['disengagements'])} disengagements, holds {holds}, gas taps {taps}, min gap ped {res['min_gap_ped_m']} car {res['min_gap_car_m']}"
+         f"{len(res['disengagements'])} disengagements, holds {holds}, gas taps {taps}, min gap ped {res['min_gap_ped_m']} car {res['min_gap_car_m']}, " + \
+         f"oncoming lane {res.get('wrong_side_m')} m"
   return line + ''.join(f"\n  {f}" for f in res['failures'])
 
 
@@ -379,7 +465,7 @@ def main():
     with open(path) as f:
       result = json.load(f)
     for run in result['runs']:
-      print(report(f"{result['scenario']} run {run['run']}", summarize(result['scenario'], run['rows'], run['outcome'])))
+      print(report(f"{result['scenario']} run {run['run']}", summarize(result['scenario'], run['rows'], run['outcome'], road=result.get('road'))))
 
 
 if __name__ == "__main__":
