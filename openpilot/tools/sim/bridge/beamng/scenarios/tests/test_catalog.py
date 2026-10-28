@@ -100,3 +100,12 @@ def test_pacer_lane(graph, entry):
   end_to_junction = math.hypot(*(lane[-1, :2] - np.asarray(plan.junction)))
   assert end_to_junction == pytest.approx(catalog.PACER_END_BEFORE_M, abs=15.0)
   assert pacer.params['s_junction'] == pytest.approx(arc_lengths(lane)[-1] + catalog.PACER_END_BEFORE_M, abs=1.0)
+
+
+def test_unprotected_lefts_give_the_car_3_to_4_s_before_the_oncoming_cars():
+  # the car stops at its hold line and waits ~2 s for the driver's go: oncoming cars timed 1.5 s after it reaches the line
+  # have passed before it may go, so the detector's oncoming hold is never exercised
+  lefts = {n: e for n, e in catalog.SCENARIOS.items() if e.actor == 'oncoming'}
+  assert set(lefts) >= {'unprotected_left', 'unprotected_left_visible'}
+  for n, e in lefts.items():
+    assert 3.0 <= e.arrive_after_s <= 4.0, n
