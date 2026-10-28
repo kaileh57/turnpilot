@@ -2,6 +2,7 @@
 from unittest import mock
 
 from opendbc.car.structs import car
+import openpilot.cereal.messaging as messaging
 from openpilot.cereal import custom, log
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S, CLEAR_DESIRE, lane_change_events, plan_accel
@@ -41,8 +42,10 @@ class FakeSM:
 
 class Sim:
   def __init__(self, maneuvers, cruise=13., nav_lanes=None, model_lanes=(0, 0), shadow=False, driver_signals=False, paint=(),
-               paint_rule=True, long_control=True):
-    self.navd, self.tp, self.sm = FakeNavd(maneuvers, nav_lanes), TurnPilot(), FakeSM()
+               paint_rule=True, long_control=True, controls=(), controls_status=None):
+    self.navd, self.tp, self.sm = FakeNavd(maneuvers, nav_lanes, controls=controls, controls_status=controls_status), TurnPilot(), FakeSM()
+    self.disengage_on_accel = False
+    self.lights = None  # turnpilotLights to send each frame, a function of the sim
     self.paint, self.paint_rule, self.inputs_valid = paint, paint_rule, True
     self.s, self.v, self.cruise, self.t = 0., cruise, cruise, 0.
     self.model_lanes, self.shadow, self.driver_signals, self.long_control = model_lanes, shadow, driver_signals, long_control
@@ -63,8 +66,11 @@ class Sim:
     self.sm.put('carControl', car_control(lat_active, engaged))
     if self.model_running:
       self.sm.put('modelV2', model_v2(*self.model_lanes, big=self.big, **self.model_kw))
+    if self.lights is not None:
+      self.sm.put('turnpilotLights', self.lights(self))
     plan = self.tp.plan(self.sm, scene(objects, available), True, self.shadow, self.driver_signals, paint=self.paint,
-                        paint_rule=self.paint_rule, inputs_valid=self.inputs_valid, long_control=self.long_control).as_reader().turnpilotPlan
+                        paint_rule=self.paint_rule, inputs_valid=self.inputs_valid, long_control=self.long_control,
+                        disengage_on_accel=self.disengage_on_accel).as_reader().turnpilotPlan
     a = min(plan_accel(plan.accelCap, plan.speedCap, self.v), (self.cruise - self.v) / 2., 1.5)
     if plan.shouldStop:
       a = min(a, -1.)
@@ -1058,3 +1064,137 @@ def test_navd_moving_on_early_keeps_the_committed_turn():
     while sim.s < 340.:
       sim.step()
     assert sim.tp.follower.maneuver.side == -1, (at, nxt)
+
+
+# --- map stop control (map_controls.py) ---
+
+def stop_at(sim, s_line, limit=60.):
+  while not (sim.v < 0.05 and sim.s > s_line - 50.):
+    sim.step()
+    assert sim.t < limit, "never stopped"
+  return sim.step()
+
+
+def test_stop_sign_on_the_route_holds_until_the_drivers_tap():
+  sim = Sim([(1000., "turn", "right"), (2000., "turn", "left")], controls=[(200., 'stop')])
+  plan = stop_at(sim, 200.)
+  assert -2. < 200. - sim.s < 5.
+  assert plan.shouldStop and plan.state == State.holding and plan.reason == "Stopped at stop sign"
+  assert plan.mapControl.kind == 'stop' and str(plan.mapControl.action) == 'held' and plan.mapControl.controlsStatus == 'ok'
+  sim.run(2.5)
+  plan = sim.trace[-1][2]
+  assert plan.controlPrompt == 'stopSignGo' and plan.reason == "Stopped at stop sign — tap gas to go"
+  assert str(plan.mapControl.action) == 'awaitingDriver'
+  held_s = sim.s
+  sim.run(20.)
+  assert sim.s - held_s < 0.05 and sim.trace[-1][2].shouldStop
+  plan = sim.step(gas=True)
+  assert not plan.shouldStop and plan.controlPrompt == 'none'
+  sim.run(10.)
+  assert sim.s > 220.
+
+
+def test_signal_with_no_light_source_holds_and_prompts():
+  sim = Sim([(1000., "turn", "right"), (2000., "turn", "left")], controls=[(200., 'signal')])
+  prompts = []
+  for _ in range(int(10. / DT_MDL)):
+    prompts.append(sim.step().controlPrompt)
+  assert 'signalGo' in prompts
+  plan = stop_at(sim, 200.)
+  assert plan.shouldStop and plan.controlPrompt == 'signalGo' and plan.reason == "Stopped at signal — tap gas to go"
+  plan = sim.step(gas=True)
+  assert not plan.shouldStop
+
+
+def test_sim_oracle_green_passes_and_needs_simulation_and_the_param():
+  def lights(state):
+    def make(sim):
+      msg = messaging.new_message('turnpilotLights')
+      msg.turnpilotLights.source = 'simOracle'
+      msg.turnpilotLights.lights = [{'state': state, 'distance': 200. - sim.s, 'instance': 'trafficLight 1'}]
+      return msg.as_reader().turnpilotLights
+    return make
+  # accepted: through on the green, with the reason saying where the light came from
+  sim = Sim([(1000., "turn", "right"), (2000., "turn", "left")], controls=[(200., 'signal')])
+  sim.tp.oracle_ok = True
+  sim.lights = lights('green')
+  reasons = [sim.step().reason for _ in range(int(25. / DT_MDL))]
+  assert sim.s > 210. and min(v for _, v, _ in sim.trace) > 12. and "Green (sim oracle)" in reasons
+  # not accepted (no SIMULATION, or the param off): rejected out loud, and the light is unknown: held
+  sim = Sim([(1000., "turn", "right"), (2000., "turn", "left")], controls=[(200., 'signal')])
+  sim.lights = lights('green')
+  plan = stop_at(sim, 200.)
+  assert plan.shouldStop and plan.controlPrompt == 'signalGo'
+  assert any(p.controlAlert == 'lightSourceRejected' for _, _, p in sim.trace)
+
+
+def test_oracle_accepted_only_in_the_sim_with_the_param():
+  from openpilot.selfdrive.turnpilot.turnpilotd import oracle_accepted
+  assert oracle_accepted({'SIMULATION': '1'}, True)
+  assert not oracle_accepted({}, True)
+  assert not oracle_accepted({'SIMULATION': '1'}, False)
+  assert not oracle_accepted({'SIMULATION': '0'}, True)
+
+
+def test_disengage_on_accelerator_refuses_out_loud():
+  sim = Sim([(1000., "turn", "right"), (2000., "turn", "left")], controls=[(200., 'stop')])
+  sim.disengage_on_accel = True
+  plan = sim.step()
+  assert plan.state == State.disabled and plan.fault == Fault.disengageOnAccelerator
+  assert plan.reason == "map stops need DisengageOnAccelerator off"
+
+
+def test_fault_keeps_the_map_stop_latch_and_turning_off_clears_it():
+  sim = Sim([(1000., "turn", "right"), (2000., "turn", "left")], controls=[(200., 'stop')])
+  stop_at(sim, 200.)
+  held_s = sim.s
+  sim.tp.update = mock.Mock(side_effect=RuntimeError("synthetic failure"))
+  plans = [sim.step() for _ in range(int(5. / DT_MDL))]
+  assert all(p.fault == Fault.error and p.shouldStop for p in plans)
+  assert sim.s - held_s < 0.05
+  del sim.tp.update
+  plan = sim.step()
+  assert plan.shouldStop and plan.fault == Fault.none
+  sim.tp.plan(sim.sm, scene(), False, False, long_control=True)  # TurnPilot turned off
+  assert not sim.tp.map_controls.held
+
+
+def test_skipped_turn_keeps_the_stop_after_it():
+  # too fast for the turn at 90 m: skipped out loud, and the stop sign past it on the route still stops the car
+  sim = Sim([(90., "turn", "right", junction_of("right")), (2000., "turn", "left")], cruise=20., controls=[(260., "stop")])
+  sim.v = 20.
+  plan = stop_at(sim, 260.)
+  assert any(p.tooFastToTurn for _, _, p in sim.trace)
+  assert plan.shouldStop and -2. < 260. - sim.s < 5.
+
+
+def test_stop_sign_before_the_turn_means_the_turn_is_not_too_fast():
+  # a stop sign 8 m before the junction: the car stops there anyway, so the turn isn't skipped as too fast
+  sim = Sim([(150., "turn", "right", junction_of('right')), (2000., "turn", "left")], cruise=20., controls=[(142., 'stop')])
+  sim.v = 20.
+  plan = stop_at(sim, 142.)
+  assert not any(p.tooFastToTurn for _, _, p in sim.trace)
+  assert plan.shouldStop
+
+
+def test_released_hold_at_standstill_pulses_the_turn_again():
+  # BeamNG ped_crosswalk_right: held at the hold line for a walker, standing longer than the model's pulse lasts; the walker
+  # leaves and the hold lets go. The model doesn't pull away on its own: the turn pulses again at once, at standstill
+  sim = Sim([(300., "turn", "right"), (1500., "turn", "left")])
+  walker = {'on': True}
+
+  def objects(sim):
+    # detected on every 10 Hz detector run: a steady walker
+    return ({'cls': 'pedestrian', 'x': 300. - sim.s + 3., 'y': -5., 'age': 5 + int(sim.t * 10.)},) if walker['on'] else ()
+  while not (sim.v < 0.05 and sim.s > 250.):
+    sim.step(objects(sim))
+    assert sim.t < 60.
+  assert sim.trace[-1][2].reason == "pedestrian in crosswalk"
+  for _ in range(int(5. / DT_MDL)):
+    sim.step(objects(sim))
+  walker['on'] = False
+  start = len(sim.trace)
+  sim.run(3.)
+  after = sim.trace[start:]
+  pulse = next(i for i, (_, _, p) in enumerate(after) if p.desire == Desire.turnRight)
+  assert after[pulse][1] < 0.3, "the turn pulsed only once the car moved"

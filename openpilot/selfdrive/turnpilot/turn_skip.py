@@ -48,6 +48,7 @@ A_COMFORT = -SPEED_CAP_ACCEL_MIN  # m/s^2: 2.0, the hardest the turn speed cap b
 T_LAG = SPEED_CAP_TAU            # s before the braking builds
 SKIP_CONFIRM_FRAMES = 5          # 0.25 s at 20 Hz
 MIN_FIRST_PULSE_M = 25.          # m: a turn's first pulse goes no later than this before the junction
+STOP_BEFORE_TURN_M = 30.         # a map stop sign or signal the car stops at this close before the junction: taken from a stop
 
 
 def safe_turn_speed(angle_deg: float, curb_side: bool) -> float:
@@ -87,9 +88,13 @@ class TurnSkip:
                    v_ego=round(v_ego, 2))
 
   def update(self, maneuver, distance: float, maneuver_id: int, v_ego: float, desire_out: bool,
-             right_hand_traffic: bool = True, lat_active: bool = True, ahead=None, ahead_distance: float = float('inf')) -> SkipState:
+             right_hand_traffic: bool = True, lat_active: bool = True, ahead=None, ahead_distance: float = float('inf'),
+             stop_d: float | None = None) -> SkipState:
     """maneuver: RouteFollower.upcoming; desire_out: this maneuver's desire has gone out (DesireTiming.started);
-    lat_active: carControl.latActive; ahead, ahead_distance: RouteFollower.ahead past a NONE step, and the distance to it."""
+    lat_active: carControl.latActive; ahead, ahead_distance: RouteFollower.ahead past a NONE step, and the distance to it;
+    stop_d: m to the map stop sign or signal the car will stop at next (MapControlPolicy.stop_ahead), or None. One within
+    STOP_BEFORE_TURN_M before the junction means the turn is taken from a stop: never too fast (the stop itself brakes at
+    no more than -2.0, and says so when it can't make it)."""
     if maneuver_id != self.maneuver_id:
       self.maneuver_id, self.skipped, self._infeasible = maneuver_id, False, 0
     if self.skipped:
@@ -108,6 +113,9 @@ class TurnSkip:
       self.skip(maneuver, distance, maneuver_id, v_ego, 'tooLate')
       return SkipState(True, False)
     curb_side = (maneuver.side == LEFT) != right_hand_traffic
+    if stop_d is not None and 0. <= distance - stop_d <= STOP_BEFORE_TURN_M:
+      self._infeasible = 0
+      return SkipState(False, True)
     if can_make_turn(v_ego, distance, maneuver.angle_deg, curb_side):
       self._infeasible = 0
       return SkipState(False, True)

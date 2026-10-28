@@ -244,3 +244,15 @@ def test_turn_only_lane_flagged_and_shown():
   sim.navd.through = {0: (lanes, 300.)}
   sim.run(26.)
   assert all(plan.laneMismatch == custom.TurnpilotPlan.LaneMismatch.none for _, _, plan in sim.trace)
+
+
+def test_stop_before_the_turn_means_not_too_fast():
+  # a map stop sign or signal the car stops at within 30 m before the junction: the turn is taken from a stop
+  turn = maneuver_from_instruction(nav_instruction(60., "turn", "right", junction=junction_of('right')))
+  assert not can_make_turn(20., 60., turn.angle_deg, True)
+  for stop_d, skipped in ((52., False), (35., False), (25., True), (None, True), (65., True)):
+    skip = TurnSkip()
+    for _ in range(SKIP_CONFIRM_FRAMES + 1):
+      state = skip.update(turn, 60., 1, 20., False, stop_d=stop_d)
+    assert state.skipped == skipped, stop_d
+    assert state.feasible_now == (not skipped), stop_d

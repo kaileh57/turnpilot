@@ -303,8 +303,9 @@ class ScenePolicy:
     return [self.fault_junction]
 
   def update(self, objects, available: bool, maneuver, distance: float, v_ego: float, right_hand_traffic: bool = True,
-             maneuver_id: int | None = None, gas_pressed: bool = False, dt: float = DT_MDL) -> SceneDecision:
-    """As scene_policy(), plus maneuver_id (RouteFollower.maneuver_id) and carState.gasPressed, once per frame dt apart."""
+             maneuver_id: int | None = None, gas_pressed: bool = False, dt: float = DT_MDL, extra_stops=()) -> SceneDecision:
+    """As scene_policy(), plus maneuver_id (RouteFollower.maneuver_id) and carState.gasPressed, once per frame dt apart.
+    extra_stops: the map's stop signs and signals (map_controls.py), composed with the scene's like any other stop."""
     self.t += dt
     if available:
       objects = list(objects)
@@ -338,7 +339,7 @@ class ScenePolicy:
     if maneuver_id is not None and maneuver_id in (self.released_id, self.committed_id):
       junction = []
     self.junction = junction[0] if junction else None
-    decision = decide(peds + junction + self._fault_hold(available, maneuver, distance, v_ego, gas_pressed, dt), v_ego)
+    decision = decide(peds + junction + self._fault_hold(available, maneuver, distance, v_ego, gas_pressed, dt) + list(extra_stops), v_ego)
     decision.accel_cap = self.ramp(decision.accel_cap, dt)
     return decision
 

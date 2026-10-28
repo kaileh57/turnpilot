@@ -33,8 +33,9 @@ The rules (Kellen, 2026-10-27; /private/tmp/claude-501/stop_design.md):
 - The driver's gas before a stop sign is an override; when it comes off past the line moving, the stop is dropped
   (stopOverrun), else the curve resumes from there (re-seeded, checked for feasibility). Past the line moving with no
   release is an overrun: dropped, logged, alerted. Driven off a held stop under the driver's foot is the same.
-- navd's controlsStatus other than ok raises mapControlsUnavailable and keeps "Map stops/signals: <status>" in the reason:
-  no controls on tiles without control data is never shown as clear.
+- navd's controlsStatus other than ok (navd always sets it; none is a navd from before controls) raises
+  mapControlsUnavailable and keeps "Map stops/signals: <status>" in the reason: no controls on tiles without control
+  data is never shown as clear.
 """
 import math
 from dataclasses import dataclass, field
@@ -158,6 +159,17 @@ class MapControlPolicy:
     self.prev_gas = False
     self._alert, self._alert_t = 'none', 0.
 
+  def stop_ahead(self) -> float | None:
+    """m to the nearest stop sign or signal the car is going to stop at (not released, not going on a green), or None:
+    a turn just past one is taken from a stop, never too fast (turn_skip.py)."""
+    ds = [0. if c.held else c.d for c in self.tracker.controls.values() if c.kind in ('stop', 'signal') and
+          (c.held or c.d > -LATCH_PAST_M) and not (c.state is not None and (c.state.done or c.state.mode != 'stop'))]
+    return min(ds) if ds else None
+
+  def held_stops(self) -> list:
+    """The latch alone, for a faulted plan whose map update failed: a held car stays held."""
+    return [Stop(HOLD_ACCEL, 0., True, "Stopped at a map stop", 0.)] if self.held is not None else []
+
   def _transient(self, alert: str) -> None:
     self._alert, self._alert_t = alert, ABORT_HOLD_S
 
@@ -219,7 +231,8 @@ class MapControlPolicy:
 
     # what the driver sees and hears
     out.prompt = prompts[0] if prompts else 'none'
-    status_bad = self.tracker.route and self.tracker.status != 'ok'
+    # 'none' is a navd that predates controls: nothing to say about a route it never looked at
+    status_bad = self.tracker.route and self.tracker.status not in ('ok', 'none')
     if status_bad:
       out.reason = f"Map stops/signals: {self.tracker.status}"
     self._alert_t = max(self._alert_t - dt, 0.)

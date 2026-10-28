@@ -53,6 +53,7 @@ Alert priority (hooks.plan_events): handback, then fault (turnpilotUnavailable),
 change, then wrong lane. While TurnPilot isn't acting or is faulted, too fast to turn, wrong lane and lane change offers
 are never set here; the rest of the order is selfdrived's (hooks.plan_events, hooks.lane_change_events).
 """
+import os
 import time
 
 from opendbc.car.structs import car
@@ -64,6 +65,7 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.desire_timing import ENTRY_M, TURN_STARTED_DEG, DesireTiming
 from openpilot.selfdrive.turnpilot.handback import Handback
 from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S, CLEAR_DESIRE
+from openpilot.selfdrive.turnpilot.map_controls import YELLOW_DECEL, YELLOW_DECEL_MAX, MapControlPolicy, light_input
 from openpilot.selfdrive.turnpilot.lane_planner import (OPENPILOT_SIGNALS_BRANDS, LanePlanner, lane_change_window, lane_mismatch,
                                                          model_lanes_from_msg)
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, LEFT, TURN, RouteFollower
@@ -103,6 +105,8 @@ HANDBACK_REASON = {Handback.detectorStopped: "detector stopped: take control",
                    Handback.noDetector: "detector not running: take control",
                    Handback.modelFellBack: "driving model fell back: take control"}
 WAITING_REASON = "waiting for the detector"
+DISENGAGE_ON_ACCEL_REASON = "map stops need DisengageOnAccelerator off"
+STANDSTILL_SPEED = 0.3  # m/s: a hold let go slower than this pulls the car away with a fresh turn pulse
 
 
 class ErrorLog:
@@ -130,6 +134,9 @@ class TurnPilot:
     self.hold_v: float | None = None  # handed back with openpilot steering: the speed the car is held to (module docstring)
     self.scene_now = None  # this frame's scene decision, once update() has made it
     self.limits = (NO_ACCEL_CAP, NO_SPEED_CAP, False)  # the last plan's (accelCap, speedCap, shouldStop)
+    self.oracle_ok = False  # the sim light oracle is accepted: SIMULATION=1 and TurnPilotSimLightOracle (main())
+    self.yellow_decel = YELLOW_DECEL  # TurnPilotYellowDecel (main())
+    self.map_now = None  # this frame's map control decision, once update() has made it
     self.reset()
 
   def reset(self, detector: bool = True, keep_turn: bool = False):
@@ -138,6 +145,12 @@ class TurnPilot:
     keeps the route, the turn and its desire state: a committed turn is never dropped, nor pulsed afresh in the turn."""
     if detector:
       self.scene = ScenePolicy()
+      # the map stops' latch is position-free and outlives faults, nav gaps, reroutes and handbacks: only turning
+      # TurnPilot off clears it (map_controls.py)
+      self.map_controls = MapControlPolicy(self.yellow_decel)
+      self.lights_age = float('inf')  # s since the last turnpilotLights
+      self.was_stopping = False    # the last plan held the car (shouldStop)
+      self.release_go = False      # ...and let go of it at standstill: the turn pulses again now
       self.detector_seen = False   # fresh detections since TurnPilot was turned on
       self.stale_s = 0.            # how long the scene has been unavailable
       self.waited_s = 0.           # how long modeld has run since TurnPilot was turned on, before the first detection
@@ -245,7 +258,7 @@ class TurnPilot:
     """A turnpilotPlan message from sm's carState, navInstruction and modelV2, a TurnpilotScene, and the lane paint of
     modelV2's four lane lines (empty when unknown). paint_rule: TurnPilotLanePaintActive; inputs_valid: carState and
     modelV2 pass their checks."""
-    self.handback_now = self.scene_now = None
+    self.handback_now = self.scene_now = self.map_now = None
     msg = messaging.new_message('turnpilotPlan')
     plan = msg.turnpilotPlan
     plan.shadow = shadow
@@ -265,6 +278,8 @@ class TurnPilot:
     rf.update(sm['navInstruction'], sm.updated['navInstruction'], sm.valid['navInstruction'], v_ego, DT_MDL,
               committed=self.turn_committed)
     upcoming = None if rf.arrived else rf.upcoming
+    # the map's stop signs and signals: every frame, whatever the maneuver (a skipped turn keeps its stop)
+    mapd = self.map_update(sm, v_ego, cs.gasPressed)
 
     available = scene.available
     objects = list(scene.objects) if available else []
@@ -299,7 +314,7 @@ class TurnPilot:
     # too fast to make the turn: skipped, so nothing below acts on it (no desire, no cap, no turn holds or lane changes)
     desire_out = self.desires.maneuver_id == rf.maneuver_id and self.desires.started
     skip = self.skip.update(upcoming, rf.distance, rf.maneuver_id, v_ego, desire_out, right_hand_traffic, lat_active,
-                            rf.ahead, rf.ahead_distance)
+                            rf.ahead, rf.ahead_distance, stop_d=self.map_controls.stop_ahead())
     maneuver = None if skip.skipped else upcoming
     # navd reroutes on it and selfdrived alerts: only while TurnPilot is driving the route (handback outranks it). A turn
     # just past a bend that will be skipped once it is the maneuver is announced now, before its junction (turn_skip.py)
@@ -316,7 +331,7 @@ class TurnPilot:
     desire = self.desires.update(desire_on, rf.distance, rf.maneuver_id, rf.passed, v_ego, cs.steeringAngleDeg,
                                  lanes.keep_left_ok, lanes.keep_right_ok, DT_MDL, default_yaw_rate(cs, model),
                                  lat_active=lat_active, replaced=rf.replaced,
-                                 may_start=skip.feasible_now and not held)
+                                 may_start=skip.feasible_now and not held, go=self.release_go)
     if held and desire not in (Desire.none, CLEAR_DESIRE) and desire != self.last_desire:
       desire = Desire.none  # held: the desire out stays out, but never a new rising edge (a repeat pulse under way)
     plan.desire = self.last_desire = desire
@@ -339,7 +354,11 @@ class TurnPilot:
     plan.laneMismatch = self._lane_mismatch(found)
     # the scene's holds only ever brake, so they keep the real maneuver through a handback
     decision = self.scene_now = self.scene.update(objects, available, maneuver, rf.distance, v_ego, right_hand_traffic, rf.maneuver_id,
-                                                 cs.gasPressed)
+                                                 cs.gasPressed, extra_stops=mapd.stops)
+    # a hold let go with the car standing (the walker cleared, a stop's go): the model won't pull away on its own, and the
+    # turn's pulse is long forgotten, so it goes again next frame (desire_timing.py)
+    self.release_go = self.was_stopping and not decision.should_stop and v_ego < STANDSTILL_SPEED
+    self.was_stopping = decision.should_stop
     plan.accelCap = decision.accel_cap
     # past a bend or a straight-on step, the turn after it is slowed for already (route_follower.py: ahead), and still
     # once the step is dead-reckoned past, until navd moves on to the turn
@@ -350,7 +369,8 @@ class TurnPilot:
     plan.shouldStop = decision.should_stop
     self.limits = (plan.accelCap, plan.speedCap, plan.shouldStop)
     no_junction_data = maneuver is not None and maneuver.kind in (TURN, KEEP) and not maneuver.geometry
-    plan.reason = decision.reason or lane_reason or (NO_JUNCTION_DATA_REASON if no_junction_data else "")
+    plan.reason = decision.reason or lane_reason or mapd.reason or (NO_JUNCTION_DATA_REASON if no_junction_data else "")
+    fill_map_control(plan, mapd)
 
     plan.routeValid = rf.valid
     if rf.valid and rf.maneuver is not None:
@@ -381,6 +401,21 @@ class TurnPilot:
       plan.state = State.following
     return msg
 
+  def map_update(self, sm, v_ego: float, gas_pressed: bool):
+    """This frame's MapControlPolicy decision, from navInstruction's controls and turnpilotLights (once a frame)."""
+    if self.map_now is not None:
+      return self.map_now
+    data = getattr(sm, 'data', {})
+    lights_msg = None
+    if 'turnpilotLights' in data:
+      self.lights_age = 0. if sm.updated['turnpilotLights'] else self.lights_age + DT_MDL
+      lights_msg = sm['turnpilotLights'] if self.lights_age < float('inf') else None
+    lights = light_input(lights_msg, self.lights_age, self.oracle_ok, True)
+    self.map_controls.yellow_decel = self.yellow_decel
+    self.map_now = self.map_controls.update(sm['navInstruction'], sm.updated['navInstruction'], sm.valid['navInstruction'], v_ego,
+                                            gas_pressed, lights, DT_MDL)
+    return self.map_now
+
   def _take_up_dropped(self, upcoming, rf, v_ego: float, right_hand_traffic: bool = True) -> None:
     """TurnPilot acts again after a handback (the detector is back): the maneuver dropped at the handback is never left
     half driven, capped with no desire and no alert. A held turn desire still out (openpilot stayed engaged) drives on,
@@ -405,14 +440,24 @@ class TurnPilot:
     else:
       d.resume()
 
-  def plan(self, sm, scene, enabled: bool, shadow: bool, *args, long_control: bool | None, **kwargs):
+  def plan(self, sm, scene, enabled: bool, shadow: bool, *args, long_control: bool | None, disengage_on_accel: bool = False, **kwargs):
     """update(), but a disabled plan while openpilot doesn't control speed (on a Tesla, without alpha longitudinal):
     its speed caps would do nothing there, and the turn desires would go out at whatever speed stock ACC holds.
     long_control None: card hasn't written CarParams yet, so it isn't known. A disabled plan while TurnPilot is on
     carries its fault, which selfdrived shows (turnpilotUnavailable): TurnPilot never stops working unannounced.
     It also carries a model fallback's handback, which outranks the fault (see the module docstring): a fallback lasts
     the drive, so it is noted here too, where update() isn't reached."""
-    self.handback_now = self.scene_now = None
+    self.handback_now = self.scene_now = self.map_now = None
+    if enabled and disengage_on_accel:
+      # a gas tap is the driver's go at a map stop: with DisengageOnAccelerator it would disengage instead, so TurnPilot
+      # refuses to run (Kellen: never stop control silently). The holds in force stay on the faulted plan
+      self.stop('fault')
+      self.watch_model(sm['modelV2'], enabled)
+      msg = disabled_plan(shadow, DISENGAGE_ON_ACCEL_REASON, Fault.disengageOnAccelerator,
+                          Handback.modelFellBack if self.fell_back else Handback.none)
+      self.fill_stop_abort(msg.turnpilotPlan)
+      self.fault_limits(msg.turnpilotPlan, sm, scene)
+      return msg
     if enabled and not long_control:
       self.stop('fault')
       self.watch_model(sm['modelV2'], enabled)
@@ -450,8 +495,14 @@ class TurnPilot:
       decision = self.scene_now
       cs = sm['carState']
       if decision is None:
+        try:  # the map stops in force, the latch above all (map_controls.py): a fault never lets a held car go
+          stops = self.map_update(sm, max(cs.vEgo, 0.), cs.gasPressed).stops
+        except Exception:
+          log_error("turnpilotd.fault_map_controls_failed")
+          stops = self.map_controls.held_stops()
         decision = self.scene.update(list(scene.objects) if scene.available else [], scene.available, None, float('inf'),
-                                     max(cs.vEgo, 0.), gas_pressed=cs.gasPressed)
+                                     max(cs.vEgo, 0.), gas_pressed=cs.gasPressed, extra_stops=stops)
+        self.was_stopping = decision.should_stop
       if self.hold_v is not None:
         self.hold_v = None if not sm['carControl'].latActive else \
           max(cs.vEgo, 0.) if cs.gasPressed else min(self.hold_v, max(cs.vEgo, 0.))
@@ -460,6 +511,45 @@ class TurnPilot:
     except Exception:
       log_error("turnpilotd.fault_limits_failed")
     plan.accelCap, plan.speedCap, plan.shouldStop = self.limits
+
+
+def fill_map_control(plan, mapd) -> None:
+  """turnpilotPlan.mapControl, controlPrompt and controlAlert from MapControlPolicy's decision."""
+  plan.controlPrompt, plan.controlAlert = mapd.prompt, mapd.alert
+  shown = mapd.shown
+  if shown is None:
+    return
+  mc = plan.mapControl
+  mc.id, mc.kind, mc.distance, mc.action = shown.id, shown.kind, float(shown.distance), shown.action
+  mc.lightState, mc.lightSource, mc.controlsStatus, mc.lineMapped = shown.light_state, shown.light_source, shown.controls_status, \
+    shown.line_mapped
+
+
+def oracle_accepted(environ, oracle_param: bool) -> bool:
+  """The sim's light oracle is taken only in the sim (SIMULATION=1) with TurnPilotSimLightOracle set: never on the car."""
+  return environ.get('SIMULATION') == '1' and bool(oracle_param)
+
+
+def read_bool(params, key: str, default: bool) -> bool:
+  """A param this build's params library may not know yet (rebuild common/ after a merge): default, said out loud."""
+  try:
+    return params.get_bool(key)
+  except UnknownKeyName:
+    log_error(f"turnpilotd: {key} unknown to this build's params; run scons")
+    return default
+
+
+def yellow_decel_for(params) -> float:
+  """TurnPilotYellowDecel, 2.0 to 2.5 m/s^2 (2.5 needs Kellen's sign-off); 2.0 if unset or unknown to this build."""
+  try:
+    value = params.get("TurnPilotYellowDecel")
+  except UnknownKeyName:
+    log_error("turnpilotd: TurnPilotYellowDecel unknown to this build's params; run scons")
+    return YELLOW_DECEL
+  try:
+    return min(max(float(value), YELLOW_DECEL), YELLOW_DECEL_MAX) if value is not None else YELLOW_DECEL
+  except (TypeError, ValueError):
+    return YELLOW_DECEL
 
 
 def disabled_plan(shadow: bool, reason: str, fault=Fault.none, handback=Handback.none):
@@ -510,14 +600,15 @@ def lane_paint_active(params) -> bool:
 def main():
   params = Params()
   pm = messaging.PubMaster(['turnpilotPlan', 'turnpilotScene'])
-  optional = ['navInstruction', 'turnpilotDetections']  # no route, or no detector (TurnPilotEnabled off, no pkl)
+  # no route, no detector (TurnPilotEnabled off, no pkl), no light source (only the sim's oracle publishes one)
+  optional = ['navInstruction', 'turnpilotDetections', 'turnpilotLights']
   sm = messaging.SubMaster(['carState', 'carControl', 'navInstruction', 'modelV2', 'turnpilotDetections', 'extrinsicsCalibration',
-                            'deviceState', 'narrowRoadCameraState'],
+                            'deviceState', 'narrowRoadCameraState', 'turnpilotLights'],
                            ignore_alive=optional, ignore_avg_freq=optional, ignore_valid=optional)
   rk = Ratekeeper(1. / DT_MDL, print_delay_threshold=None)
   tp = TurnPilot()
   tracker = None
-  enabled = shadow = paint_rule = False
+  enabled = shadow = paint_rule = disengage_on_accel = False
   driver_signals, right_hand_traffic = True, True
   long_control: bool | None = None
   invalid_frames = PLAN_INPUT_GRACE_FRAMES
@@ -530,6 +621,9 @@ def main():
       right_hand_traffic = not params.get_bool("IsRhdDetected")
       driver_signals = driver_signals_for(params)
       long_control = long_control_for(params)
+      disengage_on_accel = params.get_bool("DisengageOnAccelerator")
+      tp.oracle_ok = oracle_accepted(os.environ, read_bool(params, "TurnPilotSimLightOracle", False))
+      tp.yellow_decel = yellow_decel_for(params)
       if params.get("ChestnutActive") is False:  # None: no big model expected this drive
         tp.big_model_failed(enabled)
 
@@ -551,7 +645,8 @@ def main():
     paint = lane_paint_from_msg(sm['turnpilotDetections'].lanePaint) if scene.available and sm.seen['turnpilotDetections'] else ()
     # the lane planner takes this frame's checks (an offered change aborts at once); the plan's valid has a grace
     valid = sm.all_checks(['carState', 'modelV2'])
-    msg = tp.plan(sm, scene, enabled, shadow, driver_signals, right_hand_traffic, paint, paint_rule, valid, long_control=long_control)
+    msg = tp.plan(sm, scene, enabled, shadow, driver_signals, right_hand_traffic, paint, paint_rule, valid, long_control=long_control,
+                  disengage_on_accel=disengage_on_accel)
     invalid_frames = 0 if valid else invalid_frames + 1
     msg.valid = invalid_frames < PLAN_INPUT_GRACE_FRAMES
     pm.send('turnpilotPlan', msg)
