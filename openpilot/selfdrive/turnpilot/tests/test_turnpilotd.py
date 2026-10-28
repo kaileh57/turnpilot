@@ -659,16 +659,43 @@ def recover_after_outage(cruise, outage, reengage=1.):
 
 def test_turn_dropped_while_disengaged_is_not_left_half_driven():
   # the detector is back after a long outage and the driver engages again before the left, whose desire was dropped
-  # while openpilot was off: TurnPilot never drives on toward it capped, 'approaching' and with no desire and no alert.
-  # The turn is skipped out loud (too late for a fresh pulse to be taken)
+  # while openpilot was off: once openpilot steers again, TurnPilot never drives on toward it capped, 'approaching' and
+  # with no desire and no alert (a fresh pulse, or the turn skipped out loud)
   for cruise in (13., 3.5):
     sim, back = recover_after_outage(cruise, outage=5.)
-    after = [p for s, _, p in sim.trace[back:] if s < 300.]
+    engaged = back + int(round(1. / DT_MDL))
+    assert any(p.desire == Desire.turnLeft or p.tooFastToTurn for _, _, p in sim.trace[engaged:engaged + 5]), cruise
+    after = [p for s, _, p in sim.trace[engaged + 5:] if s < 300.]
     assert after, cruise
     silent = [p for p in after if p.desire == Desire.none and p.speedCap < NO_SPEED_CAP and not p.tooFastToTurn and
               p.state == State.approaching]
     assert not silent, cruise
-    assert any(p.tooFastToTurn for p in after), cruise
+
+
+def test_dropped_turn_taken_up_or_skipped_with_its_pulse_cleared():
+  # the left's desire went out 38 m before it, then the detector stopped and openpilot stopped steering lat_off s in;
+  # the detector is back loss s in, with openpilot steering again. The pulse may still be in the model's queue. Room to
+  # make the turn and for a pulse to be taken (ENTRY_M out): a fresh pulse, and the turn driven. Too close: skipped out
+  # loud, its pulse cleared from the model, and the turn cap kept until the car is past the junction (never turning
+  # from the old pulse at speed, never speeding up into the junction)
+  for lat_off, loss, pulse in ((1.5, 2.5, True), (3.0, 4.0, True), (3.2, 3.6, True), (4.4, 5.0, False)):
+    sim = Sim([(300., "turn", "left", junction_of("left")), (1500., "turn", "right", junction_of("right"))], cruise=13.)
+    while sim.distance() > 38. or sim.s < 10.:
+      sim.step()
+    for i in range(int(round(loss / DT_MDL))):
+      sim.step(available=False, lat_active=i * DT_MDL < lat_off)
+    back = len(sim.trace)
+    while sim.s < 310.:
+      sim.step()
+    after = [(s, v, p) for s, v, p in sim.trace[back:]]
+    to_junction = [(v, p) for s, v, p in after if s < 300.]
+    assert all(b[0] <= a[0] + 1e-6 for a, b in zip(to_junction, to_junction[1:], strict=False)), (lat_off, loss)
+    if pulse:
+      assert after[0][2].desire == Desire.turnLeft and not any(p.tooFastToTurn for _, _, p in after), (lat_off, loss)
+    else:
+      assert after[0][2].tooFastToTurn and after[0][2].desire == CLEAR_DESIRE, (lat_off, loss)
+      assert not any(p.desire == Desire.turnLeft for _, _, p in after), (lat_off, loss)
+      assert all(p.speedCap < 5. for _, p in to_junction), (lat_off, loss)
 
 
 def test_detector_back_within_the_soft_disable_keeps_the_turn():
@@ -855,7 +882,9 @@ def test_fault_keeps_a_junction_hold():
     assert sim.s < stopped + 0.5, mode
     # the driver looks and goes: the gas releases it
     released = sim.step(car(sim) if mode == 'every frame' else (), available=mode == 'every frame', gas=True)
-    assert not released.shouldStop and released.speedCap > 2. and released.accelCap == NO_ACCEL_CAP, mode  # the turn cap at most
+    assert not released.shouldStop and released.accelCap == NO_ACCEL_CAP, mode
+    # the turn cap at most; handed back (the gap outlasted the detector's deadline), no faster than the driver takes it
+    assert released.speedCap > 2. or released.handback != Handback.none, mode
 
 
 def test_detector_not_loaded_while_engaged_isnt_a_detector_that_never_started():
@@ -877,3 +906,24 @@ def test_detector_not_loaded_while_engaged_isnt_a_detector_that_never_started():
   plans = [sim.step(available=False, engaged=True) for _ in range(int(DETECTOR_START_DEADLINE_S / DT_MDL))]
   first = next(i for i, p in enumerate(plans) if p.handback == Handback.noDetector)
   assert abs((first + 1) * DT_MDL - (DETECTOR_START_DEADLINE_S - 3.)) <= 1.5 * DT_MDL
+
+
+def test_handback_never_speeds_the_car_up():
+  # the driving model falls back 60 m before a left, its desire not out yet: TurnPilot hands back and the route is
+  # cancelled, but through the soft disable (openpilot still steering) the car never speeds up. Once openpilot is
+  # disengaged the hold goes with it
+  sim = Sim([(300., "turn", "left", junction_of("left")), (1500., "turn", "right", junction_of("right"))], cruise=13.)
+  sim.big = True
+  while sim.distance() > 60. or sim.s < 10.:
+    sim.step()
+  assert sim.trace[-1][2].desire == Desire.none and sim.trace[-1][2].speedCap < 12.
+  sim.big = False
+  sim.nav_filter = lambda sim, instr: (nav_instruction(0., valid=False), False)  # the route cancelled
+  start = len(sim.trace)
+  for _ in range(int(SOFT_DISABLE_S / DT_MDL)):
+    sim.step()
+  held = sim.trace[start:]
+  assert all(p.handback == Handback.modelFellBack for _, _, p in held)
+  assert all(b[1] <= a[1] + 1e-6 for a, b in zip(held, held[1:], strict=False))
+  assert sim.step(lat_active=False).speedCap == NO_SPEED_CAP
+  assert sim.step().speedCap == NO_SPEED_CAP  # engaged again later (on the small model): no hold left over

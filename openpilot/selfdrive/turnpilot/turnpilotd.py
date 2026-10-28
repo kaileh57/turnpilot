@@ -30,7 +30,10 @@ desire already went out is never cancelled (desire_timing.py): its desire is hel
 the model at the turn's angle as usual; a keep desire is dropped. On a fallback the destination is removed, which
 cancels navd's route, once such a turn is over. The scene's stops in force stay, and so does the turn speed cap of a turn
 whose desire already went out: a handback must not speed the car up. Nor does the route going away under a committed
-turn cancel it (route_follower.py: gaps, navd going quiet, reroutes are dead-reckoned through).
+turn cancel it (route_follower.py: gaps, navd going quiet, reroutes are dead-reckoned through). Nor does a cap the car
+was slowing for going away with the maneuver or the route: from the handback until openpilot stops steering (the soft
+disable's end) the speed cap holds the car at no more than its speed then, and at no more than it has slowed to since
+(hold_v), or than the driver's gas has taken it to.
 A fault (plan()) is a disabled plan; it carries the handback, so a fault never hides one, and the detector's deadlines
 and the scene's stops in force run on through it (only turning TurnPilot off resets them): a faulted plan carries the
 scene's limits (live pedestrians, or those carried through a detector gap, and the junction hold in force where it
@@ -54,16 +57,16 @@ from openpilot.common.params import Params, UnknownKeyName
 from openpilot.common.realtime import DT_MDL, Ratekeeper
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
-from openpilot.selfdrive.turnpilot.desire_timing import TURN_STARTED_DEG, DesireTiming
+from openpilot.selfdrive.turnpilot.desire_timing import ENTRY_M, TURN_STARTED_DEG, DesireTiming
 from openpilot.selfdrive.turnpilot.handback import Handback
 from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S, CLEAR_DESIRE
 from openpilot.selfdrive.turnpilot.lane_planner import (OPENPILOT_SIGNALS_BRANDS, LanePlanner, lane_change_window, lane_mismatch,
                                                          model_lanes_from_msg)
-from openpilot.selfdrive.turnpilot.route_follower import KEEP, TURN, RouteFollower
+from openpilot.selfdrive.turnpilot.route_follower import KEEP, LEFT, TURN, RouteFollower
 from openpilot.selfdrive.turnpilot.scene.lane_paint import lane_paint_from_msg
 from openpilot.selfdrive.turnpilot.scene.tracker import STALE_S, SceneTracker, default_yaw_rate
 from openpilot.selfdrive.turnpilot.scene_policy import NO_ACCEL_CAP, ScenePolicy
-from openpilot.selfdrive.turnpilot.turn_skip import TurnSkip
+from openpilot.selfdrive.turnpilot.turn_skip import TurnSkip, can_make_turn
 from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, turn_speed_cap
 
 Desire = log.Desire
@@ -120,6 +123,7 @@ class TurnPilot:
     self.cancel_route = False  # set once on a fallback: main() removes NavDestination, once no turn is committed
     self.stop_abort, self._stop_abort_t = 'none', 0.  # a lane change cancelled by a disabled plan: reset() can't hold it
     self.handback_now: int | None = None  # this frame's handback, once handback() has run for it
+    self.hold_v: float | None = None  # handed back with openpilot steering: the speed the car is held to (module docstring)
     self.scene_now = None  # this frame's scene decision, once update() has made it
     self.limits = (NO_ACCEL_CAP, NO_SPEED_CAP, False)  # the last plan's (accelCap, speedCap, shouldStop)
     self.reset()
@@ -145,6 +149,7 @@ class TurnPilot:
     self.dropped_id: int | None = None  # the maneuver in hand at a handback: not taken up again
     self.turn_cap_id: int | None = None  # ...whose turn speed cap stays, its desire having gone out
     self.turn_held_id: int | None = None  # ...whose turn desire was out: held to its clear, never cancelled
+    self.skip_cap_id: int | None = None  # a dropped turn skipped on taking it up: its cap stays until it is passed
     self.last_desire = Desire.none
 
   @property
@@ -211,6 +216,8 @@ class TurnPilot:
     the detector's and the scene's state (reset())."""
     if self.lanes.cancel(reason):
       self.stop_abort, self._stop_abort_t = reason, ABORT_HOLD_S
+    if reason == 'turnedOff':
+      self.hold_v = None
     if reason == 'fault':
       self.scene.fault()
     self.reset(detector=reason == 'turnedOff')
@@ -252,6 +259,13 @@ class TurnPilot:
     handback = self.handback(available, sm.updated['modelV2'], sm['carControl'].enabled)
     plan.handback = handback
     acting = self.detector_seen and handback == Handback.none
+    lat_active = sm['carControl'].latActive
+    if self.acting and not acting and lat_active:
+      self.hold_v = v_ego
+    if acting or not lat_active:
+      self.hold_v = None
+    elif self.hold_v is not None:
+      self.hold_v = v_ego if cs.gasPressed else min(self.hold_v, v_ego)  # the driver's gas takes the car on, not back
     if self.acting and not acting:
       # handing back: drop the maneuver in hand, keep its turn cap if its desire went out (the car may be in the turn),
       # and a turn desire that went out is held to its clear, never cancelled; anything else is abandoned
@@ -266,12 +280,12 @@ class TurnPilot:
       self.lanes.cancel('handedBack')
       self.paint_rule_lanes.cancel('handedBack')
     elif acting and not self.acting and self.dropped_id is not None:
-      self._take_up_dropped(upcoming, rf, v_ego)
+      self._take_up_dropped(upcoming, rf, v_ego, right_hand_traffic)
     self.acting = acting
 
     # too fast to make the turn: skipped, so nothing below acts on it (no desire, no cap, no turn holds or lane changes)
     desire_out = self.desires.maneuver_id == rf.maneuver_id and self.desires.started
-    skip = self.skip.update(upcoming, rf.distance, rf.maneuver_id, v_ego, desire_out, right_hand_traffic, sm['carControl'].latActive)
+    skip = self.skip.update(upcoming, rf.distance, rf.maneuver_id, v_ego, desire_out, right_hand_traffic, lat_active)
     maneuver = None if skip.skipped else upcoming
     # navd reroutes on it and selfdrived alerts: only while TurnPilot is driving the route (handback outranks it)
     plan.tooFastToTurn = skip.skipped and acting
@@ -280,11 +294,13 @@ class TurnPilot:
     held = act_on is None and rf.maneuver_id == self.turn_held_id
     desire_on = maneuver if held else act_on
     cap_on = act_on if act_on is not None else (maneuver if rf.maneuver_id == self.turn_cap_id else None)
+    if cap_on is None and rf.maneuver_id == self.skip_cap_id:
+      cap_on = upcoming  # the skipped turn's pulse may have been taken before it was cleared: never sped up into it
 
     lanes = model_lanes_from_msg(model)
     desire = self.desires.update(desire_on, rf.distance, rf.maneuver_id, rf.passed, v_ego, cs.steeringAngleDeg,
                                  lanes.keep_left_ok, lanes.keep_right_ok, DT_MDL, default_yaw_rate(cs, model),
-                                 lat_active=sm['carControl'].latActive, replaced=rf.replaced,
+                                 lat_active=lat_active, replaced=rf.replaced,
                                  may_start=skip.feasible_now and not held)
     if held and desire not in (Desire.none, CLEAR_DESIRE) and desire != self.last_desire:
       desire = Desire.none  # held: the desire out stays out, but never a new rising edge (a repeat pulse under way)
@@ -312,7 +328,8 @@ class TurnPilot:
     # once the step is dead-reckoned past, until navd moves on to the turn
     ahead_on = acting and rf.valid and rf.maneuver_id != self.dropped_id
     ahead_cap = turn_speed_cap(rf.ahead, rf.ahead_distance, v_ego, right_hand_traffic) if ahead_on else NO_SPEED_CAP
-    plan.speedCap = min(decision.speed_cap, turn_speed_cap(cap_on, rf.distance, v_ego, right_hand_traffic), ahead_cap)
+    plan.speedCap = min(decision.speed_cap, turn_speed_cap(cap_on, rf.distance, v_ego, right_hand_traffic), ahead_cap,
+                        NO_SPEED_CAP if self.hold_v is None else self.hold_v)
     plan.shouldStop = decision.should_stop
     self.limits = (plan.accelCap, plan.speedCap, plan.shouldStop)
     no_junction_data = maneuver is not None and maneuver.kind in (TURN, KEEP) and not maneuver.geometry
@@ -347,20 +364,27 @@ class TurnPilot:
       plan.state = State.following
     return msg
 
-  def _take_up_dropped(self, upcoming, rf, v_ego: float) -> None:
+  def _take_up_dropped(self, upcoming, rf, v_ego: float, right_hand_traffic: bool = True) -> None:
     """TurnPilot acts again after a handback (the detector is back): the maneuver dropped at the handback is never left
     half driven, capped with no desire and no alert. A held turn desire still out (openpilot stayed engaged) drives on,
     as does a turn the driver has already started and one a standstill re-armed (it pulses again as the car pulls away);
     a maneuver whose desire never went out is taken up as on a fresh engage. A turn whose desire was dropped while
-    openpilot was off is skipped out loud (tooFastToTurn, navd reroutes): the car is inside the turn's lead by now, where
-    a fresh pulse isn't taken."""
+    openpilot was off gets a fresh pulse when the car can still make it and is ENTRY_M or more out (the entry pulse's
+    lead: the first pulse may still be in the model's queue). Otherwise it is skipped out loud (tooFastToTurn, navd
+    reroutes), and as its first pulse may still be in the model's queue, that is cleared (CLEAR_DESIRE) and the turn's
+    cap kept until it is passed: the model never turns from it at speed, and the car never speeds up into the junction."""
     d = self.desires
     dropped = self.dropped_id == rf.maneuver_id and d.maneuver_id == rf.maneuver_id
     self.dropped_id = self.turn_cap_id = self.turn_held_id = None
     if not dropped or upcoming is None:
       return
     if d.started and d.side != 0 and not d.done and d.held_off and d.turned_deg < TURN_STARTED_DEG:
+      curb_side = (upcoming.side == LEFT) != right_hand_traffic
+      if rf.distance >= ENTRY_M and can_make_turn(v_ego, rf.distance, upcoming.angle_deg, curb_side):
+        return  # pulses again on its own, as on re-engaging
       self.skip.skip(upcoming, rf.distance, rf.maneuver_id, v_ego, 'desireDropped')
+      d.cancel()
+      self.skip_cap_id = rf.maneuver_id
     else:
       d.resume()
 
@@ -405,7 +429,8 @@ class TurnPilot:
         cs = sm['carState']
         decision = self.scene.update(list(scene.objects) if scene.available else [], scene.available, None, float('inf'),
                                      max(cs.vEgo, 0.), gas_pressed=cs.gasPressed)
-      self.limits = (decision.accel_cap, decision.speed_cap, decision.should_stop)
+      speed_cap = decision.speed_cap if self.hold_v is None else min(decision.speed_cap, self.hold_v)
+      self.limits = (decision.accel_cap, speed_cap, decision.should_stop)
     except Exception:
       log_error("turnpilotd.fault_limits_failed")
     plan.accelCap, plan.speedCap, plan.shouldStop = self.limits

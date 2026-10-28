@@ -120,6 +120,12 @@ class DesireTiming:
     if self._abandoned and not self.started:
       self.done = self._abandoned = False
 
+  def cancel(self):
+    """A turn skipped with its desire out but not yet turned on (turnpilotd: a dropped turn too close to pulse again):
+    its desire comes out of the model's queue now, and nothing more goes for it."""
+    self._clear()
+    self.done, self.active = True, False
+
   def _clear(self):
     self.clear_frames, self._pending, self.side = CLEAR_FRAMES, None, 0
 
