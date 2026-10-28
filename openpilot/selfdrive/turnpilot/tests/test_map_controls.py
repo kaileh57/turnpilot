@@ -522,8 +522,10 @@ def test_a_gas_nudge_in_a_queue_short_of_a_signal_doesnt_let_go_of_it():
   car = Car([(200., 'signal')])
   car.run_until(lambda out, dec: out.stops)
   car.lead_stop = 178.
-  car.run_until(lambda out, dec: car.v < 0.01 and car.s > 150.)
+  out, dec = car.run_until(lambda out, dec: car.v < 0.01 and car.s > 150.)
   assert 200. - car.s > 20.
+  out, dec, _ = car.run(1.)
+  assert out.prompt == 'none'  # no go asked for where a tap isn't one
   car.run(0.5, gas=True, accel=0.4)
   car.run(2.)
   car.lead_stop = None

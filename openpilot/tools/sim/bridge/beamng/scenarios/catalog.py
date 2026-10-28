@@ -60,7 +60,7 @@ class Entry:
 
 SCENARIOS = {
   'ped_crosswalk_right': Entry('turn', junction=(-768.6, 555.2), turn='right', actor='crosswalk', timeout_s=120.),
-  # the oncoming cars reach the junction 3.5 s after the car reaches its hold line: it stops there, stands ~2 s for the
+  # the oncoming cars reach the junction 3.5 s after the car stops at its hold line, stands ~2 s for the
   # driver's go and is creeping out when they arrive, so the detector's oncoming hold is what decides when it turns
   'unprotected_left': Entry('turn', junction=(-650.1, 481.7), turn='left', actor='oncoming', arrive_after_s=3.5, timeout_s=150.),
   # unprotected_left comes downhill onto a shelf on a ~21% hill, and the arm straight across drops away past it: the

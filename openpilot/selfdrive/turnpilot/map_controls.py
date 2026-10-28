@@ -24,8 +24,8 @@ The rules (Kellen, 2026-10-27; /private/tmp/claude-501/stop_design.md):
   the driver is prompted then (stopSignGo). A signal is held at whatever the light, unless an accepted light source says
   green, steadily, for GREEN_STEADY_S: unknown, stale, absent, conflicting or unassociated lights all hold. The driver's
   gas tap releases it any time after it engages (seen it green while rolling up: faster than COMMIT_SPEED, or at the line,
-  within LATCH_NEAR_M; a nudge creeping in a queue further out isn't a go), and it prompts for that at once
-  (signalGo) while the light is unknown. On the car tonight there is no light source, so every mapped signal is held.
+  within LATCH_NEAR_M; a nudge creeping in a queue further out isn't a go, and isn't asked for), and it prompts for that
+  at once (signalGo) while the light is unknown. On the car tonight there is no light source, so every mapped signal is held.
   A tap on a red (the sim oracle's) still goes, with goingOnRed: the driver's right on red. Releasing one releases the
   controls RELEASE_SPAN_M past it too (the far side of a divided road).
 - A green that goes yellow, red or unknown is decided once: stop when the stopping distance at YELLOW_DECEL after T_LAT
@@ -469,7 +469,8 @@ class MapControlPolicy:
         if c.d < -OVERRUN_PAST_M:
           st.done = 'passed'
         return False
-      if gas_edge and (v > COMMIT_SPEED or c.d < LATCH_NEAR_M):
+      go_zone = v > COMMIT_SPEED or c.d < LATCH_NEAR_M
+      if gas_edge and go_zone:
         # the driver's go: seen it green while rolling up, or going on the red at the line. A nudge standing or creeping in
         # a queue short of the line isn't one: the car still stops at the line for it
         if st.light == 'red':
@@ -477,7 +478,7 @@ class MapControlPolicy:
         st.action = 'released'
         self._release(c, controls, 'gas', v, out)
         return False
-      if not oracle:
+      if not oracle and go_zone:  # asked for only where a tap is the go
         prompts.append('signalGo')
       lit = {'red': "Red light (sim oracle)", 'yellow': "Yellow light (sim oracle)"}.get(st.light)
       reason = (lit + ('' if c.junction else ' (crossing)')) if lit else f"Signal ahead: light not checked{'' if c.junction else ' (crossing)'}"
