@@ -299,3 +299,21 @@ class TestAdversarialFootage(OpenpilotTestCase):
       return np.where(np.abs(y - 0.5) < 2.5, 2.4, 1.)
     paint = drive([None, dashed(WHITE), solid(WHITE), None], shade=glare)
     assert not_broken_white(paint[2]), paint
+
+  def test_double_yellow_at_the_ego_line_stops_the_crossing(self):
+    # BeamNG shakedown lane_change (2026-10-27): after the change into the turn lane, the double solid yellow centreline is the
+    # ego left line, with broken white between the oncoming lanes beyond it, broken white on the right and the curb lane's
+    # unpainted edge. Lines where modelV2 logged them then (test_lane_planner XING_POST); the paint is this file's
+    # synthetic palette: no road-camera frames were recorded in that run, so BeamNG's own yellow is not checked here
+    from openpilot.selfdrive.turnpilot.lane_planner import LEFT, change_blocker, model_lanes
+    from openpilot.selfdrive.turnpilot.tests.test_lane_planner import XING_POST
+    ys = XING_POST[0]
+    marks = [dashed(WHITE), double(YELLOW), dashed(WHITE), None]
+    def at(mark, y0):
+      return lambda x, y: mark(x, y - y0)
+    clf = LanePaintClassifier(LENS)
+    for k in range(20):
+      frame, _ = render([None] * 4, V_EGO * DT * k, seed=k, extra=[at(m, y0) for m, y0 in zip(marks, ys, strict=True) if m is not None])
+      paint = clf.update(k * DT, frame, STRIDE, Y_HEIGHT, RPY, True, lines_xyz(ys), list(XING_POST[1]))
+    assert (paint[1].kind, paint[1].color) == ('solid', 'yellow') and paint[1].confidence >= 0.3, paint
+    assert change_blocker(LEFT, model_lanes(*XING_POST), paint) == 'lineNotBroken'
