@@ -123,7 +123,8 @@ class RouteEngine:
     if 'turnpilotPlan' not in self.sm.data or not self.sm.updated['turnpilotPlan'] or not self.sm.valid['turnpilotPlan']:
       return
     plan = self.sm['turnpilotPlan']
-    if not plan.tooFastToTurn or self.step_idx is None or self.maneuver_distance is None:
+    # a shadow plan is for scoring drives: nothing acts on it (the human drives, and may brake and take the turn)
+    if plan.shadow or not plan.tooFastToTurn or self.step_idx is None or self.maneuver_distance is None:
       return
     if abs(plan.maneuverDistance - self.maneuver_distance) < SKIP_MATCH_M and self.skipped != (self.route_count, self.step_idx):
       self.skipped = (self.route_count, self.step_idx)
@@ -229,12 +230,10 @@ class RouteEngine:
     distance_to_maneuver_along_geometry = step['distance'] - along_geometry
     # a sharp turn leaves the step sideways, and along it the car never gets past its end: it moved on once it is on
     # the next step's geometry and off this one's (otherwise navd rerouted after every such turn)
-    if self.step_idx + 1 < len(self.route) and distance_to_maneuver_along_geometry < MANEUVER_TRANSITION_THRESHOLD:
-      _, next_lateral = along_path(self.route_geometry[self.step_idx + 1], self.last_position)
-      if next_lateral < NEXT_STEP_NEAR and lateral > next_lateral + NEXT_STEP_NEAR:
-        self.step_idx += 1
-        self.recompute_hold = 0
-        return self.send_instruction()
+    if self.on_next_step(lateral, distance_to_maneuver_along_geometry):
+      self.step_idx += 1
+      self.recompute_hold = 0
+      return self.send_instruction()
     # a missed turn: no instruction until rerouted (past the step's end the lateral is the distance from it, and it advances)
     if lateral > OFF_ROUTE_DISTANCE and distance_to_maneuver_along_geometry >= -MANEUVER_TRANSITION_THRESHOLD and \
        self.step_idx < len(self.route) - 1:
@@ -288,13 +287,30 @@ class RouteEngine:
     self.step_idx = None
     self.nav_destination = None
 
+  def on_next_step(self, lateral: float, distance_to_maneuver: float) -> bool:
+    """The car is on the next step's geometry and off this one's: a sharp turn leaves the step sideways, and along it the
+    car never gets past its end."""
+    assert self.route is not None and self.route_geometry is not None and self.step_idx is not None
+    if self.step_idx + 1 >= len(self.route) or distance_to_maneuver >= MANEUVER_TRANSITION_THRESHOLD:
+      return False
+    _, next_lateral = along_path(self.route_geometry[self.step_idx + 1], self.last_position)
+    return next_lateral < NEXT_STEP_NEAR and lateral > next_lateral + NEXT_STEP_NEAR
+
   def skipped_turn_passed(self) -> bool:
-    """TurnPilot: the car is past the junction of a turn turnpilotd skipped."""
+    """TurnPilot: the car is past the junction of a turn turnpilotd skipped. If it took the turn after all (on the next
+    step's road), it moves on to that step instead: a reroute from a spot on the route replaces it for nothing."""
     if not self.skip_here() or self.step_idx is None or self.last_position is None:
       return False
     assert self.route is not None and self.route_geometry is not None
-    along, _ = along_path(self.route_geometry[self.step_idx], self.last_position)
-    return self.route[self.step_idx]['distance'] - along < -MANEUVER_TRANSITION_THRESHOLD
+    along, lateral = along_path(self.route_geometry[self.step_idx], self.last_position)
+    distance_to_maneuver = self.route[self.step_idx]['distance'] - along
+    if self.on_next_step(lateral, distance_to_maneuver):
+      cloudlog.event("navd.skipped_turn_taken", step_idx=self.step_idx)
+      self.skipped = None
+      self.step_idx += 1
+      self.recompute_hold = 0
+      return False
+    return distance_to_maneuver < -MANEUVER_TRANSITION_THRESHOLD
 
   def should_recompute(self):
     if self.step_idx is None:

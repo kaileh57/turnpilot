@@ -350,6 +350,10 @@ class TestRouteEngine(unittest.TestCase):
        'bannerInstructions': [{'distanceAlongGeometry': 100, 'primary': {'text': 'Turn left', 'type': 'turn', 'modifier': 'left'}}]},
       {'geometry': {'coordinates': [[0.001, 0], [0.001, 0.001]]}, 'distance': distance, 'duration': 10, 'bannerInstructions': []},
     ]
+    self.skip_route_plan()
+
+  def skip_route_plan(self):
+    """Load self.response and the plan turnpilotd publishes."""
     self.load_route()
     msg = messaging.new_message('turnpilotPlan')
     self.plan = msg.turnpilotPlan
@@ -396,6 +400,39 @@ class TestRouteEngine(unittest.TestCase):
     router = self.drive_past_junction(too_fast=True, plan_distance=355.)
     self.assertEqual(router.call_count, 0)
     self.assertIsNone(self.engine.skipped)
+
+  def test_shadow_skip_is_ignored(self):
+    # TurnPilot in shadow mode: nothing acts on its plan, navd included (the human drives, and may brake late and turn)
+    self.skip_route()
+    self.engine.last_position = (0.0005, 0)
+    self.engine.send_instruction()
+    self.plan.tooFastToTurn, self.plan.maneuverDistance, self.plan.shadow = True, 55., True
+    self.engine.note_skip()
+    self.assertIsNone(self.engine.skipped)
+
+  def test_skipped_turn_taken_after_all_moves_on(self):
+    # the turn was flagged skipped, but the car turned (a driver who braked, or a desire after turnpilotd's skip state
+    # reset): on the next step's road, navd moves on to it rather than rerouting from a spot on the route
+    distance = 111.195
+    self.response = [
+      {'geometry': {'coordinates': [[0, 0], [0.0009, 0], [0.001, 0]]}, 'distance': distance, 'duration': 10,
+       'bannerInstructions': [{'distanceAlongGeometry': 100, 'primary': {'text': 'Turn left', 'type': 'turn', 'modifier': 'left'}}]},
+      {'geometry': {'coordinates': [[0.001, 0], [0.001, 0.002]]}, 'distance': 2 * distance, 'duration': 20, 'bannerInstructions': []},
+    ]
+    self.skip_route_plan()
+    self.engine.last_position = (0.0005, 0)
+    self.engine.send_instruction()
+    self.plan.tooFastToTurn, self.plan.maneuverDistance = True, 55.
+    self.engine.note_skip()
+    self.assertIsNotNone(self.engine.skipped)
+    with serving(self.engine, self.response) as router:
+      self.engine.recompute_hold = RECOMPUTE_HOLD
+      self.engine.last_position = (0.001, 0.0002)  # 22 m up the road the route turns onto
+      self.engine.recompute_route(gps_ok=True)
+      self.engine.send_instruction()
+      self.assertEqual(router.call_count, 0)
+    self.assertEqual(self.engine.step_idx, 1)
+    self.assertTrue(self.last_message('navInstruction').valid)
 
   def test_new_route_is_marked_by_an_invalid_instruction(self):
     # TurnPilot: a new route can start with a maneuver like the old one's, so one invalid instruction goes between them
