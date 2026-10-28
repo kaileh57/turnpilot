@@ -285,3 +285,81 @@ def test_steady_walker_holds_sporadic_one_does_not():
   assert run(0.1, 10).reason == "pedestrian in crosswalk"  # on every 10 Hz run: holds within half a second...
   assert run(0.1, 60).reason == "pedestrian in crosswalk"  # ...and keeps holding when its confidence dips
   assert run(0.6, 100).reason != "pedestrian in crosswalk"  # 6 hits, but one every 0.6 s
+
+
+def test_committed_turn_is_never_held_again():
+  # past the hold line above COMMIT_SPEED with nothing oncoming, the car is committed to its left. Slowing under
+  # COMMIT_SPEED further in (a lead turning ahead) with a car now oncoming doesn't bring the hold back: that would stop
+  # it hard inside the junction, cancelling a committed turn
+  sp, distance = ScenePolicy(), 15.
+  while distance > 3.:
+    assert not sp.update([], True, LEFT_TURN, distance, 4., maneuver_id=1).holding
+    distance -= 4. * DT_MDL
+  oncoming = scene([car(35., 6., vx=-10.)])
+  for _ in range(10):
+    d = sp.update(oncoming.objects, True, LEFT_TURN, distance, 1.9, maneuver_id=1)
+    assert not d.holding and not d.should_stop and d.accel_cap == NO_ACCEL_CAP
+  for _ in range(10):  # nor through a detector gap
+    assert not sp.update([], False, LEFT_TURN, distance, 1.9, maneuver_id=1).holding
+  # a pedestrian in the path still stops it
+  d = sp.update(scene([car(35., 6., vx=-10.), ped(8., 0.2, in_path=True)]).objects, True, LEFT_TURN, distance, 1.9, maneuver_id=1)
+  assert d.holding and d.reason == "pedestrian in path"
+  # crept past the line under COMMIT_SPEED: not committed, so it still waits there
+  sp = ScenePolicy()
+  assert sp.update(oncoming.objects, True, LEFT_TURN, HOLD_LINE_M - 0.5, 1., maneuver_id=1).holding
+  # and the next maneuver holds as usual
+  sp = ScenePolicy()
+  sp.update([], True, LEFT_TURN, 3., 4., maneuver_id=1)
+  assert sp.update(oncoming.objects, True, LEFT_TURN, 15., 4., maneuver_id=2).reason == "waiting for oncoming"
+
+
+def test_track_evidence_outlives_a_spell_unpublished():
+  # the tracker keeps a track it has stopped publishing (MAX_COAST_S) until MAX_AGE_S, CLOSE_HOLD_S close in, and matches
+  # it again under the same id: a confirmed pedestrian occluded for 0.6 s and back at a lower confidence is still confirmed
+  sp = ScenePolicy()
+  sp.update(scene([ped(20., 0.2, in_path=True, age=6, conf=0.7)]).objects, True, None, 1000., 10.)
+  for _ in range(12):
+    sp.update([], True, None, 1000., 10.)
+  back = scene([ped(13., 0.2, in_path=True, age=7, conf=0.55)])
+  d = sp.update(back.objects, True, None, 1000., 10.)
+  assert d.reason == "pedestrian in path" and d.accel_cap < NO_ACCEL_CAP
+  # gone longer than the tracker keeps any track: a new one, which earns its stop afresh
+  sp = ScenePolicy()
+  sp.update(scene([ped(20., 0.2, in_path=True, age=6, conf=0.7)]).objects, True, None, 1000., 10.)
+  for _ in range(int(4. / DT_MDL)):
+    sp.update([], True, None, 1000., 10.)
+  assert sp.update(back.objects, True, None, 1000., 10.).accel_cap == NO_ACCEL_CAP
+  # an id that comes back with fewer hits is another track (a restarted tracker): no evidence carried over
+  sp = ScenePolicy()
+  sp.update(scene([ped(20., 0.2, in_path=True, age=9, conf=0.7)]).objects, True, None, 1000., 10.)
+  assert sp.update(back.objects, True, None, 1000., 10.).accel_cap == NO_ACCEL_CAP
+  # a crosswalk walker unpublished for 0.6 s holds again on its first frame back
+  sp = ScenePolicy()
+  for k in range(10):
+    assert sp.update(scene([ped(23., -6., age=2 + k, conf=0.7)]).objects, True, RIGHT_TURN, 20., 5., maneuver_id=0) is not None
+  for _ in range(12):
+    sp.update([], True, RIGHT_TURN, 20., 5., maneuver_id=0)
+  d = sp.update(scene([ped(23., -6., age=12, conf=0.55)]).objects, True, RIGHT_TURN, 20., 5., maneuver_id=0)
+  assert d.reason == "pedestrian in crosswalk"
+
+
+def test_crosswalk_hold_lets_a_walker_leaving_it_go():
+  # right turn, stopped at the hold line: someone walking on past the far corner, or away down the cross street, isn't
+  # going to step into the turn's crosswalk
+  at_line = {'maneuver': RIGHT_TURN, 'distance': HOLD_LINE_M, 'v_ego': 0.}
+  assert not policy([ped(15., -10., vx=1.3)], **at_line).holding
+  assert not policy([ped(10., -9., vy=-1.3)], **at_line).holding
+  # every other case still holds: standing at the corner (waiting to cross either road), crossing the cross street
+  # either way, walking toward the car's road, walking back along it, and walking off diagonally
+  for p in (ped(5., -6.), ped(HOLD_LINE_M + 1., -6., vx=1.3), ped(HOLD_LINE_M + 2., -6., vx=-1.3), ped(15., -10., vx=-1.3),
+            ped(10., -9., vy=1.3), ped(5., -6., vx=-1.3), ped(15., -10., vx=1.3, vy=1.3), ped(15., -10., vx=0.5)):
+    d = policy([p], **at_line)
+    assert d.should_stop and d.reason == "pedestrian in crosswalk", p
+  # an unconfirmed track's velocity is mostly range noise: it never lets the hold go
+  assert policy([ped(15., -10., vx=1.3, age=5, conf=0.55)], **at_line).holding
+  # left-hand traffic, a left turn: the same, mirrored
+  left_line = at_line | {'maneuver': LEFT_TURN}
+  sc = scene([ped(15., 10., vx=1.3)])
+  assert not scene_policy(sc.objects, True, LEFT_TURN, HOLD_LINE_M, 0., right_hand_traffic=False).holding
+  sc = scene([ped(15., 10.)])
+  assert scene_policy(sc.objects, True, left_line['maneuver'], HOLD_LINE_M, 0., right_hand_traffic=False).holding
