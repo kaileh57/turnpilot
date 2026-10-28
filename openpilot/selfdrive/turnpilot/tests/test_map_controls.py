@@ -573,3 +573,29 @@ def test_dropping_the_latch_for_disengage_on_accelerator_never_replays_it():
   car.s += 1.7
   out, dec, _ = car.step()
   assert not dec.should_stop
+
+
+def test_unprotected_left_whose_junction_is_read_nearer_than_the_car_can_stop_short_of_stops_at_the_floor():
+  # the route's junction estimate moves 20 m nearer (route_follower.py: the nearest of navd's readings) once the car is
+  # braking for its hold line: the line is now behind the car. Never dropped as an overrun and crossed blind: the car
+  # brakes at the floor, no harder, stops as soon as it can, said out loud, and is held there for the driver's tap
+  for jump in (20., 12.):
+    car = left_car()
+    car.run_until(lambda out, dec, car=car: out.stops and 250. - car.s < 28.)
+    car.turn = (car.turn[0] - jump,) + car.turn[1:]
+    alerts = []
+    out, dec = car.run_until(lambda out, dec, alerts=alerts: alerts.append(out.alert) or held(out, dec), max_s=20.)
+    assert car.v < 0.3 and 250. - car.s > HOLD_LINE_M, jump  # short of the true hold line
+    assert all(cmd >= MAP_DECEL_MAX - 1e-6 for *_, cmd, _, _ in car.rows), jump
+    assert 'cannotStopComfortably' in alerts, jump
+    assert out.shown.kind == UNPROTECTED and out.prompt == 'unprotectedTurnGo'
+    s_held = car.s
+    out, dec, _ = car.run(5.)
+    assert held(out, dec) and car.s - s_held < 0.05
+  # a reading a little nearer close to the line, where the latch reaches past it: no floor, no take control, held
+  car = left_car()
+  car.run_until(lambda out, dec, car=car: 250. - HOLD_LINE_M - car.s < 3.)
+  car.turn = (car.turn[0] - 1.5,) + car.turn[1:]
+  alerts = []
+  out, dec = car.run_until(lambda out, dec, alerts=alerts: alerts.append(out.alert) or held(out, dec), max_s=20.)
+  assert 'cannotStopComfortably' not in alerts and car.v < 0.3

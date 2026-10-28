@@ -160,7 +160,7 @@ def test_map_control_prompts_chime_and_yield_is_silent():
 def test_map_control_alerts():
   a, = alerts(EventName.turnpilotControlAlert, FakeSM(plan(controlAlert='cannotStopComfortably')))
   assert a.alert_text_1 == 'Take Control' and a.audible_alert == AudibleAlert.tpHandback
-  for kind in ('stopOverrun', 'proceedingOnYellow', 'goingOnRed'):
+  for kind in ('stopOverrun', 'proceedingOnYellow', 'goingOnRed', 'junctionUncertain'):
     a, = alerts(EventName.turnpilotControlAlert, FakeSM(plan(controlAlert=kind)))
     assert a.audible_alert == AudibleAlert.prompt and a.duration >= 200, kind
   for kind in ('mapControlsUnavailable', 'lightSourceRejected'):

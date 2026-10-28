@@ -1106,9 +1106,9 @@ def test_gps_jump_on_the_committed_turns_step_keeps_its_junction_where_it_was():
 
 def test_gps_outlier_that_brings_the_turns_first_pulse_out_doesnt_hold_its_junction_short():
   # one navd update reads the turn off m closer from near m out, and that reading brings the turn's first pulse out.
-  # navd's next update, back on the true track, corrects the junction: the turn isn't read as passed short of it, its
-  # cap stays to the junction, and the car isn't sped up into it. On an unprotected left the car stops at its hold line,
-  # not off m short of it
+  # Which reading is right can't be told: the junction is held at the nearest (off m short), so the turn isn't read as
+  # passed short of it, its cap stays to the junction, and the car isn't sped up into it. On an unprotected left the car
+  # stops at or short of its hold line, never past it, and short by more than 15 m only said out loud
   J = 400.
   for side, off, near in (('right', -20., 60.), ('right', -12., 50.), ('right', -15., 55.), ('right', -25., 70.),
                           ('right', -8., 45.), ('left', -20., 60.)):
@@ -1130,29 +1130,36 @@ def test_gps_outlier_that_brings_the_turns_first_pulse_out_doesnt_hold_its_junct
       if sim.v < 0.3:
         stops.append(J - sim.s)
       if committed_at is not None and committed_at + 15. < sim.s < J:  # navd's next update in
-        errors.append(abs(sim.distance() - (J - sim.s)))
+        errors.append(sim.distance() - (J - sim.s))
     case = (side, off, near)
     assert committed_at is not None and committed_at >= J - near - 1., case  # the outlier is what brought the pulse out
     before = [(s, v, p) for s, v, p in sim.trace if committed_at <= s < J + 8.]
     assert all(p.speedCap < NO_SPEED_CAP and p.desire != CLEAR_DESIRE for _, _, p in before), case
-    assert errors and max(errors) < 1., (case, max(errors))  # the junction where it is, not off m short
+    assert errors and max(errors) < 1., (case, max(errors))  # the junction never further than it is
     assert max(v for s, v, _ in before if s > J - 15.) < 5., case  # held to the turn's cap, 4.3 m/s here
     if side == 'left':
-      assert stops and HOLD_LINE_M < min(stops) and max(stops) < HOLD_LINE_M + 2., (case, stops[0], stops[-1])
+      assert_hold_line_kept(sim, stops, case)
+
+
+def assert_hold_line_kept(sim, stops, case):
+  """An unprotected turn's stop: at its hold line or short of it, never past it, and more than 2 m short of it only
+  with the junction said to be uncertain (junctionUncertain, by its readings' spread)."""
+  assert stops and HOLD_LINE_M < min(stops), (case, stops[:1], stops[-1:])
+  if max(stops) >= HOLD_LINE_M + 2.:
+    assert any(p.controlAlert == 'junctionUncertain' for _, _, p in sim.trace), (case, max(stops))
 
 
 def assert_junction_kept(sim, J, side, case, from_s, ids=None):
   """From from_s to the junction at J: the turn's cap and desire kept (no CLEAR), the car held to its cap through it
-  (4.3 m/s here), the follower's junction where it is in the last 30 m, and on an unprotected left the car stopped at
-  its hold line, not short of it."""
+  (4.3 m/s here), the follower's junction never further than it is in the last 30 m (ids: follower less true, m), and on
+  an unprotected left the car stopped at its hold line or short of it (assert_hold_line_kept)."""
   before = [(s, v, p) for s, v, p in sim.trace if from_s <= s < J + 8.]
   assert before and all(p.speedCap < NO_SPEED_CAP and p.desire != CLEAR_DESIRE for _, _, p in before), case
   assert max(v for s, v, _ in sim.trace if J - 15. < s < J + 8.) < 5., case
   if ids is not None:
     assert ids and max(ids) < 1., (case, max(ids))
   if side == 'left':
-    stops = [J - s for s, v, _ in sim.trace if v < 0.3 and J - 40. < s < J]
-    assert stops and HOLD_LINE_M < min(stops) and max(stops) < HOLD_LINE_M + 2., (case, stops[0], stops[-1])
+    assert_hold_line_kept(sim, [J - s for s, v, _ in sim.trace if v < 0.3 and J - 40. < s < J], case)
 
 
 def test_gps_outliers_around_the_turns_first_pulse_never_hold_its_junction_short():
@@ -1185,10 +1192,45 @@ def test_gps_outliers_around_the_turns_first_pulse_never_hold_its_junction_short
       if committed_at is None and sim.tp.turn_committed:
         committed_at = sim.s
       if J - 30. < sim.s < J:
-        errors.append(abs(sim.distance() - (J - sim.s)))
+        errors.append(sim.distance() - (J - sim.s))
     case = (side, cruise, near, offs, route_count)
     assert committed_at is not None and committed_at >= J - near - 1., case  # an outlier is what brought the pulse out
     assert_junction_kept(sim, J, side, case, committed_at, errors)
+
+
+def test_a_gps_bias_long_before_the_turn_or_lasting_into_it_never_holds_its_junction_short():
+  # navd's readings from near m out carry offs (one a second), then are true again: a bias over the long approach that
+  # outnumbers the true readings after it (p_seq2), one that starts close in and lasts, or a jump close in. No reading
+  # outvotes another: the cap, the desire's lead and the hold line are at the nearest any reading put the junction, the
+  # turn passed only past the furthest, so never passed or its cap lifted short of the junction, never a hold line past
+  # its true one, and on an unprotected left a junction read more than 15 m apart is said out loud
+  J = 400.
+  for side, near, offs in (('right', 395., (-20.,) * 16), ('left', 395., (-20.,) * 16), ('left', 395., (20.,) * 16),
+                           ('right', 395., (-12.,) * 16), ('left', 30., (-20.,)), ('left', 25., (-20.,) * 4),
+                           ('left', 20., (-15.,)), ('right', 30., (-20.,) * 6), ('left', 38., (20.,) * 6)):
+    nxt = 'left' if side == 'right' else 'right'
+    mans = [(J, "turn", side, junction_of(side)), (J + 1200., "turn", nxt, junction_of(nxt, 2))]
+    sim = Sim(mans)
+    def biased(sim, instr, side=side, offs=offs, near=near, mans=mans, k=[0]):  # noqa: B006
+      if sim.s < J - near or sim.s > J + 5. or k[0] >= len(offs):
+        return instr, True
+      off = offs[k[0]]
+      k[0] += 1
+      return nav_instruction(J - sim.s + off, "turn", side, remaining=J + 1300. - sim.s + off, junction=junction_of(side),
+                             ahead=[(mans[1][0] - sim.s + off,) + tuple(mans[1][1:])]), True
+    sim.nav_filter = biased
+    committed_at, errors = None, []
+    while sim.s < J + 30.:
+      sim.step(yaw_rate=(0.5 if side == 'left' else -0.5) if J - 2. < sim.s < J + 12. else 0.)
+      if committed_at is None and sim.tp.turn_committed:
+        committed_at = sim.s
+      if J - 30. < sim.s < J:
+        errors.append(sim.distance() - (J - sim.s))
+    case = (side, near, offs[:2], len(offs))
+    assert committed_at is not None, case
+    assert_junction_kept(sim, J, side, case, committed_at, errors)
+    if side == 'left' and min(offs) <= -20.:
+      assert any(p.controlAlert in ('junctionUncertain', 'cannotStopComfortably') for _, _, p in sim.trace), case
 
 
 def test_gps_outlier_that_commits_the_turn_and_a_fault_after_it_dont_pass_the_turn_short():
@@ -1247,7 +1289,7 @@ def test_gps_outlier_on_the_first_reading_of_the_next_turns_step_doesnt_hold_its
     while sim.s < J2 + 30.:
       sim.step(yaw_rate=-0.5 if J1 - 2. < sim.s < J1 + 12. else (y2 if J2 - 2. < sim.s < J2 + 12. else 0.))
       if J2 - 30. < sim.s < J2:
-        errors.append(abs(sim.distance() - (J2 - sim.s)))
+        errors.append(sim.distance() - (J2 - sim.s))
     assert_junction_kept(sim, J2, second, (off, gap, second), J2 - 30., errors)
 
 
@@ -1272,7 +1314,7 @@ def test_gps_outlier_on_the_last_reading_of_a_straight_on_step_doesnt_hold_the_t
   while sim.s < J + 30.:
     sim.step(yaw_rate=-0.5 if J - 2. < sim.s < J + 12. else 0.)
     if J - 30. < sim.s < J:
-      errors.append(abs(sim.distance() - (J - sim.s)))
+      errors.append(sim.distance() - (J - sim.s))
   assert_junction_kept(sim, J, 'right', 'none step', J - 30., errors)
 
 

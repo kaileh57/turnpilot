@@ -160,6 +160,8 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
     goingOnRed @4;              # the driver released a red-light hold with the gas
     mapControlsUnavailable @5;  # navInstruction.controlsStatus isn't ok: stops and signals may be missing
     lightSourceRejected @6;     # a light-state source that isn't accepted here (the sim oracle outside the sim)
+    junctionUncertain @7;       # navd's readings of a committed unprotected turn's junction disagree by more than 15 m:
+                                # its hold line is at the nearest of them, so the car may stop early (route_follower.py)
   }
   mapControl @24 :MapControlStatus;
   controlPrompt @25 :ControlPrompt;

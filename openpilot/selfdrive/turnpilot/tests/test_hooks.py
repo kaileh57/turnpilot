@@ -274,6 +274,9 @@ def test_plan_events_map_controls_by_priority():
   assert events(alert='mapControlsUnavailable', offer='left') == ['turnpilotLaneChangeLeft']
   assert events(alert='mapControlsUnavailable', mismatch=LaneMismatch.wrongLaneForTurn) == ['turnpilotWrongLane']
   assert events(alert='lightSourceRejected') == ['turnpilotControlAlert']
+  # an unprotected turn's junction read far apart: under its go prompt, over a lane change
+  assert events(prompt='unprotectedTurnGo', alert='junctionUncertain') == ['turnpilotControlPrompt']
+  assert events(alert='junctionUncertain', offer='left') == ['turnpilotControlAlert']
   assert events(prompt='yieldAhead') == ['turnpilotControlPrompt']
   # shadow: nothing acts, nothing is said
   msg = messaging.new_message('turnpilotPlan')

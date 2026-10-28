@@ -65,12 +65,12 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.desire_timing import ENTRY_M, TURN_STARTED_DEG, DesireTiming
 from openpilot.selfdrive.turnpilot.handback import Handback
-from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S, CLEAR_DESIRE
+from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S, CLEAR_DESIRE, CONTROL_STATUS_ALERTS
 from openpilot.selfdrive.turnpilot.map_controls import (KEEP_TURN, PROTECT_PAST_M, YELLOW_DECEL, YELLOW_DECEL_MAX, MapControlPolicy,
                                                          light_input, turn_stop_feasible, unprotected_turn)
 from openpilot.selfdrive.turnpilot.lane_planner import (OPENPILOT_SIGNALS_BRANDS, LanePlanner, lane_change_window, lane_mismatch,
                                                          model_lanes_from_msg)
-from openpilot.selfdrive.turnpilot.route_follower import KEEP, LEFT, TURN, RouteFollower
+from openpilot.selfdrive.turnpilot.route_follower import KEEP, LEFT, TURN, UNCERTAIN_M, RouteFollower
 from openpilot.selfdrive.turnpilot.scene.lane_paint import lane_paint_from_msg
 from openpilot.selfdrive.turnpilot.scene.tracker import STALE_S, SceneTracker, default_yaw_rate
 from openpilot.selfdrive.turnpilot.scene_policy import NO_ACCEL_CAP, ScenePolicy
@@ -94,6 +94,7 @@ ERROR_LOG_PERIOD_S = 10.  # s between logged exceptions from one place, so one t
 PLAN_INPUT_GRACE_FRAMES = 10
 MISMATCH_CONFIRM_FRAMES = 20  # a lane mismatch this many frames in a row (1 s) is flagged: the model's lane count flickers
 NO_JUNCTION_DATA_REASON = "no junction data: nominal turn angle"
+JUNCTION_UNCERTAIN_REASON = "junction position uncertain: stopping early"
 # no fresh detections for this long (the scene goes unavailable STALE_S after the last) and the detector has stopped:
 # past modeld's first forced run or retry (1 s), short of its second (2 s)
 DETECTOR_DEADLINE_S = 1.5
@@ -420,6 +421,12 @@ class TurnPilot:
     no_junction_data = maneuver is not None and maneuver.kind in (TURN, KEEP) and not maneuver.geometry
     plan.reason = decision.reason or lane_reason or mapd.reason or (NO_JUNCTION_DATA_REASON if no_junction_data else "")
     fill_map_control(plan, mapd)
+    # an unprotected turn's hold line is at the nearest of navd's readings of its junction (route_follower.py): readings
+    # that far apart, it may be well short of the line, said out loud rather than guessed (never over the infeasible stop)
+    if isinstance(turn, tuple) and self.turn_committed and rf.junction_spread > UNCERTAIN_M and \
+       plan.controlAlert in ('none',) + CONTROL_STATUS_ALERTS:
+      plan.controlAlert = 'junctionUncertain'
+      plan.reason = decision.reason or JUNCTION_UNCERTAIN_REASON
 
     plan.routeValid = rf.valid
     if rf.valid and rf.maneuver is not None:

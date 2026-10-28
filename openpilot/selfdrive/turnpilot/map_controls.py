@@ -47,7 +47,10 @@ The rules (Kellen, 2026-10-27; /private/tmp/claude-501/stop_design.md):
   MAP_MARGIN_M: the curve, the latch and the stop sign's gas rules, with no dwell: held, the driver is prompted at once
   (unprotectedTurnGo), and only a gas tap goes. A failing or missing controls status leaves the turn unprotected. One the
   car isn't held at goes with its maneuver (skipped too fast, rerouted away, passed), never with a fault (it carries on,
-  dead-reckoned); a held one is position-free like any latch. After the go, scene_policy.py's oncoming and pedestrian
+  dead-reckoned); a held one is position-free like any latch. Its junction is the nearest of navd's readings
+  (route_follower.py), so a new one can put the line behind where the car can stop at MAP_DECEL_MAX: it is never dropped
+  as an overrun then (crossed blind), but moved up to where the car stops braking at that floor, no harder, said out
+  loud (cannotStopComfortably), and held there for the driver's go like any other. After the go, scene_policy.py's oncoming and pedestrian
   holds may still stop the car: they only add holds.
 - navd's controlsStatus other than ok (navd always sets it; none is a navd from before controls) raises
   mapControlsUnavailable and keeps "Map stops/signals: <status>" in the reason: no controls on tiles without control
@@ -208,6 +211,8 @@ class MapControlPolicy:
     self.prev_gas = False
     self._alert, self._alert_t = 'none', 0.
     self.turn: TrackedControl | None = None  # the unprotected turn's control (module docstring)
+    self._turn_floor: float | None = None  # m, dead-reckoned: its stop point read behind where the car can stop at the floor
+    self._turn_raw = 0.  # m to its stop point as last read, before that floor
     self.turn_name = 'left'
 
   def stop_ahead(self) -> float | None:
@@ -269,12 +274,32 @@ class MapControlPolicy:
         cloudlog.event("turnpilot.unprotected_turn_dropped", key=list(tc.key), d=round(tc.d, 1), v=round(v, 2),
                        why='protected' if turn is not None and key == tc.key else 'maneuver')
       tc = None
+    if tc is None:
+      self._turn_floor = None
     if want:
       d = turn[1] - HOLD_LINE_M - MAP_MARGIN_M
+      raw, was_raw = d, self._turn_raw - v * dt
+      self._turn_raw = raw
       if tc is None:
         tc = TrackedControl(key, UNPROTECTED, d)
       else:
-        tc.jumped = abs(d - (tc.d - v * dt)) > JUMP_M
+        was = tc.d - v * dt
+        if self._turn_floor is not None:
+          self._turn_floor -= v * dt
+        stop_d = v ** 2 / (2. * -MAP_DECEL_MAX)
+        if tc.engaged and tc.state is not None and not tc.state.override and raw < was_raw - 2. and \
+           raw < stop_d - LATCH_PAST_M:
+          # its junction read nearer (route_follower.py: the nearest of navd's readings), its line now where the car,
+          # braking at the floor, would stop past the latch's reach: never dropped as an overrun and crossed blind, the
+          # car stops as soon as it can at the floor, no harder, and is held there for the driver's go. Said out loud.
+          # Nearer than that the latch holds it as for any stop
+          self._turn_floor = max(self._turn_floor or 0., stop_d)
+          self._transient('cannotStopComfortably')
+          cloudlog.event("turnpilot.unprotected_turn_line_behind", error=True, key=list(tc.key), d=round(d, 1),
+                         v=round(v, 2), stop_d=round(stop_d, 1))
+        if self._turn_floor is not None:
+          d = max(d, self._turn_floor)
+        tc.jumped = abs(d - was) > JUMP_M
         tc.d = d
       self.turn_name = turn[2]
     self.turn = tc

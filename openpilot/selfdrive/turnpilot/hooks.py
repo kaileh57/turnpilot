@@ -52,7 +52,8 @@ def limits_plan(sm, now: float | None = None):
 
 
 CONTROL_ALERT_FIRST = ('cannotStopComfortably',)                          # above too fast to turn
-CONTROL_ALERT_EVENTS = ('stopOverrun', 'proceedingOnYellow', 'goingOnRed')  # below the prompt, above a lane change
+CONTROL_ALERT_EVENTS = ('stopOverrun', 'proceedingOnYellow', 'goingOnRed', 'junctionUncertain')  # below the prompt, above a
+                                                                                                # lane change
 CONTROL_STATUS_ALERTS = ('mapControlsUnavailable', 'lightSourceRejected')  # last of all, a status line
 
 
@@ -71,7 +72,8 @@ def plan_events(sm, now: float | None = None) -> list[str]:
   3. a map stop it can't make gently (turnpilotControlAlert, cannotStopComfortably: take control);
   4. too fast to turn (turnpilotTooFastToTurn);
   5. a map control's prompt to the driver (turnpilotControlPrompt: stop sign, signal or unprotected turn go, yield ahead);
-  6. a map control's other alerts (turnpilotControlAlert: a stop line overrun, going on a yellow or a red);
+  6. a map control's other alerts (turnpilotControlAlert: a stop line overrun, going on a yellow or a red, an unprotected
+     turn's junction uncertain);
   7. a planned lane change, offered or just aborted (turnpilotLaneChangeLeft/Right/Aborted, LaneChangeEvents);
   8. the wrong lane, or a lane it can't confirm (turnpilotWrongLane);
   9. the map controls' status (turnpilotControlAlert: map stops unavailable, light source rejected).
@@ -126,6 +128,7 @@ CONTROL_ALERT_TEXT = {
   'goingOnRed': 'Going on red: your go',
   'mapControlsUnavailable': 'Map stops and signals unavailable',
   'lightSourceRejected': 'Light source not accepted: lights unknown',
+  'junctionUncertain': 'GPS unsure where the junction is: slow, may stop short of it',
 }
 
 

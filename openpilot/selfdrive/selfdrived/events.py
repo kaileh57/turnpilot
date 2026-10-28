@@ -298,7 +298,8 @@ CONTROL_PROMPT_TITLE = {'stopSignGo': "Stop Sign", 'signalGo': "Signal Ahead", '
                         'unprotectedTurnGo': "Unprotected Turn"}
 CONTROL_ALERT_TITLE = {'cannotStopComfortably': "Take Control", 'stopOverrun': "Stop Line Passed",
                        'proceedingOnYellow': "Proceeding on Yellow", 'goingOnRed': "Going on Red",
-                       'mapControlsUnavailable': "Map Stops Unavailable", 'lightSourceRejected': "Light Source Rejected"}
+                       'mapControlsUnavailable': "Map Stops Unavailable", 'lightSourceRejected': "Light Source Rejected",
+                       'junctionUncertain': "Junction Position Uncertain"}
 TURNPILOT_CONTROL_ALERT_S = 3.  # an overrun, a yellow or a red go is held up this long
 
 
