@@ -1137,11 +1137,16 @@ def test_oracle_accepted_only_in_the_sim_with_the_param():
 
 
 def test_disengage_on_accelerator_refuses_out_loud():
+  # a gas tap would disengage instead of giving the go: no stop control at all, said, never a hold nothing can release
   sim = Sim([(1000., "turn", "right"), (2000., "turn", "left")], controls=[(200., 'stop')])
   sim.disengage_on_accel = True
   plan = sim.step()
   assert plan.state == State.disabled and plan.fault == Fault.disengageOnAccelerator
   assert plan.reason == "map stops need DisengageOnAccelerator off"
+  sim.run(25.)
+  assert sim.s > 210.
+  assert all(not p.shouldStop and str(p.mapControl.action) == 'none' for _, _, p in sim.trace)
+  assert sim.tp.map_controls.held is None
 
 
 def test_fault_keeps_the_map_stop_latch_and_turning_off_clears_it():

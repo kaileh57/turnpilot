@@ -135,10 +135,11 @@ class StaleHoldEvents:
   def __init__(self):
     self.holding = False
 
-  def update(self, plan) -> tuple[str, ...]:
-    """plan: limits_plan's, None while stale."""
-    if plan is not None:
-      self.holding = bool(plan.shouldStop)
+  def update(self, limits, fresh) -> tuple[str, ...]:
+    """limits: limits_plan's; fresh: fresh_plan's, None while stale. A fresh plan with no limits (TurnPilot turned off,
+    shadow mode) isn't a lost hold: the driver turned it off."""
+    if fresh is not None:
+      self.holding = limits is not None and bool(limits.shouldStop)
       return ()
     return ('turnpilotControlAlert',) if self.holding else ()
 

@@ -290,17 +290,26 @@ def test_control_texts():
 def test_stale_hold_is_loud():
   # turnpilotd dies with the car held at a stop line: plannerd drops shouldStop at once (PLAN_MAX_AGE_S), and the driver is
   # told at once, not when the manager notices the process is gone
-  from openpilot.selfdrive.turnpilot.hooks import StaleHoldEvents, limits_plan
+  from openpilot.selfdrive.turnpilot.hooks import StaleHoldEvents, fresh_plan, limits_plan
+
+  def update(ev, sm):
+    return ev.update(limits_plan(sm), fresh_plan(sm))
   held = turnpilot_plan(False, desire=0, lane_change='none', accel_cap=-0.5, speed_cap=0., should_stop=True, state=State.holding)
   ev = StaleHoldEvents()
-  assert ev.update(limits_plan(FakeSM({'turnpilotPlan': held}))) == ()
+  assert update(ev, FakeSM({'turnpilotPlan': held})) == ()
   stale = FakeSM({'turnpilotPlan': held}, age=PLAN_MAX_AGE_S + 0.05)
   assert limits_plan(stale) is None
-  assert ev.update(limits_plan(stale)) == ('turnpilotControlAlert',)
-  assert ev.update(limits_plan(stale)) == ('turnpilotControlAlert',)  # until it is back
-  assert ev.update(limits_plan(FakeSM({'turnpilotPlan': held}))) == ()
+  assert update(ev, stale) == ('turnpilotControlAlert',)
+  assert update(ev, stale) == ('turnpilotControlAlert',)  # until it is back
+  assert update(ev, FakeSM({'turnpilotPlan': held})) == ()
   # a plan that wasn't holding going stale is processNotRunning's alone
   free = turnpilot_plan(False, should_stop=False, accel_cap=10., speed_cap=100.)
   ev = StaleHoldEvents()
-  ev.update(limits_plan(FakeSM({'turnpilotPlan': free})))
-  assert ev.update(None) == ()
+  update(ev, FakeSM({'turnpilotPlan': free}))
+  assert update(ev, FakeSM({'turnpilotPlan': free}, age=PLAN_MAX_AGE_S + 0.05)) == ()
+  # held, then TurnPilot turned off or shadow mode on: a fresh plan with no limits is not a stale one, nothing to say
+  for off in (turnpilot_plan(False, state=State.disabled, should_stop=False), turnpilot_plan(True, should_stop=True)):
+    ev = StaleHoldEvents()
+    update(ev, FakeSM({'turnpilotPlan': held}))
+    assert update(ev, FakeSM({'turnpilotPlan': off})) == ()
+    assert update(ev, FakeSM({'turnpilotPlan': off}, age=PLAN_MAX_AGE_S + 0.05)) == ()

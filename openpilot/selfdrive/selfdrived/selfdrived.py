@@ -216,7 +216,7 @@ class SelfdriveD:
     for name in plan_events(self.sm):
       self.events.add(getattr(EventName, name))
     # TurnPilot: a plan gone stale while it held the car (a map stop, a pedestrian) lost the hold: said at once
-    for name in self.turnpilot_stale_hold.update(limits_plan(self.sm)):
+    for name in self.turnpilot_stale_hold.update(limits_plan(self.sm), fresh_plan(self.sm)):
       self.events.add(getattr(EventName, name))
 
     # Block resume if cruise never previously enabled

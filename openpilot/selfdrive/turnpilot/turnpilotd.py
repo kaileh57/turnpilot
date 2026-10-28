@@ -456,7 +456,7 @@ class TurnPilot:
       msg = disabled_plan(shadow, DISENGAGE_ON_ACCEL_REASON, Fault.disengageOnAccelerator,
                           Handback.modelFellBack if self.fell_back else Handback.none)
       self.fill_stop_abort(msg.turnpilotPlan)
-      self.fault_limits(msg.turnpilotPlan, sm, scene)
+      self.fault_limits(msg.turnpilotPlan, sm, scene, map_controls=False)
       return msg
     if enabled and not long_control:
       self.stop('fault')
@@ -488,18 +488,21 @@ class TurnPilot:
       self.fault_limits(msg.turnpilotPlan, sm, scene)
       return msg
 
-  def fault_limits(self, plan, sm, scene) -> None:
-    """A faulted plan's limits: the scene's, with no route (scene_policy.py: ScenePolicy.fault). The ones update()
-    made this frame before it failed, if it got that far; the last plan's if the scene fails too."""
+  def fault_limits(self, plan, sm, scene, map_controls: bool = True) -> None:
+    """A faulted plan's limits: the scene's, with no route (scene_policy.py: ScenePolicy.fault), and the map stops'
+    (their latch above all). The ones update() made this frame before it failed, if it got that far; the last plan's if
+    the scene fails too. map_controls False (DisengageOnAccelerator on): no stop control at all, it refuses to run."""
     try:
       decision = self.scene_now
       cs = sm['carState']
       if decision is None:
-        try:  # the map stops in force, the latch above all (map_controls.py): a fault never lets a held car go
-          stops = self.map_update(sm, max(cs.vEgo, 0.), cs.gasPressed).stops
-        except Exception:
-          log_error("turnpilotd.fault_map_controls_failed")
-          stops = self.map_controls.held_stops()
+        stops = []
+        if map_controls:
+          try:  # the map stops in force, the latch above all (map_controls.py): a fault never lets a held car go
+            stops = self.map_update(sm, max(cs.vEgo, 0.), cs.gasPressed).stops
+          except Exception:
+            log_error("turnpilotd.fault_map_controls_failed")
+            stops = self.map_controls.held_stops()
         decision = self.scene.update(list(scene.objects) if scene.available else [], scene.available, None, float('inf'),
                                      max(cs.vEgo, 0.), gas_pressed=cs.gasPressed, extra_stops=stops)
         self.was_stopping = decision.should_stop
