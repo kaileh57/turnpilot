@@ -118,10 +118,13 @@ class RouteEngine:
     self.collect_route(new_destination)
     if new_destination != self.nav_destination and self.route is not None:
       self.clear_route()  # never guidance to a destination that was replaced
-    if self.job is not None:  # still routing: a new destination cancels it, and goes once it has stopped
-      if self.job.destination != new_destination:
-        self.job.cancel.set()
-      return
+    if self.job is not None:
+      if self.job.destination == new_destination:
+        return  # still routing to it
+      # a new destination (or none) cancels the job and doesn't wait for it: a download can't stop while the server is
+      # still building its corridor. The job is left to finish on its own, and the router drops what it brings back.
+      self.job.cancel.set()
+      self.job = None
 
     if new_destination is None:
       self.clear_route()
@@ -179,7 +182,10 @@ class RouteEngine:
   def send_instruction(self):
     msg = messaging.new_message('navInstruction', valid=True)
 
-    if self.step_idx is None:
+    # TurnPilot: a job while there is a route is a reroute for the same destination (a new one clears the route), as when
+    # the car left the corridor and a new one downloads for minutes. The car is off this route meanwhile: its distances
+    # mean nothing, and following them would run through its steps to 'Destination reached' and delete the destination.
+    if self.step_idx is None or self.job is not None:
       msg.valid = False
       self.pm.send('navInstruction', msg)
       return

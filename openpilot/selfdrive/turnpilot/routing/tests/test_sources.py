@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import sys
@@ -12,14 +13,14 @@ import requests
 
 from openpilot.selfdrive.navigation.navd import RouteEngine
 from openpilot.selfdrive.turnpilot.maps import corridor
-from openpilot.selfdrive.turnpilot.maps.client import MapError
+from openpilot.selfdrive.turnpilot.maps.client import MapError, storage_error
 from openpilot.selfdrive.turnpilot.maps.corridor import KEEP_PACKS
 from openpilot.selfdrive.turnpilot.maps.coverage import coverage_path, save
 from openpilot.selfdrive.turnpilot.maps.status import STATUS_PARAM, read_status
 from openpilot.selfdrive.turnpilot.maps.tests.fakes import (CHICAGO, INDY_EAST, KEY, SEATTLE, MapServer, coverage_doc, level2_tile, make_pack,
                                                             self_signed, tile_files)
 from openpilot.selfdrive.turnpilot.routing import valhalla_source
-from openpilot.selfdrive.turnpilot.routing.sources import PACKS_DIR, RETRY_SECONDS, MapRouter
+from openpilot.selfdrive.turnpilot.routing.sources import PACKS_DIR, REFUSED_RETRY_SECONDS, RETRY_SECONDS, MapRouter
 from openpilot.selfdrive.turnpilot.routing.tests.test_valhalla_routing import HAVE_VALHALLA, TURN_LANES_OSM, build_tiles
 from openpilot.selfdrive.turnpilot.routing.valhalla_source import ValhallaSource, locate, tiles_usable
 
@@ -357,6 +358,50 @@ class TestMapRouter(RouterCase):
       self.assertIn('RuntimeError: surprise', e.message)
       self.refused('download_failed')
     self.assertEqual(len(self.server.corridor_requests()), 1)
+
+  def test_a_full_disk_is_said_and_not_downloaded_again_every_30_s(self):
+    """The comma's own storage: a new download won't fix it, so it waits out the refusal time, not RETRY_SECONDS. The real
+    unpack's ENOSPC is tested in maps/tests/test_corridor.py; here, its error and a full disk under the router itself."""
+    full = OSError(errno.ENOSPC, 'No space left on device')
+    for target in (patch.object(corridor, 'unpack', side_effect=storage_error(full)), patch.object(Path, 'mkdir', side_effect=full)):
+      self.router.failure, self.router.corridor = None, None
+      self.server.requests.clear()
+      with target:
+        e = self.refused('storage')
+        self.assertFalse(e.retry)
+        self.assertIn('storage is full', e.message)
+        with patch('openpilot.selfdrive.turnpilot.routing.sources.time.monotonic', return_value=time.monotonic() + RETRY_SECONDS + 1):
+          self.refused('storage')  # no new download 30 s later
+      self.assertLessEqual(len(self.server.corridor_requests()), 1)
+      with patch('openpilot.selfdrive.turnpilot.routing.sources.time.monotonic', return_value=time.monotonic() + REFUSED_RETRY_SECONDS + 1):
+        self.assertEqual(self.router.route(START, DESTINATION, 90, 'en'), STEPS)  # space was freed meanwhile
+
+  def test_a_job_cancelled_while_waiting_on_the_server_leaves_no_trace(self):
+    """navd doesn't wait for a cancelled job: it can fail or finish after the next destination started, and then it must
+    not write the status, a failure to wait out, or the corridor."""
+    real = self.router.client_factory
+    cancel = []
+
+    def cancelled_while_the_server_builds(*args):
+      client = real(*args)
+      download = client.corridor
+
+      def corridor_call(start, destination, out, progress=None, coverage_names=''):
+        cancel.append(True)  # navd moved on to INDY_EAST, which is the status now
+        self.router.status.set('checking', 'Checking the mapped area', destination=list(INDY_EAST))
+        return download(start, destination, out, None, coverage_names)
+      client.corridor = corridor_call
+      return client
+
+    self.router.client_factory = cancelled_while_the_server_builds
+    for reply in ((503, b'{}', 'application/json'), self.server.corridor):  # A's request fails, or completes
+      self.server.corridor = reply
+      cancel.clear()
+      with self.assertRaises(MapError) as e:
+        self.router.route(START, DESTINATION, 90, 'en', cancelled=lambda: bool(cancel))
+      self.assertEqual(self.status()['destination'], list(INDY_EAST), e.exception.code)
+      self.assertIsNone(self.router.failure)
+      self.assertIsNone(self.router.corridor)
 
   def test_routing_that_fails_on_a_fresh_corridor_is_not_downloaded_again(self):
     self.route_error = RuntimeError('Locations are in unconnected regions')

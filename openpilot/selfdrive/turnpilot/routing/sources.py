@@ -14,7 +14,7 @@ from pathlib import Path
 
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.turnpilot.maps import corridor
-from openpilot.selfdrive.turnpilot.maps.client import MapClient, MapError, Throttle
+from openpilot.selfdrive.turnpilot.maps.client import MapClient, MapError, Throttle, storage_error
 from openpilot.selfdrive.turnpilot.maps.coverage import CoverageCache, check_trip, no_coverage, refresh
 from openpilot.selfdrive.turnpilot.maps.geofence import Region
 from openpilot.selfdrive.turnpilot.maps.paths import maps_dir
@@ -24,7 +24,7 @@ from openpilot.selfdrive.turnpilot.routing.valhalla_source import ValhallaSource
 PACKS_DIR = 'corridors'
 CONFIG_KEYS = ('TurnPilotMapHost', 'TurnPilotMapKey', 'TurnPilotMapCert')
 RETRY_SECONDS = 30.  # between downloads after one that could work on a retry (a network blip)
-REFUSED_RETRY_SECONDS = 300.  # after a refusal (422, bad key, bad TLS, bad pack), unless the destination or settings change
+REFUSED_RETRY_SECONDS = 300.  # after a refusal (422, bad key, bad TLS, bad pack, comma storage), unless the destination or settings change
 CANCELLED = 'cancelled'
 
 
@@ -54,6 +54,10 @@ class Failure:
   config: tuple
   error: MapError
   at: float
+
+
+def cancelled_error() -> MapError:
+  return MapError(CANCELLED, "The destination changed during the map download.", 'Map download cancelled')
 
 
 class MapRouter:
@@ -93,8 +97,10 @@ class MapRouter:
         return self.route_local(tiles, start, destination, bearing, language)
       return self.route_server(start, destination, bearing, language, position, cancelled)
     except MapError as e:
-      if e.code == CANCELLED:
-        cloudlog.warning(f"turnpilot: the map download for {destination} was cancelled")
+      if e.code == CANCELLED or (cancelled is not None and cancelled()):
+        # navd has moved on to another destination and doesn't wait for this job, which can finish after the next one
+        # started: whatever happened to it is not the status, nor a failure the new destination waits out
+        cloudlog.warning(f"turnpilot: the route to {destination} was cancelled ({e.code})")
         raise
       cloudlog.error(f"turnpilot route refused: {e.code}: {e.message}")
       self.status.error(e, destination=list(destination))
@@ -142,21 +148,23 @@ class MapRouter:
 
     coverage = self.coverage_or_fetch()
     region = check_trip(coverage, start, destination)
-    self.download(start, destination, region, coverage.names(), cancelled)
-    assert self.corridor is not None
+    downloaded = self.download(start, destination, region, coverage.names(), cancelled)
     if position is not None:  # the download took a while: route from where the car is now
       start, bearing = position()
     try:
-      steps = self.routed(self.corridor.source, start, destination, bearing, language, 'the downloaded map')
+      steps = self.routed(downloaded.source, start, destination, bearing, language, 'the downloaded map')
       if not steps:
         raise MapError('no_route', "No route on the downloaded map for this drive.", 'No route found')
-      if not self.corridor.pack.holds(steps):
+      if not downloaded.pack.holds(steps):
         raise MapError('route_off_map', "The route for this drive leaves the map downloaded for it, so TurnPilot won't follow it.",
                        'Route leaves the downloaded map')
     except MapError as e:
       # the corridor is kept, and the same destination waits out the retry time before it is downloaded again
-      self.failure = Failure(destination, self.config(), e, time.monotonic())
+      if not (cancelled is not None and cancelled()):
+        self.failure = Failure(destination, self.config(), e, time.monotonic())
       raise
+    if cancelled is not None and cancelled():
+      raise cancelled_error()
     self.ready(region, destination)
     return steps
 
@@ -170,22 +178,38 @@ class MapRouter:
     except Exception as e:
       raise MapError('routing_failed', f"Routing on {what} failed: {e}", 'Routing failed') from None
 
-  def download(self, start, destination, region: Region, names: str, cancelled=None):
+  def download(self, start, destination, region: Region, names: str, cancelled=None) -> Corridor:
+    """The corridor for the drive, which becomes self.corridor unless the job was cancelled meanwhile."""
     config = self.config()
     failure = self.failure
     if failure is not None and failure.destination == destination and failure.config == config:
       wait = RETRY_SECONDS if failure.error.retry else REFUSED_RETRY_SECONDS
       if time.monotonic() - failure.at < wait:
         raise failure.error
+    def was_cancelled() -> bool:
+      return cancelled is not None and bool(cancelled())
+
     try:
-      self.corridor = self.fetch(start, destination, region, names, cancelled)
+      downloaded = self.fetch(start, destination, region, names, cancelled)
+      if was_cancelled():
+        raise cancelled_error()
+      self.corridor = downloaded
       self.failure = None
+      return downloaded
     except MapError as e:
-      if e.code == CANCELLED:
+      if e.code == CANCELLED or was_cancelled():
         raise
       self.failure = Failure(destination, config, e, time.monotonic())
       raise
+    except OSError as e:  # the comma's own storage (making the download's directory, say): not a network blip
+      if was_cancelled():
+        raise cancelled_error() from None
+      error = storage_error(e)
+      self.failure = Failure(destination, config, error, time.monotonic())
+      raise error from None
     except Exception as e:  # anything else is still a failure the driver sees, and waits out the retry time
+      if was_cancelled():
+        raise cancelled_error() from None
       cloudlog.exception("turnpilot: corridor download failed")
       error = MapError('download_failed', f"The map download failed: {type(e).__name__}: {e}", 'Map download failed', retry=True)
       self.failure = Failure(destination, config, error, time.monotonic())
@@ -206,16 +230,20 @@ class MapRouter:
 
     def received(done, total):
       if cancelled is not None and cancelled():
-        raise MapError(CANCELLED, "The destination changed during the map download.", 'Map download cancelled')
+        raise cancelled_error()
       report(done, total)
 
     received(0, None)  # shows the download at once, and checks for a cancel before connecting
     try:
       size = client.corridor(start, destination, download, received, names)
+      if cancelled is not None and cancelled():
+        raise cancelled_error()
       report(size, size, final=True)
       pack = corridor.unpack(download, packs_dir)
     finally:
       download.unlink(missing_ok=True)
+    if cancelled is not None and cancelled():
+      raise cancelled_error()  # the pack stays until a later prune
     if pack.manifest['region'] != region.id:
       cloudlog.warning(f"turnpilot: corridor is for region {pack.manifest['region']}, the geofence says {region.id}")
     try:
