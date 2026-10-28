@@ -12,6 +12,7 @@ import pytest
 
 from openpilot.selfdrive.turnpilot.lane_planner import ModelLanes, lane_changes_needed
 from openpilot.selfdrive.turnpilot.route_follower import maneuver_from_instruction
+from openpilot.selfdrive.turnpilot.scene.lane_paint import UNKNOWN, LinePaint
 from openpilot.selfdrive.turnpilot.routing.valhalla_source import ValhallaSource
 from openpilot.tools.sim.bridge.beamng import demo_junctions, frame, maplanes
 
@@ -205,6 +206,9 @@ class TestWestCoastUSA:
     lanes = instruction.to_dict()["lanes"]
     assert [lane["active"] for lane in lanes] == [True] + [False] * (demo.lanes - 1)
     assert lanes[0]["activeDirection"] == "left"
-    # in the curb lane the model sees one lane to the left and none to the right: change left once
-    assert lane_changes_needed(maneuver_from_instruction(instruction), ModelLanes(left=1, right=0)) == 1
-    assert lane_changes_needed(maneuver_from_instruction(instruction), ModelLanes(left=0, right=1)) == 0  # already in the left lane
+    # in the curb lane the model sees one lane to the left and none to the right, the line between them broken white
+    # (tp/lanepaint: no change without that paint read): change left once
+    paint = (UNKNOWN, LinePaint('broken', 'white', 0.9, 0.3), LinePaint('solid', 'white', 0.9, 0.95), UNKNOWN)
+    assert lane_changes_needed(maneuver_from_instruction(instruction), ModelLanes(left=1, right=0), paint=paint) == 1
+    assert lane_changes_needed(maneuver_from_instruction(instruction), ModelLanes(left=1, right=0)) == 0  # no paint read
+    assert lane_changes_needed(maneuver_from_instruction(instruction), ModelLanes(left=0, right=1), paint=paint) == 0  # in it

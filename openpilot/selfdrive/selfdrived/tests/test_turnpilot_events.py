@@ -1,4 +1,6 @@
 """TurnPilot's lane change events: the alerts selfdrived builds from turnpilotPlan."""
+import time
+
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal import log
 from opendbc.car.structs import car
@@ -9,9 +11,13 @@ AudibleAlert = log.SelfdriveState.AudibleAlert
 
 
 class FakeSM(dict):
+  """SubMaster's dicts: the plan received just now and valid, or never received (hooks.fresh_plan reads recv_time)."""
   def __init__(self, plan=None, alive=True):
     super().__init__(turnpilotPlan=plan)
-    self.alive = {'turnpilotPlan': alive and plan is not None}
+    received = alive and plan is not None
+    self.alive = {'turnpilotPlan': received}
+    self.valid = {'turnpilotPlan': received}
+    self.recv_time = {'turnpilotPlan': time.monotonic() if received else None}
 
 
 def plan(**fields):
