@@ -27,6 +27,7 @@ import hmac
 import io
 import json
 import logging
+import os
 import shutil
 import ssl
 import tarfile
@@ -61,14 +62,33 @@ class Refusal(Exception):
 
 
 class Region:
+  """A region as loaded. Tiles are read through a descriptor of the directory opened at load, so a deploy that renames
+  a new copy into place can't mix new files with the index this process loaded; it restarts the server instead."""
+
   def __init__(self, path: Path, router=None):
     self.path = path
-    self.fence = json.loads((path / 'fence.geojson').read_text())
-    self.meta = json.loads((path / 'meta.json').read_text())
+    self.dir_fd = os.open(path, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    self.fence = json.loads(self.read('fence.geojson'))
+    self.meta = json.loads(self.read('meta.json'))
     self.id = self.meta['id']
-    self.index = {rel: tuple(v) for rel, v in json.loads((path / 'index.json').read_text()).items()}
+    self.index = {rel: tuple(v) for rel, v in json.loads(self.read('index.json')).items()}
     self.router = router
     self.lock = threading.Lock()
+
+  def open(self, rel: str):
+    return os.fdopen(os.open(rel, os.O_RDONLY, dir_fd=self.dir_fd), 'rb')
+
+  def read(self, rel: str) -> bytes:
+    with self.open(rel) as f:
+      return f.read()
+
+  def load_router(self):
+    """Valhalla on tiles.tar. main() does this at start, while the directory still holds the files this index lists."""
+    if self.router is None:
+      import valhalla
+      config = valhalla.get_config(tile_extract=str(self.path / 'tiles.tar'), tile_dir=str(self.path / 'tiles'))
+      config['mjolnir']['max_cache_size'] = CACHE_BYTES
+      self.router = valhalla.Actor(config)
 
   def contains(self, lon, lat) -> bool:
     return geo.in_geometry(lon, lat, self.fence['geometry'])
@@ -79,11 +99,7 @@ class Region:
 
   def route_line(self, start, destination) -> tuple[list[tuple[float, float]], float]:
     """The route's line and its length in km."""
-    if self.router is None:
-      import valhalla
-      config = valhalla.get_config(tile_extract=str(self.path / 'tiles.tar'), tile_dir=str(self.path / 'tiles'))
-      config['mjolnir']['max_cache_size'] = CACHE_BYTES
-      self.router = valhalla.Actor(config)
+    self.load_router()
     request = {
       'locations': [{'lon': start[0], 'lat': start[1]}, {'lon': destination[0], 'lat': destination[1]}],
       'costing': 'auto', 'format': 'osrm', 'shape_format': 'geojson',
@@ -139,6 +155,33 @@ class Maps:
     return region, manifest, paths
 
 
+def load_regions(root: Path) -> list[Region]:
+  """Every region directory under root. Only a directory named for its meta.json id is a region: deploy leftovers
+  ('.indianapolis.new' half copied, '.indianapolis.old', 'indianapolis.old') are skipped. A region that is there but
+  doesn't load stops the server with its name, rather than serving the others without it."""
+  regions = []
+  for path in sorted(root.iterdir()):
+    if path.name.startswith('.') or not path.is_dir():
+      continue
+    try:
+      meta = json.loads((path / 'meta.json').read_text())
+    except FileNotFoundError:
+      log.warning("skipping %s: no meta.json", path)
+      continue
+    except ValueError as e:
+      raise SystemExit(f"region {path} does not load: meta.json: {e}") from None
+    if not isinstance(meta, dict) or meta.get('id') != path.name:
+      log.warning("skipping %s: it is not named for its region id (%r)", path, meta.get('id') if isinstance(meta, dict) else meta)
+      continue
+    try:
+      regions.append(Region(path))
+    except (OSError, ValueError, KeyError, TypeError) as e:
+      raise SystemExit(f"region {path} does not load: {type(e).__name__}: {e}") from None
+  if not regions:
+    raise SystemExit(f"no regions under {root}")
+  return regions
+
+
 def point(value) -> tuple[float, float]:
   """(lon, lat) from a JSON [lon, lat], or a 400."""
   try:
@@ -155,7 +198,7 @@ def write_corridor(out, region: Region, manifest: dict, paths: list[str], gz: bo
   are read by path, so one replaced under a running server (a deploy) would not match the manifest's checksums."""
   for rel in paths:
     try:
-      size = (region.path / rel).stat().st_size
+      size = os.stat(rel, dir_fd=region.dir_fd).st_size
     except OSError as e:
       raise Refusal(503, {'error': 'region_unavailable'}) from e
     if size != region.index[rel][3]:
@@ -169,7 +212,11 @@ def write_corridor(out, region: Region, manifest: dict, paths: list[str], gz: bo
       info.size = len(data)
       tar.addfile(info, io.BytesIO(data))
       for rel in paths:
-        tar.add(region.path / rel, arcname=rel, recursive=False)
+        with region.open(rel) as tile:
+          info = tarfile.TarInfo(rel)
+          info.size = os.fstat(tile.fileno()).st_size
+          info.mtime = int(os.fstat(tile.fileno()).st_mtime)
+          tar.addfile(info, tile)
   except OSError as e:
     raise Refusal(503, {'error': 'region_unavailable'}) from e
   finally:
@@ -347,9 +394,9 @@ def main():
   key = args.key_file.read_text().strip()
   if len(key) < 32:
     raise SystemExit(f"{args.key_file} must hold a key of at least 32 characters")
-  regions = [Region(p) for p in sorted(args.regions.iterdir()) if (p / 'meta.json').is_file()]
-  if not regions:
-    raise SystemExit(f"no regions under {args.regions}")
+  regions = load_regions(args.regions)
+  for region in regions:
+    region.load_router()
   maps = Maps(regions, key, args.tmp_dir)
   log.info("serving %s, coverage version %s", [r.id for r in regions], maps.version)
 

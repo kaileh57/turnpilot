@@ -1,12 +1,17 @@
 import hashlib
 import io
 import json
+import os
+import shutil
 import socket
 import ssl
+import subprocess
+import sys
 import tarfile
 import threading
 import time
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 import requests
@@ -14,9 +19,10 @@ import urllib3
 
 from openpilot.selfdrive.turnpilot.maps.tests.fakes import self_signed
 from tools.turnpilot.mapserver import geo, server as mapserver, tiles
-from tools.turnpilot.mapserver.server import Maps, Refusal, Region, make_handler, make_server
+from tools.turnpilot.mapserver.server import Maps, Refusal, Region, load_regions, make_handler, make_server
 
 KEY = 'k' * 40
+MAPSERVER = Path(mapserver.__file__).parent
 SQUARE = {'type': 'Polygon', 'coordinates': [[[-87, 39], [-85, 39], [-85, 41], [-87, 41], [-87, 39]]]}
 
 
@@ -258,3 +264,76 @@ def test_an_error_while_streaming_cuts_the_body_short_with_no_json_in_it(server,
   assert r.status_code == 200 and int(r.headers['Content-Length']) > 10
   with pytest.raises(urllib3.exceptions.ProtocolError, match=r'IncompleteRead\(10 bytes read'):  # nothing after the 10 bytes
     r.raw.read(decode_content=False)
+
+
+def test_load_regions_skips_leftovers_from_a_deploy(tmp_path):
+  root = tmp_path / 'regions'
+  root.mkdir()
+  make_region(root, 'indianapolis', SQUARE, {tile_rel(0, -86, 40): b'hw'}, None)
+  shutil.copytree(root / 'indianapolis', root / 'indianapolis.old')  # an old swap's leftover: the same id
+  half = root / '.indianapolis.new'  # a copy cut off before index.json
+  half.mkdir()
+  shutil.copy(root / 'indianapolis' / 'meta.json', half / 'meta.json')
+  (root / 'notes').mkdir()
+  (root / 'README').write_text('not a region')
+  assert [r.path.name for r in load_regions(root)] == ['indianapolis']
+
+
+def test_load_regions_refuses_a_broken_live_region(tmp_path):
+  root = tmp_path / 'regions'
+  root.mkdir()
+  make_region(root, 'indianapolis', SQUARE, {}, None)
+  (root / 'indianapolis' / 'index.json').write_text('{"tiles/2/0')  # truncated
+  with pytest.raises(SystemExit, match='indianapolis'):
+    load_regions(root)
+  (root / 'indianapolis').rename(root / 'other')
+  with pytest.raises(SystemExit, match='no regions'):
+    load_regions(root)
+
+
+def run_swap(tmp_path, region):
+  code = (f"import sys; sys.path.insert(0, '{MAPSERVER}'); from server import load_regions; " +
+          f"print([r.id for r in load_regions(__import__('pathlib').Path('{tmp_path / 'regions'}'))])")
+  check = f'{sys.executable} -c "{code}"'
+  env = {**os.environ, 'SUDO': '', 'RESTART': 'true', 'CHECK': check, 'SETTLE': '0'}
+  return subprocess.run(['bash', str(MAPSERVER / 'swap_region.sh'), str(tmp_path / 'regions'), str(tmp_path / 'staging'), region],
+                        env=env, capture_output=True, text=True, timeout=60)
+
+
+def test_swap_region_replaces_the_live_region_in_one_rename(tmp_path):
+  (tmp_path / 'regions').mkdir()
+  (tmp_path / 'staging').mkdir()
+  make_region(tmp_path / 'regions', 'indianapolis', SQUARE, {tile_rel(0, -86, 40): b'old'}, None)
+  make_region(tmp_path / 'staging', 'indianapolis', SQUARE, {tile_rel(0, -86, 40): b'new tile'}, None)
+  r = run_swap(tmp_path, 'indianapolis')
+  assert r.returncode == 0, r.stderr
+  assert "['indianapolis']" in r.stdout
+  assert (tmp_path / 'regions' / 'indianapolis' / tile_rel(0, -86, 40)).read_bytes() == b'new tile'
+  assert sorted(p.name for p in (tmp_path / 'regions').iterdir()) == ['indianapolis']  # nothing left beside it
+
+
+def test_swap_region_rolls_back_when_the_new_region_does_not_load(tmp_path):
+  (tmp_path / 'regions').mkdir()
+  (tmp_path / 'staging').mkdir()
+  make_region(tmp_path / 'regions', 'indianapolis', SQUARE, {tile_rel(0, -86, 40): b'old'}, None)
+  make_region(tmp_path / 'staging', 'indianapolis', SQUARE, {}, None)
+  (tmp_path / 'staging' / 'indianapolis' / 'index.json').write_text('{')
+  r = run_swap(tmp_path, 'indianapolis')
+  assert r.returncode != 0 and 'rolling back' in r.stderr
+  assert (tmp_path / 'regions' / 'indianapolis' / tile_rel(0, -86, 40)).read_bytes() == b'old'
+  assert sorted(p.name for p in (tmp_path / 'regions').iterdir()) == ['.indianapolis.failed', 'indianapolis']
+
+
+def test_a_running_server_serves_the_region_it_loaded_through_a_swap(server):
+  """Between swap_region.sh's renames and the restart, the old process must not mix its index with the new files."""
+  base, maps, near, _ = server
+  live = maps.regions[0].path
+  live.rename(live.with_name('.indianapolis.old'))
+  shutil.copytree(live.with_name('.indianapolis.old'), live)
+  (live / near).write_bytes(b'nope')  # rebuilt: same size, other bytes
+  r = requests.post(base + '/v1/corridor', json=CORRIDOR, headers=auth(), timeout=5)
+  assert r.status_code == 200
+  with tarfile.open(fileobj=io.BytesIO(r.content)) as tar:
+    manifest = json.load(tar.extractfile('manifest.json'))
+    assert tar.extractfile(near).read() == b'near'
+    assert hashlib.sha256(b'near').hexdigest() == manifest['files'][near]

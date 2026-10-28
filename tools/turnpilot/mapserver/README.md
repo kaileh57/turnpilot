@@ -52,7 +52,7 @@ To set up a new VM (once), then copy the server and the built regions and restar
 tools/turnpilot/mapserver/deploy.sh --setup
 ```
 
-After that, `deploy.sh` alone redeploys every built region, and `deploy.sh seattle` redeploys one. Geofabrik's extracts update daily. Rebuild and redeploy when the maps need refreshing.
+After that, `deploy.sh` alone redeploys every built region, and `deploy.sh seattle` redeploys one. Each region is uploaded to a staging directory, then `swap_region.sh` on the VM swaps it in with renames, restarts the server and checks `/v1/health`. If the server doesn't come back serving the region, the old copy goes back and the deploy stops with an error. Geofabrik's extracts update daily. Rebuild and redeploy when the maps need refreshing.
 
 ## Cost
 
