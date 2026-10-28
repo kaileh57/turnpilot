@@ -24,7 +24,7 @@ Every call except `/v1/health` needs `Authorization: Bearer <key>`. The key is i
 : Returns the fences as a GeoJSON FeatureCollection, with a `version` that changes whenever a region is rebuilt.
 
 `POST /v1/corridor` with `{"start": [lon, lat], "destination": [lon, lat]}`
-: Returns a tar of `manifest.json` and every tile within 30 km of the route, with each tile's SHA-256 in the manifest. If either end is outside the fences, or the two ends are in different regions, or Valhalla finds no route, it returns a 422 with `error` set to `outside_coverage` (with `which`), `different_regions`, or `no_route`.
+: Returns a tar of `manifest.json` and every tile within 15 km of the route, gzip-compressed, with each tile's SHA-256 in the manifest. If either end is outside the fences, or the two ends are in different regions, or Valhalla finds no route, it returns a 422 with `error` set to `outside_coverage` (with `which`), `different_regions`, or `no_route`.
 
 ## Build and deploy
 
@@ -56,4 +56,4 @@ After that, `deploy.sh` alone redeploys every built region, and `deploy.sh seatt
 
 ## Cost
 
-The e2-micro and 30 GB of standard disk are in Google's free tier. The other 30 GB of disk, the public IPv4 address, and outbound traffic past the free 1 GB a month are billed. The account's $10 a month of Google Developer Program credit covers all of that, and a budget emails the owner if real charges pass $0.50 in a month. A drive's corridor is usually tens of MB.
+The e2-micro and 30 GB of standard disk are in Google's free tier. The other 30 GB of disk, the public IPv4 address, and outbound traffic past the free 1 GB a month are billed. The account's $10 a month of Google Developer Program credit covers all of that, and a budget emails the owner if real charges pass $0.50 in a month. A drive's download is usually 20-50 MB: Purdue to Peru, Indiana (91 km) was 24 MB, and Seattle to Tacoma (54 km) was 47 MB.
