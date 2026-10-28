@@ -11,7 +11,7 @@ from openpilot.selfdrive.ui.mici.onroad.hud_renderer import HudRenderer
 from openpilot.selfdrive.ui.mici.onroad.long_indicator import LongIndicator
 from openpilot.selfdrive.ui.mici.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.mici.onroad.navigation import NavigationPanel, PANEL_WIDTH
-from openpilot.selfdrive.ui.lib.turnpilot import active_plan, status_text
+from openpilot.selfdrive.ui.lib.turnpilot import active_plan, map_status_text, status_text
 from openpilot.selfdrive.ui.mici.onroad.turnpilot import SignalPrompt, TurnPilotStatus, prompt_alert
 from openpilot.selfdrive.ui.mici.onroad.confidence_ball import ConfidenceBall
 from openpilot.selfdrive.ui.mici.onroad.cameraview import CameraView
@@ -228,7 +228,13 @@ class AugmentedRoadView(CameraView):
     prompt, prompt_out = self._signal_prompt.will_render()  # also while it fades out
     if alert_to_render is None:
       alert_to_render, not_animating_out = prompt, prompt_out
-    self._turnpilot_status.set_status(*(status_text(plan, ui_state.engaged) if alert_to_render is None else ('', '')))
+    status = ('', '')
+    if alert_to_render is None:
+      # what the car is doing first; else why there is no route (outside the mapped area, map server errors) or the map download
+      status = status_text(plan, ui_state.engaged)
+      if not status[0]:
+        status = map_status_text(ui_state.turnpilot_map_status, ui_state.nav_destination_set)
+    self._turnpilot_status.set_status(*status)
     # the DM face and long indicator stay up under openpilot's alerts as upstream has them, and hide under TurnPilot's
     turnpilot_top = prompt is not None or self._turnpilot_status.showing
 

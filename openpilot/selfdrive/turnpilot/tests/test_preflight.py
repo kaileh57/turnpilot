@@ -56,11 +56,25 @@ def test_shadow():
   assert live.status == WARN and "TurnPilotShadowMode=1" in live.fix
 
 
-def test_valhalla_not_needed_with_mapbox(tmp_path):
-  assert preflight.check_pyvalhalla(None, False).status == INFO
-  assert preflight.check_tiles(None, None, False).status == INFO
-  assert preflight.check_pyvalhalla(None, True).status == FAIL
-  assert preflight.check_pyvalhalla("3.9.1", True).status == PASS
+def test_pyvalhalla_is_always_needed():
+  assert preflight.check_pyvalhalla(None).status == FAIL
+  assert preflight.check_pyvalhalla("3.9.1").status == PASS
+  assert preflight.check_tiles(None, None, False).status == INFO  # no override: each drive downloads its tiles
+
+
+def test_route_source_has_no_mapbox():
+  assert preflight.check_route_source("mapbox", None).status == FAIL
+  assert preflight.check_route_source(None, None).status == INFO
+  assert preflight.check_route_source("auto", "/data/tiles").status == WARN  # the sim override, not for the car
+
+
+def test_map_server():
+  assert preflight.check_map_server(["API key"], None, None, None).status == FAIL
+  assert preflight.check_map_server([], None, None, None).status == FAIL  # never fetched
+  assert preflight.check_map_server([], None, "unreadable", None).status == FAIL
+  ok = preflight.check_map_server([], "Indianapolis and Seattle", None, None)
+  assert ok.status == PASS and "Seattle" in ok.detail
+  assert preflight.check_map_server(["address"], None, None, "/data/tiles").status == INFO
 
 
 def test_tiles(tmp_path):

@@ -86,23 +86,44 @@ def check_shadow(enabled: bool, shadow: bool) -> Check:
                "use shadow mode on the first drives: preflight --set TurnPilotShadowMode=1")
 
 
-def check_route_source(mode: str, source: str) -> Check:
-  return Check("route source", INFO, f"{source} (TurnPilotRouteSource is {mode or 'auto'})")
+def check_route_source(mode: str | None, override: str | None) -> Check:
+  """Routes come from TurnPilot's map server, or from local tiles when TurnPilotValhallaTiles is set. Mapbox is gone."""
+  name = "route source"
+  if (mode or "auto").strip().lower() == "mapbox":
+    return Check(name, FAIL, "TurnPilotRouteSource is mapbox, and Mapbox routing was removed", "preflight --set TurnPilotRouteSource=auto")
+  if override:
+    return Check(name, WARN, f"local tiles at {override} (developer override: no geofence, no map server)",
+                 "for the car, clear TurnPilotValhallaTiles so routes come from the map server")
+  return Check(name, INFO, "TurnPilot map server, a corridor downloaded per drive")
 
 
-def check_pyvalhalla(version: str | None, needed: bool) -> Check:
+def check_map_server(missing: list[str], coverage_names: str | None, error: str | None, override: str | None) -> Check:
+  name = "map server"
+  if override:
+    return Check(name, INFO, "not used with TurnPilotValhallaTiles set")
+  if missing:
+    return Check(name, FAIL, f"not set up: no {', '.join(missing)}", "enter the address, API key and certificate in the web app's Map server section")
+  if error:
+    return Check(name, FAIL, error, "check the web app's Map server section with the comma online")
+  if not coverage_names:
+    return Check(name, FAIL, "no mapped area downloaded yet", "open the web app with the comma online; it fetches the mapped area")
+  return Check(name, PASS, f"mapped area: {coverage_names}")
+
+
+def check_pyvalhalla(version: str | None, needed: bool = True) -> Check:
   name = "pyvalhalla"
   if not needed:
-    return Check(name, INFO, "not needed, the route source is mapbox")
+    return Check(name, INFO, "not needed")
   if version is None:
     return Check(name, FAIL, "not importable", "bash /data/openpilot/tools/turnpilot/install_valhalla_device.sh")
   return Check(name, PASS, version)
 
 
 def check_tiles(tiles: str | None, where: dict | None, needed: bool) -> Check:
+  """The TurnPilotValhallaTiles override. Without it there are no tiles to check: each drive downloads its own."""
   name = "valhalla tiles"
   if not needed:
-    return Check(name, INFO, "not needed, the route source is mapbox")
+    return Check(name, INFO, "downloaded from the map server for each drive")
   if not tiles:
     return Check(name, FAIL, "TurnPilotValhallaTiles is not set", "copy tiles.tar over (see INSTALL.md), then set TurnPilotValhallaTiles")
   if where is None:
@@ -229,8 +250,9 @@ def collect(params) -> list[Check]:
   from openpilot.common.hardware.usb import get_usb_state
   from openpilot.selfdrive.modeld.helpers import chestnut_compiled
   from openpilot.selfdrive.turnpilot.detector.graph import detector_pkl_path
+  from openpilot.selfdrive.turnpilot.maps.client import MapError, missing_config
+  from openpilot.selfdrive.turnpilot.maps.coverage import CoverageCache
   from openpilot.selfdrive.turnpilot.routing.valhalla_source import ValhallaSource, import_valhalla, locate
-  from openpilot.selfdrive.turnpilot.routing.sources import select_source
   from openpilot.selfdrive.turnpilot.web.pairing import PORT, local_ip
 
   cp = None
@@ -242,8 +264,12 @@ def collect(params) -> list[Check]:
   devices = get_usb_state()
   chestnut = any(is_chestnut_usb_id(d["vendorId"], d["productId"]) and d["product"] == CHESTNUT_USB_PRODUCT for d in devices)
   enabled, shadow = params.get_bool("TurnPilotEnabled"), params.get_bool("TurnPilotShadowMode")
-  mode, tiles = params.get("TurnPilotRouteSource"), params.get("TurnPilotValhallaTiles")
-  needed = (mode or "auto").strip().lower() != "mapbox"
+  mode, tiles = params.get("TurnPilotRouteSource"), (params.get("TurnPilotValhallaTiles") or "").strip()
+  needed = bool(tiles)  # the routing test needs local tiles; the map server's corridor only exists during a drive
+  try:
+    coverage, coverage_error = CoverageCache().get(), None
+  except MapError as e:
+    coverage, coverage_error = None, e.message
   token = params.get("TurnPilotWebToken")
   valhalla = import_valhalla()
   where = locate(tiles)
@@ -255,8 +281,9 @@ def collect(params) -> list[Check]:
     check_toggle("navigation", "NavigationEnabled", params.get_bool("NavigationEnabled"), f"{SETTINGS_DEVELOPER} > navigation (alpha)"),
     check_toggle("TurnPilot", "TurnPilotEnabled", enabled, "preflight --set TurnPilotEnabled=1, then turn the car off and on"),
     check_shadow(enabled, shadow),
-    check_route_source(mode, select_source(mode, tiles)),
-    check_pyvalhalla(getattr(valhalla, "__version__", "imported") if valhalla else None, needed),
+    check_route_source(mode, tiles),
+    check_map_server(missing_config(params), coverage.names() if coverage else None, coverage_error, tiles),
+    check_pyvalhalla(getattr(valhalla, "__version__", "imported") if valhalla else None),
     check_tiles(tiles, where, needed),
   ]
   if needed and valhalla is not None and where is not None:

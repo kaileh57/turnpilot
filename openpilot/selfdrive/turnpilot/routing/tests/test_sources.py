@@ -1,6 +1,7 @@
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,8 +10,16 @@ from unittest.mock import MagicMock, patch
 import requests
 
 from openpilot.selfdrive.navigation.navd import RouteEngine
+from openpilot.selfdrive.turnpilot.maps import corridor
+from openpilot.selfdrive.turnpilot.maps.client import MapError
+from openpilot.selfdrive.turnpilot.maps.corridor import KEEP_PACKS
+from openpilot.selfdrive.turnpilot.maps.coverage import coverage_path, save
+from openpilot.selfdrive.turnpilot.maps.status import STATUS_PARAM, read_status
+from openpilot.selfdrive.turnpilot.maps.tests.fakes import (CHICAGO, INDY_EAST, KEY, SEATTLE, MapServer, coverage_doc, make_pack, self_signed,
+                                                            tile_files)
 from openpilot.selfdrive.turnpilot.routing import valhalla_source
-from openpilot.selfdrive.turnpilot.routing.sources import FallbackSource, MapboxSource, RouteSources, select_source
+from openpilot.selfdrive.turnpilot.routing.sources import PACKS_DIR, RETRY_SECONDS, MapRouter
+from openpilot.selfdrive.turnpilot.routing.tests.test_valhalla_routing import HAVE_VALHALLA, TURN_LANES_OSM, build_tiles
 from openpilot.selfdrive.turnpilot.routing.valhalla_source import ValhallaSource, locate, tiles_usable
 
 FIXTURES = Path(__file__).parent / 'fixtures'
@@ -38,33 +47,13 @@ def params_of(values):
   return params
 
 
-class TestSelection(unittest.TestCase):
+class TestLocate(unittest.TestCase):
   def setUp(self):
     self.directory = tempfile.TemporaryDirectory()
     self.addCleanup(self.directory.cleanup)
     self.tiles = Path(self.directory.name)
     (self.tiles / 'tiles').mkdir()
     (self.tiles / 'tiles.tar').write_bytes(b'')
-
-  def test_select_source(self):
-    tiles, missing = str(self.tiles), str(self.tiles / 'missing')
-    cases = [
-      (None, None, 'mapbox'),  # unset params, as in navd's tests
-      ('auto', None, 'mapbox'),
-      ('auto', '', 'mapbox'),
-      ('auto', missing, 'mapbox'),  # tiles that aren't there aren't usable
-      ('auto', tiles, 'valhalla'),
-      (None, tiles, 'valhalla'),
-      ('auto', 'http://127.0.0.1:8002', 'valhalla'),
-      ('mapbox', tiles, 'mapbox'),
-      ('Mapbox ', tiles, 'mapbox'),
-      ('valhalla', None, 'valhalla'),  # asked for, so it fails loudly instead of quietly using Mapbox
-      ('valhalla', tiles, 'valhalla'),
-      ('bogus', tiles, 'valhalla'),
-      ('bogus', None, 'mapbox'),
-    ]
-    for mode, tiles_param, expected in cases:
-      self.assertEqual(select_source(mode, tiles_param), expected, (mode, tiles_param))
 
   def test_locate(self):
     root = self.tiles
@@ -85,102 +74,6 @@ class TestSelection(unittest.TestCase):
     self.assertIsNone(locate(str(root / 'notes.txt')))
     self.assertEqual(locate('http://127.0.0.1:8002/'), {'url': 'http://127.0.0.1:8002'})
     self.assertFalse(tiles_usable(None) or tiles_usable(''))
-
-  def test_route_sources(self):
-    mapbox = MapboxSource('https://example.test', 'token', None)
-    sources = RouteSources(mapbox)
-    values = {}
-    self.assertIs(sources.get(params_of(values)), mapbox)
-    values['TurnPilotValhallaTiles'] = str(self.tiles)
-    with patch.object(valhalla_source, 'import_valhalla', fake_valhalla):
-      auto = sources.get(params_of(values))
-      self.assertIsInstance(auto, FallbackSource)  # auto falls back to Mapbox when Valhalla can't route
-      source = auto.valhalla
-      self.assertIsInstance(source, ValhallaSource)
-      self.assertIs(auto.mapbox, mapbox)
-      self.assertEqual(source.actor.config, {'tile_extract': str(self.tiles / 'tiles.tar'), 'tile_dir': str(self.tiles / 'tiles')})
-      self.assertIs(sources.get(params_of(values)), auto)  # the actor is kept between requests
-      values['TurnPilotRouteSource'] = 'valhalla'
-      self.assertIs(sources.get(params_of(values)), source)  # asked for by name, so no fallback
-      values['TurnPilotRouteSource'] = 'mapbox'
-      self.assertIs(sources.get(params_of(values)), mapbox)
-      values['TurnPilotRouteSource'] = 'auto'
-      self.assertIs(sources.get(params_of(values)), auto)
-      values['TurnPilotValhallaTiles'] = 'http://127.0.0.1:9000'  # new tiles, new source
-      self.assertIsNot(sources.get(params_of(values)).valhalla, source)
-      values['TurnPilotRouteSource'] = 'valhalla'
-      values['TurnPilotValhallaTiles'] = str(self.tiles / 'missing')
-      with self.assertRaises(FileNotFoundError):
-        sources.get(params_of(values))
-
-  def test_auto_uses_mapbox_for_tiles_that_do_not_load(self):
-    mapbox = MapboxSource('https://example.test', 'token', None)
-    values = {'TurnPilotValhallaTiles': str(self.tiles)}
-    broken = MagicMock(Actor=MagicMock(side_effect=RuntimeError('bad tiles')), get_config=lambda **kwargs: kwargs)
-    with patch.object(valhalla_source, 'import_valhalla', return_value=broken):
-      self.assertIs(RouteSources(mapbox).get(params_of(values)), mapbox)
-      values['TurnPilotRouteSource'] = 'valhalla'
-      with self.assertRaises(RuntimeError):
-        RouteSources(mapbox).get(params_of(values))
-
-
-class TestFallback(unittest.TestCase):
-  def sources(self, valhalla_result):
-    valhalla, mapbox = MagicMock(), MagicMock()
-    mapbox.route.return_value = STEPS
-    if isinstance(valhalla_result, Exception):
-      valhalla.route.side_effect = valhalla_result
-    else:
-      valhalla.route.return_value = valhalla_result
-    return FallbackSource(valhalla, mapbox), valhalla, mapbox
-
-  def test_valhalla_first(self):
-    source, valhalla, mapbox = self.sources([{'distance': 1}])
-    self.assertEqual(source.route(START, DESTINATION, 90, 'en'), [{'distance': 1}])
-    self.assertEqual(valhalla.route.call_args.args, (START, DESTINATION, 90, 'en'))
-    mapbox.route.assert_not_called()
-
-  def test_mapbox_when_valhalla_cannot_route(self):
-    for result in ([], RuntimeError('No path could be found for input'), requests.ConnectionError('valhalla_service is not running')):
-      source, _, mapbox = self.sources(result)
-      self.assertEqual(source.route(START, DESTINATION, 90, 'en'), STEPS, result)
-      self.assertEqual(mapbox.route.call_args.args, (START, DESTINATION, 90, 'en'))
-
-  def test_mapbox_failure_is_not_hidden(self):
-    source, _, mapbox = self.sources([])
-    mapbox.route.side_effect = requests.ConnectionError('offline')
-    with self.assertRaises(requests.ConnectionError):
-      source.route(START, DESTINATION, None, None)
-
-
-class TestMapbox(unittest.TestCase):
-  def response(self, routes):
-    response = MagicMock(status_code=200)
-    response.json.return_value = {'routes': routes}
-    return response
-
-  def test_request(self):
-    api = MagicMock()
-    api.get_token.return_value = 'device-token'
-    source = MapboxSource('https://api.commadotai.com/v1/nav', None, api)
-    with patch('requests.get', return_value=self.response([{'legs': [{'steps': STEPS}]}])) as get:
-      self.assertEqual(source.route(START, DESTINATION, -10, 'en'), STEPS)
-    self.assertEqual(get.call_args.args[0], 'https://api.commadotai.com/v1/nav/directions/v5/mapbox/driving-traffic/-86.1699,39.77;-86.16,39.774')
-    options = get.call_args.kwargs['params']
-    self.assertEqual((options['access_token'], options['bearings'], options['language'], options['geometries']), ('device-token', '350,90;', 'en', 'geojson'))
-    with patch('requests.get', return_value=self.response([])) as get:
-      self.assertEqual(MapboxSource('https://api.mapbox.com', 'mapbox-token', None).route(START, DESTINATION, None, None), [])
-    self.assertNotIn('bearings', get.call_args.kwargs['params'])
-    self.assertEqual(get.call_args.kwargs['params']['access_token'], 'mapbox-token')
-    with patch('requests.get', return_value=self.response([])) as get:  # a fix without a heading can report NaN
-      MapboxSource('https://api.mapbox.com', 'mapbox-token', None).route(START, DESTINATION, float('nan'), None)
-    self.assertNotIn('bearings', get.call_args.kwargs['params'])
-
-  def test_failure(self):
-    response = self.response([])
-    response.raise_for_status.side_effect = requests.HTTPError('test failure')
-    with patch('requests.get', return_value=response), self.assertRaises(requests.HTTPError):
-      MapboxSource('https://api.mapbox.com', 'mapbox-token', None).route(START, DESTINATION, None, None)
 
 
 class TestValhalla(unittest.TestCase):
@@ -246,45 +139,276 @@ class TestValhalla(unittest.TestCase):
       self.assertEqual(path, sys.path)
 
 
-class TestRouteEngineSources(unittest.TestCase):
-  def engine(self, values):
-    pm, sm = MagicMock(), MagicMock()
-    with patch('openpilot.selfdrive.navigation.navd.Api'):
-      engine = RouteEngine(sm, pm, params=params_of(values))
+class FakeValhalla:
+  """Stands in for ValhallaSource on a corridor or the local tiles: records what it was built on and routed."""
+
+  def __init__(self, test):
+    self.test = test
+
+  def __call__(self, tiles):
+    if self.test.broken_tiles:
+      raise RuntimeError('tiles do not load')
+    source = SimpleNamespace(tiles=tiles, calls=[])
+
+    def route(start, destination, bearing, language):
+      source.calls.append((start, destination, bearing, language))
+      if self.test.route_error is not None:
+        raise self.test.route_error
+      return self.test.steps
+
+    source.route = route
+    self.test.built.append(source)
+    return source
+
+
+class RouterCase(unittest.TestCase):
+  """MapRouter against a fake map server over real TLS, with Valhalla stubbed."""
+
+  def setUp(self):
+    self.server = MapServer()
+    self.addCleanup(self.server.close)
+    directory = tempfile.TemporaryDirectory()
+    self.addCleanup(directory.cleanup)
+    self.maps = Path(directory.name)
+    save(coverage_doc(), self.maps)
+    self.server.corridor = (200, make_pack({'tiles/2/000/000/001.gph': b'tile'}), 'application/x-tar')
+    self.params = self.server.params()
+    self.steps, self.route_error, self.broken_tiles, self.built = STEPS, None, False, []
+    self.router = MapRouter(self.params, self.maps, valhalla=FakeValhalla(self))
+    # Mapbox went through requests.get; the map client only uses requests.request
+    self.enterContext(patch('requests.get', side_effect=AssertionError('nothing may call requests.get (Mapbox)')))
+
+  def status(self):
+    return read_status(self.params)
+
+  def states(self):
+    return [value['state'] for key, value in self.params.writes if key == STATUS_PARAM]
+
+  def refused(self, code, start=START, destination=DESTINATION):
+    with self.assertRaises(MapError) as e:
+      self.router.route(start, destination, 90, 'en')
+    self.assertEqual(e.exception.code, code, e.exception.message)
+    status = self.status()
+    self.assertEqual((status['state'], status['code'], status['message']), ('error', code, e.exception.message))
+    return e.exception
+
+
+class TestMapRouter(RouterCase):
+  def test_routes_on_the_downloaded_corridor(self):
+    self.assertEqual(self.router.route(START, DESTINATION, 90, 'en'), STEPS)
+    self.assertEqual(self.server.corridor_requests(), [{'start': list(START), 'destination': list(DESTINATION)}])
+    (source,) = self.built
+    pack = Path(source.tiles)
+    self.assertEqual(pack.parent, self.maps / PACKS_DIR)
+    self.assertEqual((pack / 'tiles/2/000/000/001.gph').read_bytes(), b'tile')
+    self.assertEqual(source.calls, [(START, DESTINATION, 90, 'en')])
+    self.assertEqual(self.states(), ['checking', 'downloading', 'downloading', 'ready'])
+    status = self.status()
+    self.assertEqual((status['region'], status['source'], status['short']), ('Indianapolis area', 'server', 'Ready'))
+    downloads = [v for k, v in self.params.writes if k == STATUS_PARAM and v['state'] == 'downloading']
+    self.assertEqual(downloads[0]['message'], 'Downloading map for this drive…')
+    self.assertEqual(downloads[-1]['progress'], 1.0)
+    self.assertEqual(list((self.maps / PACKS_DIR).glob('.download-*')), [])  # the tar is gone once unpacked
+
+  def test_reroutes_on_the_same_corridor(self):
+    self.router.route(START, DESTINATION, 90, 'en')
+    elsewhere = (-86.165, 39.771)
+    self.assertEqual(self.router.route(elsewhere, DESTINATION, 0, 'en'), STEPS)
+    self.assertEqual(len(self.server.corridor_requests()), 1)  # no download for a reroute
+    self.assertEqual(self.built[0].calls[-1], (elsewhere, DESTINATION, 0, 'en'))
+
+  def test_off_the_corridor_downloads_a_new_one(self):
+    self.router.route(START, DESTINATION, 90, 'en')
+    self.route_error = RuntimeError('No suitable edges near location')
+    self.refused('routing_failed', start=(-86.1, 39.8))  # the new corridor's route fails too, loudly
+    self.assertEqual(len(self.server.corridor_requests()), 2)
+    self.route_error = None
+    self.steps = []
+    self.router.corridor = None
+    self.router.failure = None
+    self.refused('no_route')
+
+  def test_new_destinations_keep_the_last_few_packs(self):
+    for i in range(KEEP_PACKS + 2):
+      self.router.route(START, (-86.16 + i * 0.001, 39.774), 90, 'en')
+    self.assertEqual(len(self.server.corridor_requests()), KEEP_PACKS + 2)
+    kept = corridor.packs(self.maps / PACKS_DIR)
+    self.assertEqual(len(kept), KEEP_PACKS)
+    self.assertIn(self.router.corridor.pack.path, kept)
+
+  def test_destination_outside_the_mapped_area(self):
+    e = self.refused('outside_coverage', destination=CHICAGO)
+    self.assertEqual(e.message, "Outside TurnPilot's mapped area. TurnPilot can only navigate around Indianapolis and Seattle.")
+    self.assertEqual(self.server.requests, [])  # refused before any download
+    self.assertEqual(self.built, [])
+
+  def test_car_outside_or_in_another_area(self):
+    self.assertIn('The car is outside', self.refused('outside_coverage', start=CHICAGO).message)
+    self.refused('different_regions', start=SEATTLE)
+    self.assertEqual(self.server.requests, [])
+
+  def test_no_coverage_is_fetched_once_or_is_a_loud_error(self):
+    coverage_path(self.maps).unlink()
+    self.assertEqual(self.router.route(START, DESTINATION, 90, 'en'), STEPS)  # online: navd fetches it first
+    self.assertTrue(coverage_path(self.maps).is_file())
+    coverage_path(self.maps).unlink()
+    self.params.values['TurnPilotMapKey'] = 'wrong'
+    e = self.refused('no_coverage', destination=INDY_EAST)
+    self.assertIn('never downloaded', e.message)
+    self.assertIn('refused the API key', e.message)  # and why fetching it failed
+
+  def test_each_422(self):
+    for body, code in [({'error': 'outside_coverage', 'which': 'destination'}, 'outside_coverage'),
+                       ({'error': 'outside_coverage', 'which': 'start'}, 'outside_coverage'),
+                       ({'error': 'different_regions'}, 'different_regions'),
+                       ({'error': 'no_route'}, 'no_route')]:
+      self.router.failure = None
+      self.server.corridor = (422, json.dumps(body).encode(), 'application/json')
+      self.refused(code)
+      self.assertIsNone(self.router.corridor)
+    self.assertEqual(self.built, [])
+
+  def test_bad_key_bad_tls_bad_pack(self):
+    self.params.values['TurnPilotMapKey'] = 'wrong'
+    self.assertIn('API key', self.refused('unauthorized').message)
+    self.params.values['TurnPilotMapKey'] = KEY
+    self.params.values['TurnPilotMapCert'] = self_signed()[0]  # a certificate that isn't the server's
+    self.refused('tls')
+    self.params.values['TurnPilotMapCert'] = self.server.cert
+    self.server.corridor = (200, make_pack({'tiles/2/0.gph': b'tile'}, manifest_files={'tiles/2/0.gph': '0' * 64}), 'application/x-tar')
+    self.refused('bad_pack')
+    self.assertEqual(corridor.packs(self.maps / PACKS_DIR), [])
+    self.assertEqual(self.built, [])
+
+  def test_unreachable_server_is_an_error_and_retried_later(self):
+    self.server.close()
+    e = self.refused('unreachable')
+    self.assertIn("Can't reach", e.message)
+    self.assertIsNone(self.router.corridor)
+    with patch('openpilot.selfdrive.turnpilot.maps.client.requests.request') as request:
+      self.refused('unreachable')  # within RETRY_SECONDS the same error, with no new attempt
+      request.assert_not_called()
+    with patch('openpilot.selfdrive.turnpilot.routing.sources.time.monotonic', return_value=time.monotonic() + RETRY_SECONDS + 1):
+      with patch('openpilot.selfdrive.turnpilot.maps.client.requests.request', side_effect=requests.ConnectionError) as request:
+        self.refused('unreachable')
+        request.assert_called_once()
+
+  def test_settings_changes_retry_at_once(self):
+    self.params.values['TurnPilotMapKey'] = 'wrong'
+    self.refused('unauthorized')
+    self.params.values['TurnPilotMapKey'] = KEY
+    self.assertEqual(self.router.route(START, DESTINATION, 90, 'en'), STEPS)
+
+  def test_not_set_up(self):
+    del self.params.values['TurnPilotMapKey']
+    self.assertIn('not set up', self.refused('not_configured').message)
+
+  def test_mapbox_is_gone(self):
+    self.params.values['TurnPilotRouteSource'] = 'mapbox'
+    self.refused('mapbox_removed')
+    self.params.values['TurnPilotRouteSource'] = 'valhalla'  # what the BeamNG scripts set: harmless
+    self.assertEqual(self.router.route(START, DESTINATION, 90, 'en'), STEPS)
+
+  def test_clear(self):
+    self.router.route(START, DESTINATION, 90, 'en')
+    self.router.clear()
+    self.assertEqual(self.status()['state'], 'idle')
+
+
+class TestLocalOverride(RouterCase):
+  def test_local_tiles_skip_the_geofence_and_the_download(self):
+    self.params.values['TurnPilotValhallaTiles'] = '/sim/tiles'
+    coverage_path(self.maps).unlink()  # the sim has no coverage
+    self.assertEqual(self.router.route(CHICAGO, CHICAGO, 90, 'en'), STEPS)
+    self.assertEqual([s.tiles for s in self.built], ['/sim/tiles'])
+    self.assertEqual(self.server.requests, [])
+    status = self.status()
+    self.assertEqual((status['state'], status['source']), ('ready', 'local'))
+    self.router.route(CHICAGO, CHICAGO, 90, 'en')
+    self.assertEqual(len(self.built), 1)  # the actor is kept
+
+  def test_local_tiles_fail_loudly(self):
+    self.params.values['TurnPilotValhallaTiles'] = '/sim/tiles'
+    self.broken_tiles = True
+    self.refused('local_tiles')
+    self.broken_tiles = False
+    self.steps = []
+    self.refused('no_route')
+
+
+class TestRouteEngine(RouterCase):
+  def engine(self):
+    pm = MagicMock()
+    engine = RouteEngine(MagicMock(), pm, params=self.params, router=self.router)
     engine.last_position, engine.last_bearing = START, 90
     return engine, pm
 
-  def test_source_used_and_guidance_sent(self):
-    values = {'LanguageSetting': 'main_en'}
-    engine, pm = self.engine(values)
-    source = MagicMock()
-    source.route.return_value = STEPS
-    with patch.object(engine.sources, 'get', return_value=source) as get:
-      engine.calculate_route(DESTINATION)
-    self.assertIs(get.call_args.args[0], engine.params)
-    self.assertEqual(source.route.call_args.args, (START, DESTINATION, 90, 'en'))
+  def test_routes_and_guides_on_the_corridor(self):
+    self.params.values['LanguageSetting'] = 'main_en'
+    engine, pm = self.engine()
+    engine.calculate_route(DESTINATION)
     self.assertEqual((engine.step_idx, len(engine.route_geometry)), (0, 4))
-    engine.last_position = (-86.1675, 39.77)  # 205 m along the 590 m step
+    self.assertEqual(self.built[0].calls, [(START, DESTINATION, 90, 'en')])
+    engine.last_position = (-86.1675, 39.77)
     engine.send_instruction()
-    message = pm.send.call_args.args[1]
-    instruction = message.navInstruction.to_dict()
-    self.assertAlmostEqual(instruction['maneuverDistance'], 385, delta=3)
+    instruction = pm.send.call_args.args[1].navInstruction.to_dict()
     self.assertEqual((instruction['maneuverType'], instruction['maneuverModifier']), ('turn', 'left'))
-    self.assertEqual(instruction['lanes'][0], {'directions': ['left'], 'active': True, 'activeDirection': 'left'})
-    self.assertEqual([m['type'] for m in instruction['allManeuvers']], ['turn', 'new name', 'arrive'])
-    self.assertAlmostEqual(instruction['allManeuvers'][0]['distance'], instruction['maneuverDistance'], places=3)
 
-  def test_any_failure_clears_the_route(self):
-    engine, _ = self.engine({})
-    source = MagicMock()
-    source.route.return_value = STEPS
-    with patch.object(engine.sources, 'get', return_value=source):
-      engine.calculate_route(DESTINATION)
-      self.assertIsNotNone(engine.route)
-      source.route.side_effect = RuntimeError('No path could be found for input')
-      engine.calculate_route(DESTINATION)
+  def test_refused_destination_means_no_route(self):
+    engine, pm = self.engine()
+    engine.calculate_route(CHICAGO)
     self.assertIsNone(engine.route)
-    self.assertIsNone(engine.nav_destination)  # so that it is requested again
+    self.assertIsNone(engine.nav_destination)  # asked again later, as the car may drive into the area
+    self.assertEqual(self.status()['code'], 'outside_coverage')
+    self.assertEqual(self.server.requests, [])
+    engine.send_instruction()
+    self.assertFalse(pm.send.call_args.args[1].valid)
+
+  def test_unreachable_server_means_no_route_and_no_mapbox(self):
+    self.server.close()
+    engine, _ = self.engine()
+    engine.calculate_route(DESTINATION)
+    self.assertIsNone(engine.route)
+    self.assertEqual(self.status()['code'], 'unreachable')
+
+  def test_an_unexpected_failure_is_reported(self):
+    self.route_error = ValueError('boom')
+    engine, _ = self.engine()
+    engine.router.route = MagicMock(side_effect=ValueError('boom'))
+    engine.calculate_route(DESTINATION)
+    self.assertIsNone(engine.route)
+    self.assertEqual((self.status()['code'], self.status()['message']), ('routing_failed', 'Routing failed: ValueError: boom'))
+
+  def test_no_destination_clears_the_status(self):
+    engine, _ = self.engine()
+    engine.calculate_route(DESTINATION)
+    engine.recompute_route(gps_ok=True)  # NavDestination isn't set
+    self.assertEqual(self.status()['state'], 'idle')
+
+
+@unittest.skipUnless(HAVE_VALHALLA, 'pyvalhalla is not installed')
+class TestRealCorridor(unittest.TestCase):
+  """Real tiles in a corridor pack, served over TLS, verified, unpacked and routed by navd with real pyvalhalla."""
+
+  def test_navd_routes_on_a_served_corridor(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      tiles = Path(build_tiles(TURN_LANES_OSM, root / 'build'))
+      tile_dir = tiles / 'tiles' if (tiles / 'tiles').is_dir() else tiles
+      server = MapServer()
+      self.addCleanup(server.close)
+      server.corridor = (200, make_pack(tile_files(tile_dir)), 'application/x-tar')
+      maps = root / 'maps'
+      save(coverage_doc(), maps)
+      params = server.params(LanguageSetting='main_en')
+      pm = MagicMock()
+      engine = RouteEngine(MagicMock(), pm, params=params, router=MapRouter(params, maps))
+      engine.last_position, engine.last_bearing = (-86.1699, 39.77), 90
+      with patch('requests.get', side_effect=AssertionError('no Mapbox')):
+        engine.calculate_route((-86.1600, 39.7740))
+      self.assertIsNotNone(engine.route)
+      self.assertEqual(engine.route[1]['maneuver']['modifier'], 'left')
+      self.assertEqual(read_status(params)['state'], 'ready')
 
 
 if __name__ == '__main__':

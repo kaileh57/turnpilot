@@ -67,3 +67,33 @@ def status_text(plan, engaged: bool) -> tuple[str, str]:
   if plan.shadow:
     detail = f'shadow: {detail}' if detail else 'shadow'
   return title, detail
+
+
+def map_status_text(status: dict | None, destination_set: bool) -> tuple[str, str]:
+  """(title, detail) for navd's TurnPilotMapStatus while a destination is set: the reason there is no route, or the
+  drive's map downloading. Shown whether or not openpilot is engaged, since it is about the route, not the car."""
+  if not destination_set or not status:
+    return '', ''
+  if status.get('state') == 'error':
+    return 'No route', status.get('short') or status.get('message') or 'routing failed'
+  if status.get('state') == 'downloading':
+    progress = status.get('progress')
+    return 'Downloading map', f'for this drive, {progress * 100:.0f}%' if isinstance(progress, (int, float)) else 'for this drive'
+  return '', ''
+
+
+def mapped_area_text(coverage_cache, position, override: str = '') -> str:
+  """Which mapped area position ((latitude, longitude) or None) is in, for the TurnPilot settings screen."""
+  from openpilot.selfdrive.turnpilot.maps.client import MapError
+  if override:
+    return 'local tiles (developer), no geofence'
+  try:
+    coverage = coverage_cache.get()
+  except MapError:
+    return 'saved mapped area is unreadable'
+  if coverage is None:
+    return 'no mapped area downloaded'
+  if position is None:
+    return f'car position unknown; mapped: {coverage.names()}'
+  region = coverage.region_at(position[1], position[0])
+  return region.name if region else "Outside TurnPilot's mapped area"

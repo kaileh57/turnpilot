@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
-import os
-
 import numpy as np
 
 import openpilot.cereal.messaging as messaging
-from openpilot.common.api import API_HOST, Api
 from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.navigation.helpers import latest_gps_source
 from openpilot.selfdrive.navigation.route import along_path, local_meters
 from openpilot.selfdrive.turnpilot.routing.guidance import fill_guidance
-from openpilot.selfdrive.turnpilot.routing.sources import MapboxSource, RouteSources
+from openpilot.selfdrive.turnpilot.maps.client import MapError
+from openpilot.selfdrive.turnpilot.routing.sources import MapRouter
 
 REROUTE_DISTANCE = 25
 OFF_ROUTE_DISTANCE = 20  # TurnPilot: further than this off the step, its distances mean nothing until the reroute
@@ -37,7 +35,7 @@ def set_banner(instruction, banners, distance_to_maneuver):
 
 
 class RouteEngine:
-  def __init__(self, sm, pm, params=None):
+  def __init__(self, sm, pm, params=None, router=None):
     self.sm = sm
     self.pm = pm
     self.params = params if params is not None else Params()
@@ -53,10 +51,8 @@ class RouteEngine:
     self.recompute_hold = 0
     self.reroute_counter = 0
 
-    self.mapbox_token = os.environ.get("MAPBOX_TOKEN")
-    self.api = Api(self.params.get("DongleId")) if self.mapbox_token is None else None
-    self.mapbox_host = "https://api.mapbox.com" if self.mapbox_token is not None else API_HOST.rstrip('/') + '/v1/nav'
-    self.sources = RouteSources(MapboxSource(self.mapbox_host, self.mapbox_token, self.api))
+    # TurnPilot: routes come from TurnPilot's map server (or local tiles), never Mapbox; see turnpilot/routing/sources.py
+    self.router = router if router is not None else MapRouter(self.params)
 
   def update(self):
     self.sm.update(0)
@@ -82,6 +78,7 @@ class RouteEngine:
     destination = self.params.get("NavDestination")
     if destination is None:
       self.clear_route()
+      self.router.clear()
       self.recompute_hold = 0
       return
     new_destination = (destination['longitude'], destination['latitude'])
@@ -106,17 +103,18 @@ class RouteEngine:
       lang = lang.replace('main_', '')
 
     try:
-      steps = self.sources.get(self.params).route(self.last_position, destination, self.last_bearing, lang)
-      if len(steps):
-        self.route = steps
-        self.route_geometry = [np.array(step['geometry']['coordinates'], dtype=np.float64).reshape((-1, 2)) for step in self.route]
-        self.step_idx = 0
-      else:
-        cloudlog.warning("Got empty route response")
-        self.clear_route()
-
-    except Exception:
+      # TurnPilot: the router checks the geofence, downloads the drive's map and routes on it; any failure raises a
+      # MapError that it has already put in TurnPilotMapStatus for the web app and the UI, and there is no route
+      steps = self.router.route(self.last_position, destination, self.last_bearing, lang)
+      self.route = steps
+      self.route_geometry = [np.array(step['geometry']['coordinates'], dtype=np.float64).reshape((-1, 2)) for step in self.route]
+      self.step_idx = 0
+    except MapError:
+      self.clear_route()
+    except Exception as e:
       cloudlog.exception("failed to get route")
+      self.router.status.error(MapError('routing_failed', f"Routing failed: {type(e).__name__}: {e}", 'Routing failed'),
+                               destination=list(destination))
       self.clear_route()
 
   def send_instruction(self):

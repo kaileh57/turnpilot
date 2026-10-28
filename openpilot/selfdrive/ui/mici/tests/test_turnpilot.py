@@ -114,3 +114,32 @@ class TestTurnPilotOnroad(OpenpilotTestCase):
   def test_pair_url_without_network(self):
     assert self.shown_url('http://127.0.0.1:8088/?t=abc') == 'no network'
     assert self.shown_url('http://172.20.10.2:8088/?t=abc') == 'http://172.20.10.2:8088/?t=abc'
+
+
+class TestMapStatus:
+  def test_route_refusal_and_download_on_the_status_line(self):
+    from openpilot.selfdrive.ui.lib.turnpilot import map_status_text
+    refused = {'state': 'error', 'code': 'outside_coverage', 'short': 'Destination outside mapped area',
+               'message': "Outside TurnPilot's mapped area. TurnPilot can only navigate around Indianapolis and Seattle."}
+    assert map_status_text(refused, True) == ('No route', 'Destination outside mapped area')
+    assert map_status_text(refused, False) == ('', '')  # nothing once the destination is gone
+    assert map_status_text({'state': 'error', 'message': 'Routing failed'}, True) == ('No route', 'Routing failed')
+    assert map_status_text({'state': 'downloading', 'progress': 0.42}, True) == ('Downloading map', 'for this drive, 42%')
+    assert map_status_text({'state': 'downloading', 'progress': None}, True) == ('Downloading map', 'for this drive')
+    for state in ('idle', 'checking', 'ready'):
+      assert map_status_text({'state': state}, True) == ('', '')
+    assert map_status_text(None, True) == ('', '')
+
+  def test_mapped_area_text(self, tmp_path):
+    from openpilot.selfdrive.turnpilot.maps.coverage import CoverageCache, coverage_path, save
+    from openpilot.selfdrive.turnpilot.maps.tests.fakes import CHICAGO, INDY, coverage_doc
+    from openpilot.selfdrive.ui.lib.turnpilot import mapped_area_text
+    cache = CoverageCache(tmp_path)
+    assert mapped_area_text(cache, (INDY[1], INDY[0])) == 'no mapped area downloaded'
+    save(coverage_doc(), tmp_path)
+    assert mapped_area_text(cache, (INDY[1], INDY[0])) == 'Indianapolis area'
+    assert mapped_area_text(cache, (CHICAGO[1], CHICAGO[0])) == "Outside TurnPilot's mapped area"
+    assert mapped_area_text(cache, None) == 'car position unknown; mapped: Indianapolis and Seattle'
+    assert mapped_area_text(cache, None, '/sim/tiles') == 'local tiles (developer), no geofence'
+    coverage_path(tmp_path).write_text('garbage')
+    assert mapped_area_text(cache, (INDY[1], INDY[0])) == 'saved mapped area is unreadable'
