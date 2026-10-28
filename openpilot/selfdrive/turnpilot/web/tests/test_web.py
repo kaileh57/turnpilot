@@ -398,8 +398,10 @@ class TestGeofence(WebTestCase):
     assert self.call("GET", "/api/status")[1]["map"]["override"] == "/sim/tiles"
 
   def test_status_map(self):
+    assert self.call("GET", "/api/status")[1]["map"]["nav"] is None  # no destination, no navd status
+    assert self.navigate(INDY)[0] == 200
     self.params.put(STATUS_PARAM, {"state": "downloading", "message": "Downloading map for this drive…", "short": "Downloading map",
-                                   "code": "", "progress": 0.4, "at": 1})
+                                   "code": "", "progress": 0.4, "destination": list(INDY), "at": 1})
     with mock.patch.object(self.app.store, "last_gps", return_value=(INDY[1], INDY[0])):
       m = self.call("GET", "/api/status")[1]["map"]
     assert m["car_region"] == "Indianapolis area" and not m["car_outside"]
@@ -409,6 +411,18 @@ class TestGeofence(WebTestCase):
     with mock.patch.object(self.app.store, "last_gps", return_value=(CHICAGO[1], CHICAGO[0])):
       m = self.call("GET", "/api/status")[1]["map"]
     assert m["car_outside"] and m["car_region"] is None
+
+  def test_status_of_another_destination_is_not_shown_as_this_ones(self):
+    """navd's status still names the previous destination until it starts on the new one."""
+    self.params.put(STATUS_PARAM, {"state": "error", "message": "The car is outside TurnPilot's mapped area.", "short": "Car outside",
+                                   "code": "outside_coverage", "destination": [SEATTLE[0], SEATTLE[1]], "at": 1})
+    assert self.navigate(INDY)[0] == 200
+    assert self.call("GET", "/api/status")[1]["map"]["nav"] is None  # offroad navd doesn't run: nothing to check yet
+    with mock.patch.object(server, "format_status", side_effect=lambda *a, **k: {**status.format_status(*a, **k), "onroad": True}):
+      nav = self.call("GET", "/api/status")[1]["map"]["nav"]
+    assert nav["state"] == "checking" and nav["destination"] == [INDY[0], INDY[1]], nav
+    self.params.put(STATUS_PARAM, {"state": "ready", "message": "Ready", "short": "Ready", "code": "", "destination": [INDY[0], INDY[1]]})
+    assert self.call("GET", "/api/status")[1]["map"]["nav"]["state"] == "ready"
 
   def test_coverage_endpoint(self):
     body = self.call("GET", "/api/coverage")[1]
@@ -449,6 +463,41 @@ class TestMapSettings(WebTestCase):
     assert code == 200 and not body["coverage_ok"] and "API key" in body["coverage_error"]
     assert self.params.get("TurnPilotMapHost") == self.map_server.host
     assert self.params.get("TurnPilotMapCert").strip() == self.map_server.cert.strip()
+
+  def test_a_new_host_or_certificate_needs_the_key_again(self):
+    """The web token travels in the clear on the hotspot. Whoever has it must not be able to point the car at their own
+    server and certificate and have it send the real map key there."""
+    self.call("POST", "/api/map", {"host": self.map_server.host, "key": KEY, "cert": self.map_server.cert})
+    attacker = MapServer()
+    self.addCleanup(attacker.close)
+    for body in ({"host": attacker.host, "cert": attacker.cert}, {"host": attacker.host}, {"host": self.map_server.host, "cert": attacker.cert}):
+      code, reply, _ = self.call("POST", "/api/map", body)
+      assert code == 400 and "API key" in reply["error"], (body, reply)
+      assert self.params.get("TurnPilotMapHost") == self.map_server.host
+      assert self.params.get("TurnPilotMapCert").strip() == self.map_server.cert.strip()
+    assert not any(KEY in json.dumps(headers) for _, _, headers, _ in attacker.requests), "the key went to the new host"
+    # the page always sends the saved host back: unchanged settings with a new key are fine, and so is a move typed in full
+    assert self.call("POST", "/api/map", {"host": self.map_server.host, "key": KEY})[0] == 200
+    code, reply, _ = self.call("POST", "/api/map", {"host": attacker.host, "cert": attacker.cert, "key": "a-new-key-for-the-new-server"})
+    assert code == 200 and self.params.get("TurnPilotMapHost") == attacker.host
+
+  def test_settings_the_client_cannot_use_are_refused_before_saving(self):
+    for body in ({"host": "https://1.2.3.4:abc"}, {"host": "1.2.3.4 8443"}, {"key": "clé-ключ-12345678"}, {"host": "https://[zz]"},
+                 {"host": "https://[::1"}, {"host": "https://h\\x"}, {"host": "https://h;x"}, {"host": "https://host:"}):
+      code, reply, _ = self.call("POST", "/api/map", body)
+      assert code == 400, reply
+      assert "Failed to parse" not in reply["error"] and "codec" not in reply["error"]  # a message for the driver, not Python's
+      if "host" in body:
+        assert "map server address" in reply["error"] and "certificate" not in reply["error"], reply  # the address, not the cert
+      assert self.params.get("TurnPilotMapHost") is None and self.params.get("TurnPilotMapKey") is None
+
+  def test_a_failed_refresh_is_on_the_status_for_the_page(self):
+    self.call("POST", "/api/map", {"host": self.map_server.host, "key": KEY, "cert": self.map_server.cert})
+    self.call("POST", "/api/map", {"key": "wrong-key-0000"})
+    m = self.call("GET", "/api/status")[1]["map"]
+    assert m["coverage"] is not None and m["refresh"]["ok"] is False and "API key" in m["refresh"]["error"]
+    script = server.INDEX.read_text().split("<script>")[1]
+    assert "m.refresh" in script.split("function renderMap")[1].split("\nfunction ")[0]  # renderMap shows it
 
   def test_bad_settings_are_refused(self):
     assert self.call("POST", "/api/map", {"host": "http://136.113.85.41"})[0] == 400

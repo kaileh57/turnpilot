@@ -1,4 +1,6 @@
+import errno
 import json
+import os
 import sys
 import tempfile
 import time
@@ -11,14 +13,14 @@ import requests
 
 from openpilot.selfdrive.navigation.navd import RouteEngine
 from openpilot.selfdrive.turnpilot.maps import corridor
-from openpilot.selfdrive.turnpilot.maps.client import MapError
+from openpilot.selfdrive.turnpilot.maps.client import MapError, storage_error
 from openpilot.selfdrive.turnpilot.maps.corridor import KEEP_PACKS
 from openpilot.selfdrive.turnpilot.maps.coverage import coverage_path, save
 from openpilot.selfdrive.turnpilot.maps.status import STATUS_PARAM, read_status
-from openpilot.selfdrive.turnpilot.maps.tests.fakes import (CHICAGO, INDY_EAST, KEY, SEATTLE, MapServer, coverage_doc, make_pack, self_signed,
-                                                            tile_files)
+from openpilot.selfdrive.turnpilot.maps.tests.fakes import (CHICAGO, INDY_EAST, KEY, SEATTLE, MapServer, coverage_doc, level2_tile, make_pack,
+                                                            self_signed, tile_files)
 from openpilot.selfdrive.turnpilot.routing import valhalla_source
-from openpilot.selfdrive.turnpilot.routing.sources import PACKS_DIR, RETRY_SECONDS, MapRouter
+from openpilot.selfdrive.turnpilot.routing.sources import PACKS_DIR, REFUSED_RETRY_SECONDS, RETRY_SECONDS, MapRouter
 from openpilot.selfdrive.turnpilot.routing.tests.test_valhalla_routing import HAVE_VALHALLA, TURN_LANES_OSM, build_tiles
 from openpilot.selfdrive.turnpilot.routing.valhalla_source import ValhallaSource, locate, tiles_usable
 
@@ -171,7 +173,7 @@ class RouterCase(unittest.TestCase):
     self.addCleanup(directory.cleanup)
     self.maps = Path(directory.name)
     save(coverage_doc(), self.maps)
-    self.server.corridor = (200, make_pack({'tiles/2/000/000/001.gph': b'tile'}), 'application/x-tar')
+    self.server.corridor = (200, make_pack({level2_tile(*START): b'tile'}), 'application/x-tar')
     self.params = self.server.params()
     self.steps, self.route_error, self.broken_tiles, self.built = STEPS, None, False, []
     self.router = MapRouter(self.params, self.maps, valhalla=FakeValhalla(self))
@@ -200,7 +202,7 @@ class TestMapRouter(RouterCase):
     (source,) = self.built
     pack = Path(source.tiles)
     self.assertEqual(pack.parent, self.maps / PACKS_DIR)
-    self.assertEqual((pack / 'tiles/2/000/000/001.gph').read_bytes(), b'tile')
+    self.assertEqual((pack / level2_tile(*START)).read_bytes(), b'tile')
     self.assertEqual(source.calls, [(START, DESTINATION, 90, 'en')])
     self.assertEqual(self.states(), ['checking', 'downloading', 'downloading', 'ready'])
     status = self.status()
@@ -217,16 +219,58 @@ class TestMapRouter(RouterCase):
     self.assertEqual(len(self.server.corridor_requests()), 1)  # no download for a reroute
     self.assertEqual(self.built[0].calls[-1], (elsewhere, DESTINATION, 0, 'en'))
 
-  def test_off_the_corridor_downloads_a_new_one(self):
+  def test_leaving_the_corridor_downloads_a_new_one(self):
+    """Valhalla snaps a start far outside the corridor's level-2 tiles to a highway on its level 0/1 tiles and answers;
+    that must not count as a reroute on the corridor."""
+    self.router.route(START, DESTINATION, 90, 'en')
+    outside = (-86.4, 40.25)  # inside the Indianapolis fence, outside the corridor's tiles
+    self.server.corridor = (200, make_pack({level2_tile(*START): b'tile', level2_tile(*outside): b'more'}), 'application/x-tar')
+    self.params.writes.clear()
+    self.assertEqual(self.router.route(outside, DESTINATION, 0, 'en'), STEPS)
+    self.assertEqual(self.server.corridor_requests()[-1], {'start': list(outside), 'destination': list(DESTINATION)})
+    self.assertEqual(self.built[-1].calls, [(outside, DESTINATION, 0, 'en')])
+    self.assertEqual(self.states(), ['downloading', 'downloading', 'ready'])  # the driver sees the new download
+    self.assertEqual(self.status()['destination'], list(DESTINATION))
+
+  def test_a_reroute_that_leaves_the_corridor_downloads_a_new_one(self):
+    self.router.route(START, DESTINATION, 90, 'en')
+    far = [{**STEPS[0], 'geometry': {'type': 'LineString', 'coordinates': [list(START), [-85.9, 39.8]]}}] + STEPS[1:]
+    self.steps = far
+    with self.assertRaises(MapError) as e:  # the new corridor (the same tiles here) still doesn't hold the route: loud
+      self.router.route(START, DESTINATION, 90, 'en')
+    self.assertEqual(e.exception.code, 'route_off_map')
+    self.assertEqual(len(self.server.corridor_requests()), 2)
+    self.refused('route_off_map')  # and not downloaded again within the retry wait
+    self.assertEqual(len(self.server.corridor_requests()), 2)
+
+  def test_routing_failure_inside_the_corridor_is_an_error_not_a_download(self):
     self.router.route(START, DESTINATION, 90, 'en')
     self.route_error = RuntimeError('No suitable edges near location')
-    self.refused('routing_failed', start=(-86.1, 39.8))  # the new corridor's route fails too, loudly
-    self.assertEqual(len(self.server.corridor_requests()), 2)
+    self.refused('routing_failed', start=(-86.1, 39.8))  # still on the corridor's tiles
+    self.assertEqual(len(self.server.corridor_requests()), 1)
     self.route_error = None
     self.steps = []
-    self.router.corridor = None
-    self.router.failure = None
     self.refused('no_route')
+    self.assertEqual(len(self.server.corridor_requests()), 1)
+
+  def test_routes_from_where_the_car_is_once_the_download_is_done(self):
+    later = (-86.165, 39.771)
+    self.assertEqual(self.router.route(START, DESTINATION, 90, 'en', position=lambda: (later, 45)), STEPS)
+    self.assertEqual(self.server.corridor_requests(), [{'start': list(START), 'destination': list(DESTINATION)}])
+    self.assertEqual(self.built[0].calls, [(later, DESTINATION, 45, 'en')])
+
+  def test_a_cancelled_download_stops_quietly(self):
+    with self.assertRaises(MapError) as e:
+      self.router.route(START, DESTINATION, 90, 'en', cancelled=lambda: True)
+    self.assertEqual(e.exception.code, 'cancelled')
+    self.assertNotEqual(self.status()['state'], 'error')
+    self.assertIsNone(self.router.failure)
+    self.assertEqual(corridor.packs(self.maps / PACKS_DIR), [])
+    self.assertEqual(self.router.route(START, DESTINATION, 90, 'en'), STEPS)  # the same destination again goes at once
+
+  def test_every_status_names_its_destination(self):
+    self.router.route(START, DESTINATION, 90, 'en')
+    self.assertTrue(all(v['destination'] == list(DESTINATION) for k, v in self.params.writes if k == STATUS_PARAM))
 
   def test_new_destinations_keep_the_last_few_packs(self):
     for i in range(KEEP_PACKS + 2):
@@ -293,6 +337,81 @@ class TestMapRouter(RouterCase):
         self.refused('unreachable')
         request.assert_called_once()
 
+  def test_a_cut_off_download_backs_off_before_downloading_again(self):
+    """A clean hang-up mid-stream with no Content-Length: one download, a visible error, then the retry wait."""
+    self.server.corridor = (200, make_pack({f'tiles/2/000/000/{i:03d}.gph': os.urandom(4000) for i in range(10)}), 'application/x-tar')
+    for gz in (True, False):
+      self.router.failure = None
+      self.server.requests.clear()
+      self.server.gzip, self.server.send_length, self.server.cut_at = gz, False, 20000
+      e = self.refused('unreachable' if gz else 'bad_pack')
+      self.assertTrue(e.retry)
+      self.refused(e.code)
+      self.assertEqual(len(self.server.corridor_requests()), 1)  # the second try waits for RETRY_SECONDS
+      with patch('openpilot.selfdrive.turnpilot.routing.sources.time.monotonic', return_value=time.monotonic() + RETRY_SECONDS + 1):
+        self.refused(e.code)
+      self.assertEqual(len(self.server.corridor_requests()), 2)
+
+  def test_any_download_failure_is_a_map_error_with_the_backoff(self):
+    with patch.object(corridor, 'unpack', side_effect=RuntimeError('surprise')):
+      e = self.refused('download_failed')
+      self.assertIn('RuntimeError: surprise', e.message)
+      self.refused('download_failed')
+    self.assertEqual(len(self.server.corridor_requests()), 1)
+
+  def test_a_full_disk_is_said_and_not_downloaded_again_every_30_s(self):
+    """The comma's own storage: a new download won't fix it, so it waits out the refusal time, not RETRY_SECONDS. The real
+    unpack's ENOSPC is tested in maps/tests/test_corridor.py; here, its error and a full disk under the router itself."""
+    full = OSError(errno.ENOSPC, 'No space left on device')
+    for target in (patch.object(corridor, 'unpack', side_effect=storage_error(full)), patch.object(Path, 'mkdir', side_effect=full)):
+      self.router.failure, self.router.corridor = None, None
+      self.server.requests.clear()
+      with target:
+        e = self.refused('storage')
+        self.assertFalse(e.retry)
+        self.assertIn('storage is full', e.message)
+        with patch('openpilot.selfdrive.turnpilot.routing.sources.time.monotonic', return_value=time.monotonic() + RETRY_SECONDS + 1):
+          self.refused('storage')  # no new download 30 s later
+      self.assertLessEqual(len(self.server.corridor_requests()), 1)
+      with patch('openpilot.selfdrive.turnpilot.routing.sources.time.monotonic', return_value=time.monotonic() + REFUSED_RETRY_SECONDS + 1):
+        self.assertEqual(self.router.route(START, DESTINATION, 90, 'en'), STEPS)  # space was freed meanwhile
+
+  def test_a_job_cancelled_while_waiting_on_the_server_leaves_no_trace(self):
+    """navd doesn't wait for a cancelled job: it can fail or finish after the next destination started, and then it must
+    not write the status, a failure to wait out, or the corridor."""
+    real = self.router.client_factory
+    cancel = []
+
+    def cancelled_while_the_server_builds(*args):
+      client = real(*args)
+      download = client.corridor
+
+      def corridor_call(start, destination, out, progress=None, coverage_names=''):
+        cancel.append(True)  # navd moved on to INDY_EAST, which is the status now
+        self.router.status.set('checking', 'Checking the mapped area', destination=list(INDY_EAST))
+        return download(start, destination, out, None, coverage_names)
+      client.corridor = corridor_call
+      return client
+
+    self.router.client_factory = cancelled_while_the_server_builds
+    for reply in ((503, b'{}', 'application/json'), self.server.corridor):  # A's request fails, or completes
+      self.server.corridor = reply
+      cancel.clear()
+      with self.assertRaises(MapError) as e:
+        self.router.route(START, DESTINATION, 90, 'en', cancelled=lambda: bool(cancel))
+      self.assertEqual(self.status()['destination'], list(INDY_EAST), e.exception.code)
+      self.assertIsNone(self.router.failure)
+      self.assertIsNone(self.router.corridor)
+
+  def test_routing_that_fails_on_a_fresh_corridor_is_not_downloaded_again(self):
+    self.route_error = RuntimeError('Locations are in unconnected regions')
+    self.refused('routing_failed')
+    for _ in range(3):
+      self.refused('routing_failed')
+    self.assertEqual(len(self.server.corridor_requests()), 1)
+    self.route_error = None
+    self.assertEqual(self.router.route(START, DESTINATION, 90, 'en'), STEPS)  # it works once routing does
+
   def test_settings_changes_retry_at_once(self):
     self.params.values['TurnPilotMapKey'] = 'wrong'
     self.refused('unauthorized')
@@ -339,7 +458,7 @@ class TestLocalOverride(RouterCase):
 class TestRouteEngine(RouterCase):
   def engine(self):
     pm = MagicMock()
-    engine = RouteEngine(MagicMock(), pm, params=self.params, router=self.router)
+    engine = RouteEngine(MagicMock(), pm, params=self.params, router=self.router, background=False)
     engine.last_position, engine.last_bearing = START, 90
     return engine, pm
 
@@ -402,7 +521,7 @@ class TestRealCorridor(unittest.TestCase):
       save(coverage_doc(), maps)
       params = server.params(LanguageSetting='main_en')
       pm = MagicMock()
-      engine = RouteEngine(MagicMock(), pm, params=params, router=MapRouter(params, maps))
+      engine = RouteEngine(MagicMock(), pm, params=params, router=MapRouter(params, maps), background=False)
       engine.last_position, engine.last_bearing = (-86.1699, 39.77), 90
       with patch('requests.get', side_effect=AssertionError('no Mapbox')):
         engine.calculate_route((-86.1600, 39.7740))

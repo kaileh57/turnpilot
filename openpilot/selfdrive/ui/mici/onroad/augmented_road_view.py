@@ -233,7 +233,7 @@ class AugmentedRoadView(CameraView):
       # what the car is doing first; else why there is no route (outside the mapped area, map server errors) or the map download
       status = status_text(plan, ui_state.engaged)
       if not status[0]:
-        status = map_status_text(ui_state.turnpilot_map_status, ui_state.nav_destination_set)
+        status = map_status_text(ui_state.turnpilot_map_status, ui_state.nav_destination)
     self._turnpilot_status.set_status(*status)
     # the DM face and long indicator stay up under openpilot's alerts as upstream has them, and hide under TurnPilot's
     turnpilot_top = prompt is not None or self._turnpilot_status.showing

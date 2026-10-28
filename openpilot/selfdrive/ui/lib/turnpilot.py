@@ -60,11 +60,15 @@ def status_text(plan, engaged: bool) -> tuple[str, str]:
   return title, detail
 
 
-def map_status_text(status: dict | None, destination_set: bool) -> tuple[str, str]:
-  """(title, detail) for navd's TurnPilotMapStatus while a destination is set: the reason there is no route, or the
-  drive's map downloading. Shown whether or not openpilot is engaged, since it is about the route, not the car."""
-  if not destination_set or not status:
+def map_status_text(status: dict | None, destination) -> tuple[str, str]:
+  """(title, detail) for navd's TurnPilotMapStatus while a destination (NavDestination) is set: the reason there is no
+  route, or the drive's map downloading. Shown whether or not openpilot is engaged, since it is about the route, not
+  the car. A status about another destination (navd hasn't started on this one yet) is not this one's."""
+  from openpilot.selfdrive.turnpilot.maps.status import same_destination
+  if destination is None or not status:
     return '', ''
+  if not same_destination(status, destination):
+    return 'Checking', 'the mapped area'
   if status.get('state') == 'error':
     return 'No route', status.get('short') or status.get('message') or 'routing failed'
   if status.get('state') == 'downloading':
@@ -85,6 +89,6 @@ def mapped_area_text(coverage_cache, position, override: str = '') -> str:
   if coverage is None:
     return 'no mapped area downloaded'
   if position is None:
-    return f'car position unknown; mapped: {coverage.names()}'
+    return 'car position unknown'  # the names would make it 3 lines, cut off in the button; the phone shows them
   region = coverage.region_at(position[1], position[0])
   return region.name if region else "Outside TurnPilot's mapped area"

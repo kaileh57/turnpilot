@@ -21,9 +21,9 @@ from pathlib import Path
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.turnpilot.maps import coverage as coverage_cache
-from openpilot.selfdrive.turnpilot.maps.client import MapError, cert_fingerprint, check_cert, missing_config, normalize_host
+from openpilot.selfdrive.turnpilot.maps.client import MapError, cert_fingerprint, check_cert, check_key, missing_config, normalize_host
 from openpilot.selfdrive.turnpilot.maps.coverage import CoverageCache, CoverageRefresher, check_trip
-from openpilot.selfdrive.turnpilot.maps.status import read_status
+from openpilot.selfdrive.turnpilot.maps.status import for_destination, read_status
 from openpilot.selfdrive.turnpilot.routing.sources import local_override
 from openpilot.selfdrive.turnpilot.web import places
 from openpilot.selfdrive.turnpilot.web.pairing import PORT, icon_png, pairing_url, qr_svg
@@ -85,7 +85,7 @@ class App:
   def status(self) -> dict:
     snap = self.reader.get() if self.reader else None
     status = format_status(snap, self.store.destination(), self.store.flag("TurnPilotEnabled"), self.store.flag("IsMetric"))
-    status["map"] = self.map_status(status["gps"])
+    status["map"] = self.map_status(status["gps"], status["onroad"])
     return status
 
   # TurnPilot's mapped area (the geofence) and its map server
@@ -97,14 +97,14 @@ class App:
     except MapError as e:
       return None, e.message
 
-  def map_status(self, gps) -> dict:
+  def map_status(self, gps, onroad: bool = True) -> dict:
     """Where the car is against the mapped area, and navd's download and route status."""
     with self.store.lock:
       params = self.store.params
       override = local_override(params)
       missing = missing_config(params)
       refresh_status = params.get(coverage_cache.STATUS_PARAM)
-      nav = read_status(params)
+      nav = for_destination(read_status(params), params.get("NavDestination"), onroad)  # only about the current destination
     coverage, error = self.cached_coverage()
     if coverage is None and error is None:
       error = coverage_cache.NO_COVERAGE_MESSAGE
@@ -154,25 +154,37 @@ class App:
 
   def set_map_settings(self, body) -> dict:
     """Save what the body sets (host, key, cert); a missing or empty field stays as it is. Then fetch the coverage with
-    the new settings, so the page shows at once whether they work."""
+    the new settings, so the page shows at once whether they work.
+
+    A new host or certificate needs the key in the same request. The web token travels in the clear on the hotspot, and
+    otherwise whoever holds it could point the car at their own server and certificate, and the saved key would go there."""
     values = {}
     try:
       if str(body.get("host") or "").strip():
         values["TurnPilotMapHost"] = normalize_host(str(body["host"]))
       if str(body.get("key") or "").strip():
-        values["TurnPilotMapKey"] = str(body["key"]).strip()
+        values["TurnPilotMapKey"] = check_key(str(body["key"]))
       if str(body.get("cert") or "").strip():
         values["TurnPilotMapCert"] = check_cert(str(body["cert"]))
-        cert_fingerprint(values["TurnPilotMapCert"])
+        try:
+          cert_fingerprint(values["TurnPilotMapCert"])
+        except ValueError:  # base64's binascii.Error; only the certificate gets this message
+          raise ApiError(400, "The certificate is not valid PEM.") from None
     except MapError as e:
       raise ApiError(400, e.message) from None
-    except ValueError:
-      raise ApiError(400, "The certificate is not valid PEM.") from None
     if not values:
       raise ApiError(400, "nothing to save: send host, key or cert")
     with self.store.lock:
+      params = self.store.params
+      saved_host, saved_cert = (params.get("TurnPilotMapHost") or ""), (params.get("TurnPilotMapCert") or "")
+      new_host = values.get("TurnPilotMapHost", saved_host) != saved_host
+      new_cert = values.get("TurnPilotMapCert", saved_cert).strip() != saved_cert.strip()
+      if (new_host or new_cert) and "TurnPilotMapKey" not in values and params.get("TurnPilotMapKey"):
+        what = "address" if new_host and not new_cert else "certificate" if new_cert and not new_host else "address and certificate"
+        raise ApiError(400, f"Enter the API key again to change the map server {what}. " +
+                       "The saved key is only sent to a new server when you type it.")
       for k, v in values.items():
-        self.store.params.put(k, v, block=True)
+        params.put(k, v, block=True)
     try:
       self.refresh()
       result = {"coverage_ok": True, "coverage_error": None}

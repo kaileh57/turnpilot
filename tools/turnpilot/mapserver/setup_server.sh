@@ -52,7 +52,7 @@ Wants=network-online.target
 
 [Service]
 User=tpmaps
-ExecStart=$OPT/venv/bin/python $OPT/server.py --regions $SRV/regions
+ExecStart=$OPT/venv/bin/python $OPT/server.py --regions $SRV/regions --tmp-dir /var/cache/turnpilot-maps
 WorkingDirectory=$OPT
 Restart=on-failure
 RestartSec=5
@@ -62,6 +62,9 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+# corridors are built here before they are sent, on disk: /tmp may be a tmpfs that counts against MemoryMax
+CacheDirectory=turnpilot-maps
+TasksMax=64
 ReadOnlyPaths=$SRV $ETC $OPT
 MemoryMax=850M
 

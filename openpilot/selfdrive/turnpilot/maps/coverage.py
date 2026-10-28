@@ -93,9 +93,12 @@ def refresh(params, directory: Path | None = None) -> Coverage:
       coverage = save(data, directory)
     except ValueError as e:
       raise MapError('bad_response', f"The map server's coverage is not valid: {e}", 'Map server sent bad coverage') from None
-  except MapError as e:
+  except Exception as e:
+    if not isinstance(e, MapError):  # still a failure the phone shows, not just a log line
+      cloudlog.exception("turnpilot coverage refresh failed")
+      e = MapError('refresh_failed', f"Updating TurnPilot's mapped area failed: {type(e).__name__}: {e}", 'Mapped area update failed')
     params.put(STATUS_PARAM, {'ok': False, 'code': e.code, 'error': e.message, 'at': wall_time()})
-    raise
+    raise e from None
   params.put(STATUS_PARAM, {'ok': True, 'version': coverage.version, 'regions': coverage.summary(), 'at': wall_time()})
   return coverage
 

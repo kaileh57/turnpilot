@@ -5,8 +5,10 @@
 #
 # The VM's address and SSH key come from TURNPILOT_MAPS_HOST (default turnpilot@136.113.85.41) and
 # TURNPILOT_MAPS_SSH_KEY (default ~/.ssh/turnpilot_maps). Run setup_server.sh on the VM once first;
-# "deploy.sh --setup" does that. Each region is uploaded to a staging directory and swapped in whole, so
-# the server never serves a half-copied region.
+# "deploy.sh --setup" does that. Each region is uploaded to a staging directory, then swap_region.sh copies it beside
+# the live one and swaps it in with renames, restarts the server at once (it holds each region's index in memory) and
+# checks that it serves the region, rolling back if not. So the server never serves a half-copied region, nor tiles
+# that don't match the index it loaded.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,7 +23,15 @@ if [ "${1:-}" = "--setup" ]; then
   "${SSH[@]}" "bash /tmp/setup_server.sh ${HOST#*@}"
 fi
 
-rsync -e "ssh -i $KEY" "$HERE/server.py" "$HERE/geo.py" "$HERE/tiles.py" "$HOST:/opt/turnpilot-maps/"
+# server.py requires --tmp-dir, which only the unit setup_server.sh writes has. With an older unit the new server would
+# not start, and swap_region.sh would take that for a bad region and roll it back: refuse here instead, before anything.
+if ! "${SSH[@]}" "grep -q -- '--tmp-dir' /etc/systemd/system/turnpilot-maps.service"; then
+  echo "The server's systemd unit has no --tmp-dir (corridors would be built in a tmpfs /tmp that counts against MemoryMax)." >&2
+  echo "Run: $0 --setup ${*:-}" >&2
+  exit 1
+fi
+
+rsync -e "ssh -i $KEY" "$HERE/server.py" "$HERE/geo.py" "$HERE/tiles.py" "$HERE/swap_region.sh" "$HOST:/opt/turnpilot-maps/"
 
 if [ $# -eq 0 ]; then
   set -- $(cd "$REGIONS" && ls)
@@ -34,12 +44,12 @@ for region in "$@"; do
   echo "== $region"
   rsync -a --delete -e "ssh -i $KEY" --include='/fence.geojson' --include='/meta.json' --include='/index.json' \
     --include='/tiles.tar' --include='/tiles/***' --exclude='*' "$src/" "$HOST:/srv/turnpilot-maps/staging/$region/"
-  "${SSH[@]}" "sudo rm -rf /srv/turnpilot-maps/regions/$region.old && \
-    { [ ! -e /srv/turnpilot-maps/regions/$region ] || sudo mv /srv/turnpilot-maps/regions/$region /srv/turnpilot-maps/regions/$region.old; } && \
-    sudo cp -a /srv/turnpilot-maps/staging/$region /srv/turnpilot-maps/regions/$region && \
-    sudo rm -rf /srv/turnpilot-maps/regions/$region.old"
+  "${SSH[@]}" "bash /opt/turnpilot-maps/swap_region.sh /srv/turnpilot-maps/regions /srv/turnpilot-maps/staging $region"
 done
 
-"${SSH[@]}" "sudo systemctl restart turnpilot-maps && sleep 3 && systemctl is-active turnpilot-maps && \
-  curl -sk https://127.0.0.1/v1/health"
+# the new server code, when no region was swapped (each swap already restarted it)
+if [ $# -eq 0 ]; then
+  "${SSH[@]}" "sudo systemctl restart turnpilot-maps && sleep 3 && systemctl is-active turnpilot-maps"
+fi
+"${SSH[@]}" "curl -sfk --max-time 10 https://127.0.0.1/v1/health"
 echo

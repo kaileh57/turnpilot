@@ -114,16 +114,25 @@ class TestTurnPilotOnroad(OpenpilotTestCase):
 class TestMapStatus:
   def test_route_refusal_and_download_on_the_status_line(self):
     from openpilot.selfdrive.ui.lib.turnpilot import map_status_text
+    here = {'latitude': 39.8, 'longitude': -86.1}
+    at = {'destination': [-86.1, 39.8]}
     refused = {'state': 'error', 'code': 'outside_coverage', 'short': 'Destination outside mapped area',
-               'message': "Outside TurnPilot's mapped area. TurnPilot can only navigate around Indianapolis and Seattle."}
-    assert map_status_text(refused, True) == ('No route', 'Destination outside mapped area')
-    assert map_status_text(refused, False) == ('', '')  # nothing once the destination is gone
-    assert map_status_text({'state': 'error', 'message': 'Routing failed'}, True) == ('No route', 'Routing failed')
-    assert map_status_text({'state': 'downloading', 'progress': 0.42}, True) == ('Downloading map', 'for this drive, 42%')
-    assert map_status_text({'state': 'downloading', 'progress': None}, True) == ('Downloading map', 'for this drive')
+               'message': "Outside TurnPilot's mapped area. TurnPilot can only navigate around Indianapolis and Seattle.", **at}
+    assert map_status_text(refused, here) == ('No route', 'Destination outside mapped area')
+    assert map_status_text(refused, None) == ('', '')  # nothing once the destination is gone
+    assert map_status_text({'state': 'error', 'message': 'Routing failed', **at}, here) == ('No route', 'Routing failed')
+    assert map_status_text({'state': 'downloading', 'progress': 0.42, **at}, here) == ('Downloading map', 'for this drive, 42%')
+    assert map_status_text({'state': 'downloading', 'progress': None, **at}, here) == ('Downloading map', 'for this drive')
     for state in ('idle', 'checking', 'ready'):
-      assert map_status_text({'state': state}, True) == ('', '')
-    assert map_status_text(None, True) == ('', '')
+      assert map_status_text({'state': state, **at}, here) == ('', '')
+    assert map_status_text(None, here) == ('', '')
+
+  def test_a_status_for_another_destination_is_not_shown(self):
+    """navd's status from the previous destination (an error, or a download it is still finishing) is not this one's."""
+    from openpilot.selfdrive.ui.lib.turnpilot import map_status_text
+    old = {'state': 'error', 'short': 'Car outside mapped area', 'message': 'The car is outside', 'destination': [-122.3, 47.6]}
+    assert map_status_text(old, {'latitude': 39.8, 'longitude': -86.1}) == ('Checking', 'the mapped area')
+    assert map_status_text({'state': 'error', 'short': 'x'}, {'latitude': 39.8, 'longitude': -86.1}) == ('Checking', 'the mapped area')
 
   def test_mapped_area_text(self, tmp_path):
     from openpilot.selfdrive.turnpilot.maps.coverage import CoverageCache, coverage_path, save
@@ -134,7 +143,7 @@ class TestMapStatus:
     save(coverage_doc(), tmp_path)
     assert mapped_area_text(cache, (INDY[1], INDY[0])) == 'Indianapolis area'
     assert mapped_area_text(cache, (CHICAGO[1], CHICAGO[0])) == "Outside TurnPilot's mapped area"
-    assert mapped_area_text(cache, None) == 'car position unknown; mapped: Indianapolis and Seattle'
+    assert mapped_area_text(cache, None) == 'car position unknown'  # two lines at most in the button; the phone names the areas
     assert mapped_area_text(cache, None, '/sim/tiles') == 'local tiles (developer), no geofence'
     coverage_path(tmp_path).write_text('garbage')
     assert mapped_area_text(cache, (INDY[1], INDY[0])) == 'saved mapped area is unreadable'

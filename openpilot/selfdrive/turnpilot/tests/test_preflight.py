@@ -75,6 +75,11 @@ def test_map_server():
   ok = preflight.check_map_server([], "Indianapolis and Seattle", None, None)
   assert ok.status == PASS and "Seattle" in ok.detail
   assert preflight.check_map_server(["address"], None, None, "/data/tiles").status == INFO
+  # the cached area is there, but the last refresh failed (a rotated key, a new certificate, the server down)
+  failed = {"ok": False, "code": "unauthorized", "error": "The map server refused the API key."}
+  check = preflight.check_map_server([], "Indianapolis and Seattle", None, None, failed)
+  assert check.status == FAIL and "refused the API key" in check.detail
+  assert preflight.check_map_server([], "Indianapolis and Seattle", None, None, {"ok": True}).status == PASS
 
 
 def test_tiles(tmp_path):

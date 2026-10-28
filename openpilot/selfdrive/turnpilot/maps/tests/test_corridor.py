@@ -1,8 +1,10 @@
+import errno
 import hashlib
 import os
 import io
 import tarfile
 import time
+from unittest.mock import patch
 
 import pytest
 
@@ -111,12 +113,102 @@ def test_prune_keeps_the_newest_and_the_one_in_use(tmp_path):
   packs_dir = tmp_path / 'packs'
   assert corridor.packs(packs_dir) == made  # oldest first, whatever their names
   (packs_dir / '.staging-dead').mkdir()  # left by a crash mid-unpack
+  os.utime(packs_dir / '.staging-dead', (1, 1))
+  (packs_dir / '.staging-live').mkdir()  # another route job's unpack in progress
   (packs_dir / '.download-dead.tar').write_bytes(b'cut off')
   os.utime(packs_dir / '.download-dead.tar', (1, 1))
   (packs_dir / '.download-live.tar').write_bytes(b'still coming')  # another download in progress
   corridor.prune(packs_dir, keep=3, in_use=made[0])
   assert corridor.packs(packs_dir) == [made[0]] + made[2:]
   assert not (packs_dir / '.staging-dead').exists() and not (packs_dir / '.download-dead.tar').exists()
-  assert (packs_dir / '.download-live.tar').exists()
+  assert (packs_dir / '.download-live.tar').exists() and (packs_dir / '.staging-live').exists()
   corridor.prune(packs_dir, keep=2)
   assert corridor.packs(packs_dir) == made[3:]
+
+
+BIG = {f'tiles/2/000/000/{i:03d}.gph': os.urandom(3000) for i in range(4)}
+
+
+@pytest.mark.parametrize('compress', [False, True])
+@pytest.mark.parametrize('keep', [0.2, 0.4, 0.55])  # the tiles end at about 0.6, then come the tar's zero records
+def test_a_cut_off_pack_is_a_retryable_bad_pack(tmp_path, compress, keep):
+  """A download that broke off (no Content-Length, a clean FIN) must be a MapError the router can back off on, not a
+  raw tarfile.ReadError or EOFError."""
+  import gzip
+  data = make_pack(BIG)
+  data = gzip.compress(data) if compress else data
+  e = rejected(tmp_path, data[:int(len(data) * keep)], 'failed its check')
+  assert e.retry
+
+
+def test_a_file_and_a_directory_at_one_path_is_a_bad_pack_not_retried(tmp_path):
+  """The server's pack is wrong the same way on every download: it waits out the refusal time, not 30 s."""
+  clash = make_pack({'tiles/2/000/000/001.gph': b'a'}, extra=[member('tiles/2/000/000/001.gph/x.gph')],
+                    manifest_files={'tiles/2/000/000/001.gph': hashlib.sha256(b'a').hexdigest(),
+                                    'tiles/2/000/000/001.gph/x.gph': hashlib.sha256(b'x').hexdigest()})
+  e = rejected(tmp_path, clash, 'is a file and a directory')
+  assert not e.retry
+
+
+@pytest.mark.parametrize('error', [errno.ENOSPC, errno.EIO])
+def test_a_pack_the_comma_cannot_save_is_a_storage_error_not_a_bad_map(tmp_path, error):
+  """A full disk is not a bad map, and downloading it again every 30 s won't help."""
+  real_open = open
+
+  def failing(path, mode='r', *args, **kwargs):
+    if 'x' in mode:
+      raise OSError(error, os.strerror(error))
+    return real_open(path, mode, *args, **kwargs)
+
+  with patch('builtins.open', failing), pytest.raises(MapError) as e:
+    unpack(tmp_path, make_pack(FILES))
+  assert (e.value.code, e.value.retry) == ('storage', False)
+  assert ('storage is full' in e.value.message) == (error == errno.ENOSPC)
+  assert not any((tmp_path / 'packs').iterdir()), "nothing is left behind"
+
+
+def test_a_corrupt_gzip_is_retried(tmp_path):
+  """gzip.BadGzipFile (a bad CRC, say) is an OSError, but it is a bad download, not the comma's disk."""
+  import gzip
+  with patch.object(corridor, 'unpack_to', side_effect=gzip.BadGzipFile('CRC check failed')):
+    e = rejected(tmp_path, make_pack(FILES), 'failed its check')
+  assert e.retry
+
+
+def test_a_pack_covers_the_places_its_level_2_tiles_do(tmp_path):
+  from openpilot.selfdrive.turnpilot.maps.tests.fakes import INDY, INDY_EAST, level2_tile
+  from tools.turnpilot.mapserver import tiles
+  name = level2_tile(*INDY)
+  assert tiles.tile_bbox(*tiles.parse_path(name.removeprefix('tiles/'))) == (-86.25, 39.75, -86.0, 40.0)  # as the server's grid
+  pack = unpack(tmp_path, make_pack({name: b'two', 'tiles/0/002/813.gph': b'zero', 'tiles/1/045/876.gph': b'one'}))
+  assert pack.covers(*INDY) and pack.covers(-86.01, 39.99)
+  assert not pack.covers(-86.4, 40.3)  # inside the 1 and 4 degree level 0 and 1 tiles, which cover nearly anything
+  assert not pack.covers(INDY_EAST[0] + 0.3, INDY_EAST[1])
+
+
+def test_prune_and_packs_ignore_files_another_job_removes(tmp_path, monkeypatch):
+  import errno
+  from openpilot.selfdrive.turnpilot.maps import corridor
+  (tmp_path / '.download-gone.tar').write_bytes(b'x')
+  (tmp_path / '.staging-gone').mkdir()
+  real_stat = corridor.Path.stat
+
+  def vanishing_stat(self, *a, **kw):
+    if self.name in ('.download-gone.tar', '.staging-gone') or self.name == corridor.MANIFEST:
+      raise FileNotFoundError(errno.ENOENT, "removed by another job", str(self))
+    return real_stat(self, *a, **kw)
+  pack = tmp_path / '20260101-000000-abcdef'
+  pack.mkdir()
+  (pack / corridor.MANIFEST).write_text('{}')
+  monkeypatch.setattr(corridor.Path, 'stat', vanishing_stat)
+  assert corridor.packs(tmp_path) == []
+  corridor.prune(tmp_path)
+
+
+def test_a_path_component_longer_than_a_filename_is_a_bad_pack():
+  import pytest
+  from openpilot.selfdrive.turnpilot.maps.client import MapError
+  from openpilot.selfdrive.turnpilot.maps.corridor import member_path
+  with pytest.raises(MapError) as e:
+    member_path('tiles/2/' + 'a' * 300 + '.gph')
+  assert e.value.code == 'bad_pack'

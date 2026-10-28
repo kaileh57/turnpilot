@@ -196,7 +196,7 @@ class TestWestCoastUSA:
     values = {"TurnPilotValhallaTiles": tiles["lanes"], "TurnPilotRouteSource": "valhalla", "LanguageSetting": "main_en"}
     params, pm = MagicMock(), MagicMock()
     params.get.side_effect = values.get
-    engine = RouteEngine(MagicMock(), pm, params=params)
+    engine = RouteEngine(MagicMock(), pm, params=params, background=False)
     engine.last_position, engine.last_bearing = demo.latlon(demo.start)[::-1], demo.bearing
     engine.calculate_route(demo.latlon(demo.destination)[::-1])
     assert engine.step_idx == 0

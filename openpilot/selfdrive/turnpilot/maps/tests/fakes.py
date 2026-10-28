@@ -28,6 +28,13 @@ SEATTLE = (-122.335, 47.608)
 CHICAGO = (-87.63, 41.88)  # in neither
 
 
+def level2_tile(lon, lat) -> str:
+  """The Valhalla level-2 tile (0.25 degrees) that holds (lon, lat), as a pack names it."""
+  index = int((lat + 90) // 0.25) * 1440 + int((lon + 180) // 0.25)
+  digits = f"{index:09d}"
+  return f"tiles/2/{digits[:3]}/{digits[3:6]}/{digits[6:]}.gph"
+
+
 def coverage_doc(version='2026-10-27', rings=None):
   rings = rings or {'indianapolis': ('Indianapolis area', INDY_RING), 'seattle': ('Seattle area', SEATTLE_RING)}
   return {'type': 'FeatureCollection', 'version': version, 'features': [
@@ -98,13 +105,19 @@ class FakeParams:
 
 class MapServer:
   """The map server's API on 127.0.0.1 over TLS. Set .corridor to (status, body bytes, content type) to answer
-  /v1/corridor (gzipped on the wire, as the real server sends it); every request is in .requests as (method, path, headers, body)."""
+  /v1/corridor (gzipped on the wire, as the real server sends it); every request is in .requests as (method, path, headers, body).
+
+  The corridor goes out as tools/turnpilot/mapserver/server.py sends it: Content-Length, Connection: close and the region
+  header. .cut_at sends only that many bytes of the body and hangs up (a dropped connection); .send_length=False leaves
+  Content-Length out, as an older server or a proxy might."""
 
   def __init__(self, coverage=None, corridor=(200, b'', 'application/x-tar')):
     self.cert, key_pem = self_signed()
     self.coverage = coverage if coverage is not None else coverage_doc()
     self.corridor = corridor
     self.gzip = True  # as the real server does when the client accepts it
+    self.cut_at: int | None = None
+    self.send_length = True
     self.requests = []
     self.directory = tempfile.TemporaryDirectory()
     cert_file, key_file = Path(self.directory.name) / 'cert.pem', Path(self.directory.name) / 'key.pem'
@@ -118,14 +131,15 @@ class MapServer:
       def log_message(self, format, *args):  # noqa: A002
         pass
 
-      def reply(self, code, body: bytes, ctype='application/json', headers=None):
+      def reply(self, code, body: bytes, ctype='application/json', headers=None, length=True, cut_at=None):
         self.send_response(code)
         self.send_header('Content-Type', ctype)
         for k, v in (headers or {}).items():
           self.send_header(k, v)
-        self.send_header('Content-Length', str(len(body)))
+        if length:
+          self.send_header('Content-Length', str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        self.wfile.write(body if cut_at is None else body[:cut_at])
 
       def handle_any(self, method):
         length = int(self.headers.get('Content-Length') or 0)
@@ -139,9 +153,13 @@ class MapServer:
           return self.reply(200, json.dumps(server.coverage).encode())
         if method == 'POST' and self.path == '/v1/corridor':
           code, data, ctype = server.corridor
-          if code == 200 and server.gzip and 'gzip' in self.headers.get('Accept-Encoding', ''):
-            return self.reply(code, gzip.compress(data), ctype, {'Content-Encoding': 'gzip'})
-          return self.reply(code, data, ctype)
+          if code != 200:
+            return self.reply(code, data, ctype)
+          self.close_connection = True
+          headers = {'X-TurnPilot-Region': 'indianapolis', 'Connection': 'close'}
+          if server.gzip and 'gzip' in self.headers.get('Accept-Encoding', ''):
+            data, headers['Content-Encoding'] = gzip.compress(data), 'gzip'
+          return self.reply(code, data, ctype, headers, length=server.send_length, cut_at=server.cut_at)
         self.reply(404, b'{}')
 
       def do_GET(self):

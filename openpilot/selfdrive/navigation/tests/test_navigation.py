@@ -85,17 +85,26 @@ def local_archive(data):
 
 
 class StubRouter:
-  """Stands in for navd's MapRouter (turnpilot/routing/sources.py, tested there): the steps it is given, or its error."""
+  """Stands in for navd's MapRouter (turnpilot/routing/sources.py, tested there): the steps it is given, or its error.
+  With gate set to an Event, route() blocks until it is set, as a corridor download does, and stops when cancelled."""
   def __init__(self, steps=None):
     self.steps, self.error, self.calls = steps, None, []
     self.status = MagicMock()
+    self.gate: threading.Event | None = None
+    self.positions = []  # what position() said once the "download" was done
 
   @property
   def call_count(self):
     return len(self.calls)
 
-  def route(self, start, destination, bearing, language):
+  def route(self, start, destination, bearing, language, position=None, cancelled=None):
     self.calls.append((start, destination, bearing, language))
+    if self.gate is not None:
+      while not self.gate.wait(0.01):
+        if cancelled is not None and cancelled():
+          raise MapError('cancelled', 'The destination changed during the map download.')
+    if position is not None:
+      self.positions.append(position())
     if self.error is not None:
       raise self.error
     return self.steps
@@ -116,7 +125,7 @@ def route_engine(sm, pm, values, steps=None):
   params = MagicMock()
   params.get.side_effect = values.get
   params.remove.side_effect = lambda key: values.pop(key, None)
-  return RouteEngine(sm, pm, params=params, router=StubRouter(steps))
+  return RouteEngine(sm, pm, params=params, router=StubRouter(steps), background=False)
 
 
 class RangeHandler(BaseHTTPRequestHandler):
@@ -277,8 +286,12 @@ class TestRouteEngine(unittest.TestCase):
     self.sm.__getitem__.return_value = SimpleNamespace(hasFix=True, latitude=0, longitude=0, bearingDeg=90)
     self.engine = route_engine(self.sm, self.pm, self.values)
     self.engine.last_position, self.engine.last_bearing = (0, 0), 90
+    self.response = self.steps()
+
+  @staticmethod
+  def steps():
     distance = 111.195  # Mapbox's length of 0.001 degrees at the equator
-    self.response = [
+    return [
       {'geometry': {'coordinates': [[0, 0], [0.0005, 0], [0.001, 0]]}, 'distance': distance, 'duration': 10,
        'bannerInstructions': [{'distanceAlongGeometry': 100, 'primary': {'text': 'Turn right', 'type': 'turn', 'modifier': 'right'}}]},
       {'geometry': {'coordinates': [[0.001, 0], [0.002, 0]]}, 'distance': distance, 'duration': 10, 'bannerInstructions': []},
@@ -469,6 +482,146 @@ class TestRouteEngine(unittest.TestCase):
       self.sm.recv_time = dict.fromkeys(self.sm.valid, time.monotonic() - 3)  # or stale
       self.engine.update()
       self.assertEqual(self.engine.last_position, (2, 2))
+
+
+class TestBackgroundRouting(unittest.TestCase):
+  """navd routes in a worker thread: a corridor download takes minutes, and the 1 Hz loop must keep running meanwhile."""
+  A, B = (0.002, 0), (0.004, 0)
+
+  def setUp(self):
+    self.pm = MagicMock()
+    self.values = {'NavDestination': {'latitude': 0, 'longitude': 0.002}, 'LanguageSetting': 'main_en'}
+    self.sm = MagicMock()
+    self.sm.valid = dict.fromkeys(('gpsLocation', 'gpsLocationExternal'), True)
+    self.sm.logMonoTime = dict.fromkeys(self.sm.valid, time.monotonic_ns())
+    self.sm.recv_time = dict.fromkeys(self.sm.valid, time.monotonic())
+    self.sm.frame = 1
+    self.fix = SimpleNamespace(hasFix=True, latitude=0, longitude=0, bearingDeg=90)
+    self.sm.__getitem__.side_effect = lambda service: self.fix
+    params = MagicMock()
+    params.get.side_effect = self.values.get
+    params.remove.side_effect = lambda key: self.values.pop(key, None)
+    self.router = StubRouter(TestRouteEngine.steps())
+    self.router.gate = threading.Event()
+    self.engine = RouteEngine(self.sm, self.pm, params=params, router=self.router)
+    self.addCleanup(self.router.gate.set)
+
+  def tick(self):
+    """One navd update, which must not block on the download."""
+    t = threading.Thread(target=self.engine.update, daemon=True)
+    t.start()
+    t.join(2)
+    self.assertFalse(t.is_alive(), "navd's update blocked on the route")
+    return next(c.args[1] for c in reversed(self.pm.send.call_args_list) if c.args[0] == 'navInstruction')
+
+  def finish(self):
+    self.router.gate.set()
+    job = self.engine.job
+    if job is not None:
+      job.join(2)
+      self.assertFalse(job.is_alive())
+
+  def test_navd_keeps_publishing_while_the_map_downloads_and_routes_from_where_the_car_is(self):
+    for _ in range(3):
+      self.assertFalse(self.tick().valid)  # no route yet: invalid, but published every second
+    self.assertEqual(len(self.router.calls), 1)
+    self.fix = SimpleNamespace(hasFix=True, latitude=0, longitude=0.0005, bearingDeg=80)  # the car moved on meanwhile
+    self.tick()
+    self.finish()
+    self.assertTrue(self.tick().valid)
+    self.assertEqual(self.router.positions, [((0.0005, 0), 80)])
+    self.assertEqual(self.engine.nav_destination, self.A)
+
+  def test_a_new_destination_during_the_download_cancels_it_and_starts_at_once(self):
+    self.tick()
+    self.values['NavDestination'] = {'latitude': 0, 'longitude': 0.004}
+    self.tick()  # cancels A's download
+    deadline = time.monotonic() + 2
+    while self.router.calls[-1][1] != self.B and time.monotonic() < deadline:
+      self.assertFalse(self.tick().valid)
+    self.assertEqual([c[1] for c in self.router.calls], [self.A, self.B])  # B right away, not after RECOMPUTE_HOLD
+    self.finish()
+    self.assertTrue(self.tick().valid)
+    self.assertEqual(self.engine.nav_destination, self.B)
+
+  def test_a_route_for_a_replaced_destination_is_dropped(self):
+    self.tick()
+    self.finish()  # A's route is done, but navd hasn't picked it up when the destination changes
+    self.values['NavDestination'] = {'latitude': 0, 'longitude': 0.004}
+    self.router.gate = threading.Event()
+    self.assertFalse(self.tick().valid)  # never guidance to A
+    self.assertIsNone(self.engine.route)
+    self.assertEqual(self.router.calls[-1][1], self.B)
+    self.finish()
+    self.assertTrue(self.tick().valid)
+    self.assertEqual(self.engine.nav_destination, self.B)
+
+  def test_a_new_destination_does_not_wait_for_a_download_that_cannot_stop_yet(self):
+    """The server builds a corridor before it answers, and a cancel can't reach the download until then: B starts at once."""
+    a_gate, route = threading.Event(), self.router.route
+    self.addCleanup(a_gate.set)
+
+    def a_blocks_regardless(start, destination, *args, **kwargs):
+      if destination == self.A:
+        self.router.calls.append((start, destination))
+        a_gate.wait(5)  # deaf to the cancel, like a request still waiting for its status line
+        raise MapError('unreachable', 'A failed after it was cancelled')
+      return route(start, destination, *args, **kwargs)
+
+    self.router.route = a_blocks_regardless
+    self.router.gate = None
+    self.tick()
+    a_job = self.engine.job
+    self.values['NavDestination'] = {'latitude': 0, 'longitude': 0.004}
+    self.tick()
+    self.assertEqual([c[1] for c in self.router.calls], [self.A, self.B])
+    self.assertTrue(a_job.is_alive() and a_job.cancel.is_set())
+    self.engine.job.join(2)
+    self.assertTrue(self.tick().valid)
+    self.assertEqual(self.engine.nav_destination, self.B)
+    a_gate.set()
+    a_job.join(2)
+    self.assertTrue(self.tick().valid)  # A's late failure changes nothing
+    self.assertEqual(self.engine.nav_destination, self.B)
+
+  def test_leaving_the_corridor_is_no_guidance_until_the_new_route_and_keeps_the_destination(self):
+    """While the new corridor downloads, the old route stays installed. The car is off it: following its distances ran
+    through its steps to 'Destination reached', which deleted NavDestination with no error shown."""
+    d = 0.01  # about 1.1 km per step along the equator
+    steps = [{'geometry': {'coordinates': [[i * d, 0], [i * d + d / 2, 0], [(i + 1) * d, 0]]}, 'distance': 1112., 'duration': 60,
+              'bannerInstructions': [{'distanceAlongGeometry': 300, 'primary': {'text': f'Turn {i}', 'type': 'turn', 'modifier': 'right'}}]}
+             for i in range(6)]
+    self.values['NavDestination'] = {'latitude': 0, 'longitude': 6 * d}
+    self.router.steps = steps
+    self.fix = SimpleNamespace(hasFix=True, latitude=0, longitude=0.001, bearingDeg=90)
+    self.tick()
+    self.finish()
+    self.assertTrue(self.tick().valid)
+    self.router.gate = threading.Event()  # the next route call is the new corridor's download: minutes
+    calls = len(self.router.calls)
+    for t in range(1, 120):  # the car leaves the route northward at 30 m/s
+      self.fix = SimpleNamespace(hasFix=True, latitude=t * 30 / 111319.5, longitude=0.001, bearingDeg=0)
+      msg = self.tick()
+      self.assertIn('NavDestination', self.values, f"navd deleted the destination at {t} s")
+      if len(self.router.calls) > calls:
+        self.assertFalse(msg.valid, f"guidance on the old route at {t} s: {msg.navInstruction.maneuverDistance} m")
+        self.assertEqual(self.engine.step_idx, 0)
+    self.assertGreater(len(self.router.calls), calls, "navd never rerouted")
+    self.fix = SimpleNamespace(hasFix=True, latitude=0, longitude=0.001, bearingDeg=90)
+    self.finish()
+    self.assertFalse(self.tick().valid)  # one invalid instruction between two routes, so no turn desire carries over
+    self.assertTrue(self.tick().valid)
+    self.assertEqual(self.engine.step_idx, 0)
+    self.assertIn('NavDestination', self.values)
+
+  def test_clearing_the_destination_cancels_the_download(self):
+    self.tick()
+    job = self.engine.job
+    del self.values['NavDestination']
+    self.assertFalse(self.tick().valid)
+    job.join(2)
+    self.assertFalse(job.is_alive())
+    self.assertIsNone(self.engine.route)
 
 
 class TestTiles(unittest.TestCase):
