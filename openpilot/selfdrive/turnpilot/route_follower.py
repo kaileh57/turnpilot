@@ -4,12 +4,20 @@ navd publishes navInstruction once a second: maneuverDistance is the distance to
 and it runs down to about -10 m before navd advances to the next step. Between updates the distance is
 dead-reckoned from carState.vEgo, which at highway speed is up to 30 m better than the last message.
 Maneuver type and modifier are Mapbox/OSRM strings, copied through by navd unchanged.
+What counts as a turn: only a junction maneuver, where the route leaves the road at an intersection that other roads
+meet (navInstruction.maneuverBranches > 0, from Valhalla's intersection bearings). Where the road just bends and no
+other road meets it, the maneuver is NONE: the driving model follows the bend (0.11.3's Autospeed slows for curves), and
+TurnPilot sends no desire and no speed cap there. The angle is the real one, bearing_after less bearing_before. A route
+without intersection data (maneuverGeometryValid false; Valhalla always has it) leaves every turn a junction at the
+modifier's nominal angle, which is logged once per maneuver and shown in the plan's reason.
 A new route (a destination set from the phone, a reroute) can start with a maneuver of the same type and modifier as
 the old one, so it is told apart by navd marking it (one invalid navInstruction between the two routes) or by the
 distance jumping up by more than GPS noise or dead reckoning explain. Either way the old maneuver was dropped, not
 passed, and RouteFollower.replaced says so for the one update: its turn pulse must not carry over to the new route.
 """
 from dataclasses import dataclass
+
+from openpilot.common.swaglog import cloudlog
 
 LEFT, RIGHT = 1, -1
 
@@ -31,6 +39,8 @@ NO_ACTION_TYPES = ("depart", "notification", "merge", "roundabout", "rotary", "r
 NOMINAL_ANGLE_DEG = {"slight left": 45., "slight right": 45., "left": 90., "right": 90.,
                      "sharp left": 135., "sharp right": 135., "uturn": 180.}
 
+SIDE_MIN_DEG = 20.         # a heading change under this has no side to check the modifier against
+
 NEW_MANEUVER_JUMP_M = 10.  # navd's distance jumping up by more than this...
 ADVANCE_NEAR_M = 5.        # ...from this close means it moved on to the next maneuver (it advances past -10 m),
                            # while a jump from further out is GPS noise
@@ -49,8 +59,11 @@ class Maneuver:
   side: int            # LEFT, RIGHT, or 0
   type: str
   modifier: str
-  angle_deg: float     # unsigned nominal turn angle from the modifier; navInstruction carries no bearings
+  angle_deg: float     # unsigned turn angle: from the junction's bearings, else the modifier's nominal one
   lanes: tuple = ()    # ((directions, active), ...) left to right, from NavInstruction.lanes; empty when navd has none
+  geometry: bool = False  # angle_deg and the junction test came from the route's bearings
+  bend: bool = False      # the road bends here and no other road meets it: left to the model (kind NONE)
+  bearing_side: int = 0   # LEFT or RIGHT as the bearings turn, 0 without them or under SIDE_MIN_DEG
 
   @property
   def ramp(self) -> bool:
@@ -76,13 +89,29 @@ def classify(mtype: str, modifier: str) -> tuple[str, int]:
 
 
 def lanes_from_instruction(instruction) -> tuple:
-  return tuple((tuple(str(d) for d in lane.directions), bool(lane.active)) for lane in instruction.lanes)
+  return lanes_from_list(instruction.lanes)
+
+
+def lanes_from_list(lanes) -> tuple:
+  return tuple((tuple(str(d) for d in lane.directions), bool(lane.active)) for lane in lanes)
+
+
+def turn_angle(bearing_before: float, bearing_after: float) -> float:
+  """Signed heading change in degrees, (-180, 180]: positive to the right (bearings run clockwise)."""
+  return -((bearing_before - bearing_after + 180.) % 360. - 180.)
 
 
 def maneuver_from_instruction(instruction) -> Maneuver:
   mtype, modifier = instruction.maneuverType, instruction.maneuverModifier
   kind, side = classify(mtype, modifier)
-  return Maneuver(kind, side, mtype, modifier, NOMINAL_ANGLE_DEG.get(modifier, 0.), lanes_from_instruction(instruction))
+  lanes = lanes_from_instruction(instruction)
+  if not instruction.maneuverGeometryValid:
+    return Maneuver(kind, side, mtype, modifier, NOMINAL_ANGLE_DEG.get(modifier, 0.), lanes)
+  angle = turn_angle(instruction.maneuverBearingBefore, instruction.maneuverBearingAfter)
+  bearing_side = 0 if abs(angle) < SIDE_MIN_DEG else RIGHT if angle > 0 else LEFT
+  if kind in (TURN, KEEP) and instruction.maneuverBranches == 0:
+    return Maneuver(NONE, 0, mtype, modifier, abs(angle), lanes, geometry=True, bend=True, bearing_side=bearing_side)
+  return Maneuver(kind, side, mtype, modifier, abs(angle), lanes, geometry=True, bearing_side=bearing_side)
 
 
 class RouteFollower:
@@ -97,6 +126,8 @@ class RouteFollower:
     self.distance_remaining = float('inf')  # m to the destination
     self.passed = False                     # true for the one update in which the last maneuver was passed
     self.replaced = False                   # true for the one update in which a new route dropped the last maneuver
+    self.through_lanes: tuple = ()          # NavInstruction.throughLanes: the next intersection the route goes straight through
+    self.through_distance = float('inf')    # m to it, dead-reckoned
     self._passed_id = -1
     self._stale_t = 0.
 
@@ -131,10 +162,24 @@ class RouteFollower:
       travelled = max(v_ego, 0.) * dt
       self.distance -= travelled
       self.distance_remaining -= travelled
+      self.through_distance -= travelled
 
     if self.valid and self.distance < -PASSED_DIST_M and self._passed_id != self.maneuver_id:
       self._passed_id = self.maneuver_id
       self.passed = True
+
+  @staticmethod
+  def _log_new(maneuver: Maneuver, distance: float):
+    """A log line for each maneuver TurnPilot would act on but has no junction data for, and for a turn's bearings
+    that disagree with its modifier (the side comes from the modifier)."""
+    if maneuver.kind not in (TURN, KEEP):
+      return
+    if not maneuver.geometry:
+      cloudlog.warning(f"turnpilot: no junction data for {maneuver.type} {maneuver.modifier} {distance:.0f} m ahead, " +
+                       f"taken as a junction at the nominal {maneuver.angle_deg:.0f} deg")
+    elif maneuver.bearing_side and maneuver.bearing_side != maneuver.side:
+      cloudlog.warning(f"turnpilot: {maneuver.type} {maneuver.modifier} {distance:.0f} m ahead, but its bearings turn " +
+                       f"{maneuver.angle_deg:.0f} deg the other way")
 
   def _on_instruction(self, instruction):
     distance = float(instruction.maneuverDistance)
@@ -144,6 +189,7 @@ class RouteFollower:
     jumped = distance > self.distance + ROUTE_JUMP_M
     new = not self.valid or prev is None or advanced or jumped or (maneuver.type, maneuver.modifier) != (prev.type, prev.modifier)
     if new:
+      self._log_new(maneuver, distance)
       self.replaced = self.valid and jumped and self.distance > REPLACED_FROM_M
       if self.valid and not self.replaced and self.distance < PASSED_NEAR_M and self._passed_id != self.maneuver_id:
         self.passed = True
@@ -152,3 +198,5 @@ class RouteFollower:
     self.maneuver = maneuver
     self.distance = distance
     self.distance_remaining = float(instruction.distanceRemaining)
+    self.through_lanes = lanes_from_list(instruction.throughLanes)
+    self.through_distance = float(instruction.throughLanesDistance) if self.through_lanes else float('inf')
