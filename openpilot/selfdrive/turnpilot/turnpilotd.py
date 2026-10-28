@@ -65,8 +65,8 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.selfdrive.turnpilot.desire_timing import ENTRY_M, TURN_STARTED_DEG, DesireTiming
 from openpilot.selfdrive.turnpilot.handback import Handback
 from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S, CLEAR_DESIRE
-from openpilot.selfdrive.turnpilot.map_controls import (YELLOW_DECEL, YELLOW_DECEL_MAX, MapControlPolicy, light_input, turn_stop_feasible,
-                                                         unprotected_turn)
+from openpilot.selfdrive.turnpilot.map_controls import (KEEP_TURN, YELLOW_DECEL, YELLOW_DECEL_MAX, MapControlPolicy, light_input,
+                                                         turn_stop_feasible, unprotected_turn)
 from openpilot.selfdrive.turnpilot.lane_planner import (OPENPILOT_SIGNALS_BRANDS, LanePlanner, lane_change_window, lane_mismatch,
                                                          model_lanes_from_msg)
 from openpilot.selfdrive.turnpilot.route_follower import KEEP, LEFT, TURN, RouteFollower
@@ -519,7 +519,8 @@ class TurnPilot:
         stops = []
         if map_controls:
           try:  # the map stops in force, the latch above all (map_controls.py): a fault never lets a held car go
-            stops = self.map_update(sm, max(cs.vEgo, 0.), cs.gasPressed).stops
+            # the route is lost with the fault: an unprotected turn's stop carries on, dead-reckoned (map_controls.py)
+            stops = self.map_update(sm, max(cs.vEgo, 0.), cs.gasPressed, KEEP_TURN).stops
           except Exception:
             log_error("turnpilotd.fault_map_controls_failed")
             stops = self.map_controls.held_stops()

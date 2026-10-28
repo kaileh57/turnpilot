@@ -1347,3 +1347,18 @@ def test_the_turn_pulses_on_the_go_frame_itself():
     sim.step(car(sim))
     assert sim.t < 60.
   assert sim.trace[-1][2].desire == Desire.turnLeft and sim.trace[-2][2].desire != Desire.turnLeft
+
+
+def test_fault_on_the_approach_keeps_the_unprotected_stop():
+  # turnpilotd failing on every frame while braking for an unprotected left: the faulted plans carry its stop on, dead
+  # reckoned, to the latch before the line (map stops outlive faults), never dropped with the route the fault lost
+  sim = Sim(TURNS_AHEAD)
+  sim.go_taps = False
+  while not (sim.trace and sim.trace[-1][2].mapControl.kind == 'unprotectedTurn' and sim.trace[-1][2].speedCap < sim.v):
+    sim.step()
+    assert sim.s < 290.
+  sim.tp.update = mock.Mock(side_effect=RuntimeError("synthetic failure"))
+  plans = [sim.step() for _ in range(int(25. / DT_MDL))]
+  assert all(p.fault == Fault.error for p in plans)
+  assert sim.v < 0.05 and 300. - sim.s >= HOLD_LINE_M and plans[-1].shouldStop
+

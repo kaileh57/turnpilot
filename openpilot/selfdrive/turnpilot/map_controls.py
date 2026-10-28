@@ -40,8 +40,9 @@ The rules (Kellen, 2026-10-27; /private/tmp/claude-501/stop_design.md):
   (update()'s turn) and it becomes a control of its own, kind unprotectedTurn, at the junction's hold line less
   MAP_MARGIN_M: the curve, the latch and the stop sign's gas rules, with no dwell: held, the driver is prompted at once
   (unprotectedTurnGo), and only a gas tap goes. A failing or missing controls status leaves the turn unprotected. One the
-  car isn't held at goes with its maneuver (skipped too fast, rerouted away, passed); a held one is position-free like
-  any latch. After the go, scene_policy.py's oncoming and pedestrian holds may still stop the car: they only add holds.
+  car isn't held at goes with its maneuver (skipped too fast, rerouted away, passed), never with a fault (it carries on,
+  dead-reckoned); a held one is position-free like any latch. After the go, scene_policy.py's oncoming and pedestrian
+  holds may still stop the car: they only add holds.
 - navd's controlsStatus other than ok (navd always sets it; none is a navd from before controls) raises
   mapControlsUnavailable and keeps "Map stops/signals: <status>" in the reason: no controls on tiles without control
   data is never shown as clear.
@@ -79,6 +80,7 @@ LIGHT_STALE_S = 0.6           # s: an older light message is stale (unknown)
 
 UNPROTECTED = 'unprotectedTurn'  # MapControlStatus.Kind's name for it
 UNPROTECTED_ROUTE = -1        # its key is (UNPROTECTED_ROUTE, maneuver id): a maneuver's, not a route's control
+KEEP_TURN = 'keep'            # update()'s turn when the route isn't known this frame (a fault): the turn's stop carries on
 MAP_MARGIN_M = 1.             # m short of the hold line an unprotected turn stops, as navd's controls stop short of their line
 PROTECT_BEFORE_M = 30.        # a stop sign or signal this far before the junction (its line, mapped or the junction less 11)...
 PROTECT_PAST_M = 2.           # ...to this far past it is the junction's own: the turn isn't unprotected
@@ -230,10 +232,15 @@ class MapControlPolicy:
 
   def _turn_control(self, turn, controls, v: float, dt: float) -> TrackedControl | None:
     """The unprotected turn's control this frame. turn: (maneuver id, m to its junction, 'left' or 'right') for an
-    unprotected_turn() the car is taking (not skipped), or None."""
+    unprotected_turn() the car is taking (not skipped), None, or KEEP_TURN: not known this frame (turnpilotd faulted
+    before it knew the route), the one there carries on, dead-reckoned."""
     tc = self.turn
     if tc is not None and tc.held:
       return tc  # position-free: only its release lets go
+    if isinstance(turn, str):
+      if tc is not None:
+        tc.d -= v * dt
+      return tc
     want = turn is not None and not protected(controls, turn[1])
     key = (UNPROTECTED_ROUTE, int(turn[0])) if turn is not None else None
     if tc is not None and (not want or tc.key != key):
