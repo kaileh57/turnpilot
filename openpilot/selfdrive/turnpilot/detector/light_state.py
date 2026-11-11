@@ -19,10 +19,8 @@ gates is a head, and its state is read (its reason the published Light.reason: r
   its colour and shape read on its rows grown through the rows next to them that hold any lamp pixel. twoLit: a second,
   separate run with SECOND_LIT_REL of its pixels (and LIT_FRAC_MIN of a third's). streak: the run's core (first to last
   row) is taller than STREAK_MAX of the run's widest row, or the run than RUN_MAX_REL of the box: a lit pole, a sign filling
-  the box, glare, never a lamp (a lamp's glow trailing below its face is the lamp's: STREAK_MAX). Unknown either way. A
-  glow that fills its box stays a streak however round: read as a lamp it made a governing red of something red and round
-  on 210 of 561 frames of route 29's approach to a green (its video through the detector and this reader), and added no red
-  read at any of the drive's stands at a red.
+  the box, glare, never a lamp (a lamp's glow trailing below its face is the lamp's: STREAK_MAX; a round red or green glow
+  that fills its box is a lamp boxed by its glow: ROUND_MAX). Unknown either way.
   Until 2026-11-07 the lit third was the third holding the most lamp pixels and any other third with half its share was
   twoLit, and a lamp's glow made it two. On the 11-06 night drives 667 head reads gave no green and no
   colour on any head governing the car's lane (heads 36-86 px tall: not small; 32 reds, all on side heads 15-30 deg off
@@ -53,11 +51,19 @@ gates is a head, and its state is read (its reason the published Light.reason: r
   of a yellow ball and 25 of a green ball arrows, so a red arrow must never turn unknown on it alone (the sky in the
   lamp's third made most of the green and yellow balls' arrows: since 2026-11-07 15 of the green and 2 of the yellow
   reads there read their colour).
+Under LIGHT_READ_CONF, down to decoder.LIGHT_GREEN_CONF, a box within the governing bearing is read too (GREEN_LOW_MAX a
+frame) and is a head only on a run it reads green: at night the detector boxes a lit green lamp less surely than a red one,
+and a green can only let a stop go. A red or yellow there is never a head.
 The reader reads boxes down to decoder.LIGHT_READ_CONF, under the detector's MIN_CONF (route 29, 2026-11-08: a red read only
 at its line, its heads first boxed at MIN_CONF 40 m out and then not for 1.7 s; the full pass had them at 0.2-0.33 from about
-60 m), and a head from a box under MIN_CONF is published only once it reads a colour or holds a vote.
-A head's state is its vote: the colour most of its last VOTE_M reads read, once VOTE_N did (a frame it wasn't seen in
-counts as unknown), which also rides out LED flicker. A head governs the car's lane when its bearing lies within GOVERN_BEARING_DEG of the lane's (the
+60 m), and a head from a box under MIN_CONF is published only once it reads a colour or holds a vote. Every box it
+considered and did not publish (the gated ones with their gate, the ones under MIN_CONF that read no colour with their
+reason and detail) is kept from the last read (LightReader.rejects) and logged by modeld on that run's message
+(TurnpilotDetections.lightRejects), which nothing reads back: with the heads, an rlog alone shows every class-9 box down to
+decoder.LIGHT_GREEN_CONF, its confidence and why it is no head.
+A head's state is its vote: the colour most of its last VOTE_M sightings read, none older than VOTE_S, once VOTE_N did
+(counted in sightings and seconds, never in runs: the same vote at any run rate), which also rides out LED flicker. A head
+governs the car's lane when its bearing lies within GOVERN_BEARING_DEG of the lane's (the
 driving model's path at the head's distance), and the governing state is what all governing heads with a state agree
 on, else unknown.
 
@@ -78,7 +84,7 @@ import numpy as np
 
 from openpilot.common.params import UnknownKeyName
 from openpilot.common.swaglog import cloudlog
-from openpilot.selfdrive.turnpilot.detector.decoder import MIN_CONF
+from openpilot.selfdrive.turnpilot.detector.decoder import LIGHT_READ_CONF, MIN_CONF
 from openpilot.selfdrive.turnpilot.scene.ranging import Lens, calib_from_view
 
 HEAD_MIN_H_PX = 24          # full-frame px
@@ -109,6 +115,13 @@ CORE_REL = 0.9              # a lamp's core: its pixels this bright of its brigh
 # are the real test of both
 STREAK_MAX = 2.5
 RUN_MAX_REL = 0.6
+# a red or green lamp's glow may fill its box where it is round: its lit rows no more than this many times its widest row
+# (at night the box is drawn round the glow alone). Route 29's video through the detector and this reader, every frame
+# keyed by its own timestamp: on the approach and stand at a red the driver then turned right on (two red balls, 16-35 m),
+# a governing red was voted on 7 of 175 runs without it and 75 with it; over the rest of the drive it changed 3 runs, each
+# on a lit red lamp. A lit pole is 4.2 and a lit bar 2.9 and more; a yellow that fills its box is still a streak (a warning
+# sign). Not measured by day
+ROUND_MAX = 1.6
 MIN_COLOR_PX = 3            # saturated pixels in the lit lamp to read a colour from
 COLOR_SHARE = 0.6           # of them, this share in one hue range
 # green to 195, not 210: the sky is 195-216 and green lamps 166-181 (module docstring, noColor)
@@ -123,12 +136,21 @@ ARROW_MIN_PX = 10           # lamp pixels needed to judge the lamp's shape; fewe
 SYMMETRY_MIN = 0.6          # the lamp's mask against its mirror image about its own centre (IoU): a ball, not an arrow
 ASSUMED_HEAD_M = 5.5        # m, a head's centre over the road (MUTCD clearance 15-19 ft to its bottom)
 MAX_RANGE = 150.            # m, the farthest distance it says
-# a head's state is the colour most of its last VOTE_M reads read, once VOTE_N of them did (a tie is unknown). Two, not four: at
-# night a head is boxed in some runs only and forgotten after HEAD_DROP_S unseen, and four reads in five runs came 2.3 s after
-# the first red read of route 29's late red (16 m from its line then, at it by the vote), 0.8 s after the other's
+# a head's state is the colour most of its last VOTE_M sightings read, once VOTE_N of them did (a tie is unknown). Two, not
+# four: at night a head is boxed in some runs only, and four reads in five runs came 2.3 s after the first red read of route
+# 29's late red (16 m from its line then, at it by the vote), 0.8 s after the other's. Sightings, in seconds (VOTE_S): only
+# the runs that boxed the head count, none older than VOTE_S, so the vote is the same whatever the road camera's run rate is
+# (10 a second on the open road, 5 beside the wide camera near a signal, 3.3 at a crawl with none mapped near, 2 on route 29's
+# worst stand: five runs there spanned 2.5 s, a red read 2 s before still voting, and a head that missed one run was forgotten
+# and its vote with it), and a head boxed in every third run still votes (route 29's far reds and its greens at night were
+# read 0.5-0.6 s apart, never twice in five runs at 10 a second). A head seen in every run at 5 runs a second or more votes
+# as it did when the vote was counted in runs
 VOTE_M, VOTE_N = 5, 2
+# 1.5 s: on route 29's video at 3.3 runs a second and faster it voted a governing red in as many runs of every stand at a
+# red as the vote counted in runs did, or more; at 1.0 s it lost a few at 3.3 a second (71 of 108 against 73 at one stand)
+VOTE_S = 1.5
 MATCH_HEIGHTS = 1.5         # a read is the same head when its box centre is within this many box heights
-HEAD_DROP_S = 0.6           # a head not seen this long is forgotten
+HEAD_DROP_S = VOTE_S        # a head not seen this long is forgotten: its sightings are too old to vote
 # a head within this of the lane's bearing governs it. Kept at 10 after the 11-06 night, though every red it read was a side
 # head 15-30 deg off: at 1e 4:45-4:48 three right-side heads 16-25 deg off read red, 4-5 votes, as the car went through at
 # 10.5 m/s, its driver not braking (not the car's lights), so a wider gate would have braked it hard on a through road; at
@@ -136,6 +158,13 @@ HEAD_DROP_S = 0.6           # a head not seen this long is forgotten
 # to tell the two apart
 GOVERN_BEARING_DEG = 10.
 MAX_READ_HEADS = 8          # heads read a frame, the most confident first (decode_lights' order): the read's time stays bounded
+# boxes under LIGHT_READ_CONF read a frame at most (decoder.LIGHT_GREEN_CONF: they count only if they read green), and only
+# those within the governing bearing, which nothing but a governing head's green is read for: the read's time stays bounded.
+# Two: on the car's junction timings (detector/tests junction_drive: a 39 ms model, a 10.4 ms pass, 3.5 ms of lights) the
+# road pass keeps 5 runs a second standing at a signal and 9.8 approaching one with the light read up to 2 ms slower, and
+# falls to 3.3 and 5 at 3 ms; a head's read is about a millisecond. On route 29's video two read 31 of the 35 runs' greens
+# three did on its unread green approach
+GREEN_LOW_MAX = 2
 SAMPLE_S = 2.0              # s between a reader's logged samples (turnpilot.light_sample, module docstring)
 SAMPLE_HEADS = 2            # heads a sample carries at most: the governing first, then the unread, then the largest
 SAMPLE_MAX_PX = 96          # a sample's crop rows at most: a taller crop is subsampled by 2, 4 or 8
@@ -252,8 +281,9 @@ def symmetric(mask: np.ndarray) -> bool:
   return union > 0 and inter / union >= SYMMETRY_MIN
 
 
-def read_head(nv12: np.ndarray, stride: int, y_height: int, lens: Lens, rpy_calib, cam_height: float, box) -> HeadRead:
-  """One class-9 box's read (module docstring). box: a decode() row, x0 y0 x1 y1 in full-frame pixels."""
+def head_place(lens: Lens, rpy_calib, cam_height: float, box) -> tuple[float, float, float]:
+  """(deg its bottom edge lies above the calibrated horizon, bearing deg left of the forward axis, m to the head from its
+  centre's elevation and ASSUMED_HEAD_M) of a class-9 box: no pixel is read."""
   x0, y0, x1, y1 = (float(b) for b in box[:4])
   rot = calib_from_view(rpy_calib)
   def angles(u, v):
@@ -263,6 +293,13 @@ def read_head(nv12: np.ndarray, stride: int, y_height: int, lens: Lens, rpy_cali
   centre_elev, _ = angles((x0 + x1) / 2, (y0 + y1) / 2)
   rise = max(ASSUMED_HEAD_M - cam_height, 0.5)
   distance = min(rise / math.tan(math.radians(centre_elev)), MAX_RANGE) if centre_elev > 0. else MAX_RANGE
+  return bottom_elev, bearing, distance
+
+
+def read_head(nv12: np.ndarray, stride: int, y_height: int, lens: Lens, rpy_calib, cam_height: float, box) -> HeadRead:
+  """One class-9 box's read (module docstring). box: a decode() row, x0 y0 x1 y1 in full-frame pixels."""
+  x0, y0, x1, y1 = (float(b) for b in box[:4])
+  bottom_elev, bearing, distance = head_place(lens, rpy_calib, cam_height, box)
   out = HeadRead('unknown', 'read', bearing=bearing, distance=distance)
   bw, bh = x1 - x0, y1 - y0
   if max(bh, bw) < HEAD_MIN_H_PX:
@@ -304,13 +341,15 @@ def read_head(nv12: np.ndarray, stride: int, y_height: int, lens: Lens, rpy_cali
   if any(r[2] >= max(LIT_FRAC_MIN * third_px, SECOND_LIT_REL * n) for r in runs if r[0] != r0):
     out.reason = 'twoLit'
     return out
-  # the whole run against the box (a glow's tail is the lamp's, and never past RUN_MAX_REL of a head), its core against its
-  # widest row (a lamp's face is round however far its glow trails; a lit pole is its core end to end): STREAK_MAX, above
-  if r1 - r0 + 1 > RUN_MAX_REL * h or core_rows > STREAK_MAX * widest:
-    out.reason = 'streak'
-    return out
+  # the whole run against the box (a glow's tail is the lamp's, and never past RUN_MAX_REL of a head, unless it is a round
+  # red or green glow: ROUND_MAX), its core against its widest row (a lamp's face is round however far its glow trails; a
+  # lit pole is its core end to end): STREAK_MAX, above
   out.detail += " hue " + " ".join(f"{k[0]}{v}" for k, v in hue_counts(hue[rows, inner]).items())
   color = hue_color(hue[rows, inner])
+  round_glow = color in ('red', 'green') and r1 - r0 + 1 <= ROUND_MAX * widest  # the box drawn round the glow alone
+  if core_rows > STREAK_MAX * widest or (r1 - r0 + 1 > RUN_MAX_REL * h and not round_glow):
+    out.reason = 'streak'
+    return out
   if color is None:
     out.reason = 'noColor'
     return out
@@ -334,17 +373,21 @@ class Head:
   id: int
   box: tuple                 # normalized x0 y0 x1 y1
   t: float
-  reads: deque = field(default_factory=lambda: deque(maxlen=VOTE_M))
+  reads: deque = field(default_factory=lambda: deque(maxlen=VOTE_M))  # (frame time, state) of its last sightings
+
+  def counts(self) -> Counter:
+    """Its sightings that vote: the last VOTE_M, none older than VOTE_S at its last one."""
+    return Counter(state for t, state in self.reads if self.t - t <= VOTE_S + 1e-6)
 
   @property
   def state(self) -> str:
-    counts = Counter(self.reads)
+    counts = self.counts()
     first, second = sorted((counts[s] for s in STATES), reverse=True)[:2]
     return max(STATES, key=lambda s: counts[s]) if first >= VOTE_N and first > second else 'unknown'
 
   @property
   def votes(self) -> int:
-    counts = Counter(self.reads)
+    counts = self.counts()
     return max((counts[s] for s in STATES), default=0)
 
 
@@ -353,15 +396,13 @@ def centre(box) -> tuple[float, float]:
 
 
 class HeadVoter:
-  """Heads across frames by box centre, each with its last VOTE_M reads."""
+  """Heads across frames by box centre, each with its last VOTE_M sightings and their times."""
   def __init__(self):
     self.heads: list[Head] = []
     self.next_id = 0
 
   def update(self, t: float, reads: list) -> list[Head]:
     """reads: (normalized box, state) of this frame's heads. Returns the heads seen this frame, in reads' order."""
-    for hd in self.heads:
-      hd.reads.append('unknown')  # replaced below when it is seen
     pairs = []
     for i, (box, _) in enumerate(reads):
       cx, cy = centre(box)
@@ -385,11 +426,9 @@ class HeadVoter:
         self.next_id += 1
         self.heads.append(hd)
         out[i] = hd
-      else:
-        hd.reads.pop()  # this frame's placeholder
       hd.box, hd.t = tuple(box), t
-      hd.reads.append(state)
-    self.heads = [hd for hd in self.heads if t - hd.t <= HEAD_DROP_S]
+      hd.reads.append((t, state))
+    self.heads = [hd for hd in self.heads if t - hd.t <= HEAD_DROP_S + 1e-6]
     return [out[i] for i in range(len(reads))]
 
 
@@ -444,6 +483,9 @@ class LightReader:
     self.head_counts: Counter = Counter()
     self.colour_counts: Counter = Counter()
     self.sample_t: float | None = None  # the last sample's frame time (None: none yet)
+    # the last read's boxes that were not published as heads, for the log alone (TurnpilotDetections.lightRejects): the
+    # gated ones (reason small, belowHorizon, overCap) and those under MIN_CONF that read no colour and hold no vote
+    self.rejects: list[LightHead] = []
 
   def boxes_seen(self) -> bool:
     """Whether a class-9 box has come in since the last take_counts()."""
@@ -458,37 +500,55 @@ class LightReader:
   def read(self, t: float, nv12: np.ndarray, stride: int, y_height: int, rpy_calib, cam_height: float, boxes,
            path=None) -> list[LightHead]:
     """boxes: decode_lights() rows; path: (x, y left) of the lane ahead (tracker.predicted_path), None for straight."""
-    reads = []
+    reads, rejects, low_read = [], [], 0
+
+    def lane_bearing(distance: float) -> float:
+      return math.degrees(math.atan2(float(np.interp(distance, path[0], path[1])), distance)) if path is not None else 0.
     self.frames += 1
     for box in boxes:
+      norm = (float(box[0]) / self.lens.width, float(box[1]) / self.lens.height, float(box[2]) / self.lens.width,
+              float(box[3]) / self.lens.height)
+      low = float(box[4]) < LIGHT_READ_CONF
+      if low:
+        # under LIGHT_READ_CONF (down to decoder.LIGHT_GREEN_CONF) a box counts only if it reads green: read only within
+        # the governing bearing and at most GREEN_LOW_MAX a frame, the rest left unread (lowConf)
+        _, bearing, distance = head_place(self.lens, rpy_calib, cam_height, box)
+        if low_read >= GREEN_LOW_MAX or abs(bearing - lane_bearing(distance)) > GOVERN_BEARING_DEG:
+          rejects.append(LightHead(-1, norm, float(box[4]), 'unknown', 0, 'unknown', 'lowConf', bearing, distance, False))
+          continue
+        low_read += 1
       if len(reads) >= MAX_READ_HEADS:
         self.gate_counts['overCap'] += 1
+        rejects.append(LightHead(-1, norm, float(box[4]), 'unknown', 0, 'unknown', 'overCap', 0., 0., False))
         continue
       r = read_head(nv12, stride, y_height, self.lens, rpy_calib, cam_height, box)
       if r.gated:
         self.gate_counts[r.reason] += 1
+        rejects.append(LightHead(-1, norm, float(box[4]), 'unknown', 0, 'unknown', r.reason, r.bearing, r.distance, False))
+        continue
+      if low and r.state != 'green':
+        # no head: what it read is kept for the log (a red or yellow read under LIGHT_READ_CONF says lowConf)
+        rejects.append(LightHead(-1, norm, float(box[4]), 'unknown', 0, r.state, r.reason if r.state == 'unknown' else 'lowConf',
+                                 r.bearing, r.distance, False, r.detail))
         continue
       self.head_counts[r.reason] += 1
       if r.state != 'unknown':
         self.colour_counts[r.state] += 1
-      norm = (float(box[0]) / self.lens.width, float(box[1]) / self.lens.height, float(box[2]) / self.lens.width,
-              float(box[3]) / self.lens.height)
       reads.append((norm, float(box[4]), r))
     heads = self.voter.update(t, [(norm, r.state) for norm, _, r in reads])
     out = []
     for hd, (norm, conf, r) in zip(heads, reads, strict=True):
-      lane = 0.
-      if path is not None:
-        xs, ys = path
-        lane = math.degrees(math.atan2(float(np.interp(r.distance, xs, ys)), r.distance))
       out.append(LightHead(hd.id, norm, conf, hd.state, hd.votes, r.state, r.reason, r.bearing, r.distance,
-                           abs(r.bearing - lane) <= GOVERN_BEARING_DEG, r.detail))
+                           abs(r.bearing - lane_bearing(r.distance)) <= GOVERN_BEARING_DEG, r.detail))
     if out and (self.sample_t is None or not 0. <= t - self.sample_t < SAMPLE_S):
       self.sample_t = t
       self.sample(t, nv12, stride, y_height, out)
     # a box under the detector's MIN_CONF (decoder.LIGHT_READ_CONF, read for an earlier red) is a head only once it reads a
-    # colour or holds a vote: the boxes that read no lamp stay unpublished, as before, so nothing downstream counts them as heads
-    return [h for h in out if h.conf >= MIN_CONF or h.read != 'unknown' or h.state != 'unknown']
+    # colour or holds a vote: the boxes that read no lamp stay unpublished, as before, so nothing downstream counts them as
+    # heads; they and the gated boxes are kept for the log (rejects)
+    published = [h for h in out if h.conf >= MIN_CONF or h.read != 'unknown' or h.state != 'unknown']
+    self.rejects = rejects + [h for h in out if not (h.conf >= MIN_CONF or h.read != 'unknown' or h.state != 'unknown')]
+    return published
 
   def sample(self, t: float, nv12: np.ndarray, stride: int, y_height: int, heads: list[LightHead]) -> None:
     """Log up to SAMPLE_HEADS of this frame's heads, the governing first, then the unread, then the tallest: each one's read,

@@ -646,6 +646,12 @@ struct TurnpilotDetections @0xaedffd8f31e7b55d {
                      # no room beside the driving model (logged once)
   }
   nativeStatus @19 :NativeStatus;
+  # For the log alone (nothing reads it back): the class-9 boxes the light reader considered on this road run, down to
+  # decoder.LIGHT_GREEN_CONF, and did not publish in lights: its gated boxes (reason small, belowHorizon, overCap), those under
+  # LIGHT_READ_CONF that are outside the governing bearing or read no green (lowConf, or their read's reason) and those
+  # under MIN_CONF that read no colour (reason dark, aspect, streak, ...; instance their read's detail). lights and
+  # lightRejects together are every box the reader was given; lightBoxes stays the MIN_CONF boxes its consumers read
+  lightRejects @20 :List(TurnpilotLights.Light);
 }
 
 struct TurnpilotScene @0xf35cc4560bbf6ec2 {

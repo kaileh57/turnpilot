@@ -2,8 +2,8 @@
 lane paint and lights) through straight road, a moved aim, a curve on the wide camera (the odd paint read) and a right turn,
 every message it sends (turnpilotDetections and turnpilotFarDetections) as canonical JSON with the measured times zeroed. The
 hashes in test_native_detect.py are this on 263065a, before the native schedule; nativeStatus, a field since, is checked
-there and left out here only when off (its default), and the lights' reason and read (11-06) always, so the off path's
-messages are today's to the field.
+there and left out here only when off (its default), lightRejects (the light reader's unpublished boxes, logged only) only
+when empty (its default), and the lights' reason and read (11-06) always, so the off path's messages are today's to the field.
 
   PYTHONPATH=<tree>:<opendbc_repo> python -m openpilot.selfdrive.turnpilot.detector.tests.native_golden
 """
@@ -21,7 +21,7 @@ NEW_FIELDS = ('reason', 'read')  # TurnpilotLights.Light, 2026-11-06: each head'
 def canonical(obj):
   if isinstance(obj, dict):
     return {k: (0 if k in TIME_FIELDS else canonical(v)) for k, v in obj.items()
-            if not (k == 'nativeStatus' and v == 'off') and k not in NEW_FIELDS}
+            if not (k == 'nativeStatus' and v == 'off') and not (k == 'lightRejects' and v == []) and k not in NEW_FIELDS}
   if isinstance(obj, list):
     return [canonical(v) for v in obj]
   if isinstance(obj, bytes):

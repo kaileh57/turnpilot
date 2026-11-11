@@ -59,7 +59,9 @@ means all of
   there, and nothing tells right-hand Europe (white center lines too) from the US.
 Before the paint, a change toward the curb before a junction turn put the car in a parking strip (BeamNG, 2026-10-27).
 
-How a change goes (LanePlanner): once the same change is wanted for LC_CONFIRM_FRAMES, the driver is warned LC_WARN_S
+How a change goes (LanePlanner): once the same change is wanted for LC_CONFIRM_FRAMES (LC_BAY_CONFIRM_FRAMES for the one
+change into a turn lane the lane list names, bay_named, late in its window, whose window also ends later:
+lane_change_window's bay; a bay never entered by that end is still LC-03's to skip), the driver is warned LC_WARN_S
 ahead: laneChangeOffer says the side (selfdrived raises turnpilotLaneChangeLeft/Right, a chime) and laneChangeCountdown the
 seconds left. On cars where openpilot can't signal (the Tesla: opendbc has no blinker command), the driver's stalk is the
 go-ahead, at any point in the countdown or after it until the window's end, the side's chime repeating (since 2026-11-08:
@@ -213,6 +215,14 @@ LC_END_S, LC_END_MIN_M, LC_END_MAX_M = 4.5, 35., 100.
 LC_EXTRA_LANE_S = 8.        # each change past the first starts this much earlier (an exit across a highway)
 LC_SPEED_MARGIN = 0.5       # m/s above DesireHelper's minimum, so a request never waits below it
 LC_CONFIRM_FRAMES = 10      # the same need this many frames in a row before the warning
+# the one change into a turn lane the map's lane list names (bay_named), the owner's ruling for late, short bays: offered on
+# this many passing frames once the full count and the offer's room no longer fit before its window's end, and that
+# window open down to the distance the change still completes in at the car's speed
+# (LC_CHANGE_S of travel), never under LC_BAY_END_MIN_M and never past the general end. Route 29, 239-241 s: a left's bay
+# line first read white 42.0 m out at 7 m/s, the model seeing room beyond it on half the frames; the tenth passing frame
+# came at 35.3 m and the window ended at 35 m, the fifth came at 38.8 m. The driver crossed that line 40-25 m out
+LC_BAY_CONFIRM_FRAMES = 5   # ...two or more of them frames whose paint was read (PAINT_CARRY_S carries one read five frames)
+LC_BAY_END_MIN_M = 15.
 LC_WARN_S = 3.              # the warning (chime, countdown) comes this long before the change may go
 # after the countdown the driver's signal is waited for, the side's chime on repeat (hooks: "Signal LEFT Now"), until the
 # window's end (tooLate, then LC-03): no clock of its own. Route 29 (2026-11-08, 187-198 s): 8 s here aborted a change noSignal
@@ -456,6 +466,7 @@ def lane_mismatch(maneuver, distance: float, through_lanes: tuple, through_dista
     return LaneMismatch.none
   near = lane_change_window(v_ego)[1]
   turn = maneuver is not None and maneuver.kind == TURN
+  near_turn = near
   if len(through_lanes) >= 2 and 0. < through_distance < near and not (turn and distance < through_distance):
     idx = ego_lane_index(len(through_lanes), lanes, right_hand_traffic)
     directions, active = through_lanes[idx] if idx is not None else ((), True)
@@ -464,7 +475,10 @@ def lane_mismatch(maneuver, distance: float, through_lanes: tuple, through_dista
   if turn and len(maneuver.lanes) >= 2 and 0. < distance < near and not _bay_waits(maneuver, right_hand_traffic, paint, bay_shut):
     idx = ego_lane_index(len(maneuver.lanes), lanes, right_hand_traffic)
     directions, active = maneuver.lanes[idx] if idx is not None else ((), True)
-    if not active and not any(d in SIDE_DIRECTIONS[maneuver.side] for d in directions):
+    marked = _marked_lanes(maneuver, maneuver.lanes)
+    if idx is not None and marked and min(abs(idx - i) for i in marked) == 1:
+      near_turn = lane_change_window(v_ego, bay=True)[1]  # one lane from a named turn lane: the planner still changes to here
+    if distance < near_turn and not active and not any(d in SIDE_DIRECTIONS[maneuver.side] for d in directions):
       return LaneMismatch.wrongLaneForTurn
   return LaneMismatch.none
 
@@ -804,20 +818,26 @@ def lane_changes_needed(maneuver, lanes: ModelLanes, right_hand_traffic: bool = 
   return need
 
 
-def lane_change_window(v_ego: float, changes: int = 1, room_s: float | None = None) -> tuple[float, float]:
+def lane_change_window(v_ego: float, changes: int = 1, room_s: float | None = None, bay: bool = False) -> tuple[float, float]:
   """(start, end) m before the maneuver, for this many lane changes still to make. room_s: the offer's room (offer_room_s:
   the warning, or where the car signals the lamp's legal lead, and DesireHelper's start), and the window opens early enough
   for the first change to be confirmed, offered, started and made with LC_SPARE_S to spare by its end, each one after it
   LC_EXTRA_LANE_S on: the car in the lane before the end, not just under way at it. Never past LC_START_MAX_M (and the
   extra lanes), so a highway's window is as it was. The lamp's 300 ft took most of a city window (at 18 mph the offer at
   181 m, the request at 84 m, in the turn lane 50 m out), and a second change none was left for: the first drive's car
-  into its turn lane only at the light. A driver's warning (LC_OFFER_ROOM_S) fits the windows as they were at every speed."""
+  into its turn lane only at the light. A driver's warning (LC_OFFER_ROOM_S) fits the windows as they were at every speed.
+
+  bay: the change is the one into a named turn bay (bay_named; LanePlanner's late). Its end is where a change started there
+  is still made before the maneuver at this speed, LC_CHANGE_S of travel, no nearer than LC_BAY_END_MIN_M and never before
+  the general end (from 7 m/s up the two are the same); the start is the general window's."""
   extra = max(changes - 1, 0) * LC_EXTRA_LANE_S * v_ego
   start = min(max(LC_START_S * v_ego, LC_START_MIN_M), LC_START_MAX_M) + extra
   end = min(max(LC_END_S * v_ego, LC_END_MIN_M), LC_END_MAX_M)
   if room_s is not None:
     made = end + v_ego * (LC_CONFIRM_FRAMES * DT_MDL + room_s + LC_CHANGE_S + LC_SPARE_S) + extra
     start = max(start, min(made, LC_START_MAX_M + extra))
+  if bay:
+    end = min(end, max(LC_CHANGE_S * v_ego, LC_BAY_END_MIN_M))
   return start, end
 
 
@@ -827,11 +847,12 @@ def slow_zone(v_ego: float) -> float:
 
 
 def stop_window(v_ego: float, distance: float, stop_d: float | None, changes: int = 1,
-                room_s: float = LC_OFFER_ROOM_S) -> tuple[float, float, str]:
+                room_s: float = LC_OFFER_ROOM_S, bay: bool = False) -> tuple[float, float, str]:
   """(start, end, wait) of the lane change window for this many changes with a map stop stop_d m ahead (module docstring),
   the maneuver distance m ahead. wait: '' (offer in the window), 'afterStop' or 'unreachable'. A stop past the maneuver, or
-  one before the window at the change's speed (the car is up to speed again by its start), changes nothing."""
-  start, end = lane_change_window(v_ego, changes, room_s)
+  one before the window at the change's speed (the car is up to speed again by its start), changes nothing. bay: as
+  lane_change_window's, the end without a stop in the way."""
+  start, end = lane_change_window(v_ego, changes, room_s, bay)
   if stop_d is None or not 0. <= stop_d < distance:
     return start, end, ''
   before = distance - stop_d  # m before the maneuver the stop is
@@ -1205,6 +1226,7 @@ class LanePlanner:
     self._abort_t = 0.
     self._candidate = LaneChange.none
     self._confirm = 0
+    self._confirm_reads = 0           # ...frames of that count whose paint was read on the frame itself, not carried
     self._wait_t = 0.
     self._pre_t = 0.
     self._unsure_t = 0.               # s an offer has waited on the line read short of broken white since its last frame read it
@@ -1222,6 +1244,7 @@ class LanePlanner:
                                       # change (LC-03's placement without a lane list)
     self._room_seen = 0               # ...frames in a row it was there by the room beyond broken white only (lanes_toward)
     self._judged_id = UNJUDGED        # the maneuver whose window's end LC-03 judged
+    self._late_id = UNJUDGED          # the maneuver a change into a named bay was wanted for on a frame: its window's late end
     self._blocked = False             # ...and its verdict, held for it: LaneDecision.blocked
     self._last_wait = 'none'          # the last decision's wait (LC-03's log: what held the change)
     self._hold = 'none'               # under the switch, the offer held for the blind spot ('blindspot') or its release counting
@@ -1276,6 +1299,7 @@ class LanePlanner:
         self.abort = 'none'
     if maneuver_id != self._done_id:  # a new maneuver: its changes are counted from here
       self._done_id, self.done, self._start = maneuver_id, 0, None
+      self._late_id = UNJUDGED
       self._lane_seen = self._curb_marked = self._parked = self._lane_painted = False
       self._room_seen = 0
       self.bay.reset()
@@ -1326,6 +1350,7 @@ class LanePlanner:
     counted = read and (counted.left >= 1 and lanes.left_known if far == LEFT else counted.right >= 1 and lanes.right_known) and \
       not self.marks.marked[1 if far == LEFT else 2]
     self.bay.update(far_bay(maneuver, right_hand_traffic), raw, 1 if far == LEFT else 2, counted, dt, changing)
+    fresh = read  # this frame's own read, not the last one carried
     if not read and not changing and self._read_age <= PAINT_CARRY_S + 1e-6:
       # between two reads: the change is judged on the last one, the holds as they stand. The holds, the marks and the bay's
       # latch count reads, so they took only this frame's own, above
@@ -1370,13 +1395,22 @@ class LanePlanner:
     wanted = desired_changes(maneuver, lanes, right_hand_traffic, paint, self.done, self._start, self.bay.shut)
     want = wanted if fast else 0
     room = offer_room_s(v_ego, lead_m if not driver_signals else None)
-    start, end = lane_change_window(v_ego, abs(wanted), room)
+    # the change lands in a lane the list marks for the turn: it may cross a line read solid white (change_blocker's bay), is
+    # offered on LC_BAY_CONFIRM_FRAMES and has the window's late end (lane_change_window's bay)
+    bay = bay_named(maneuver, wanted)
+    if bay:
+      self._late_id = maneuver_id
+    # ...the late end kept for the maneuver over frames that want no change: LC-03 judges once, on the first frame inside
+    # the end, and a frame of the model's count dropping the want between the general end and the bay's would judge the
+    # turn not blocked for good. A frame wanting two changes has the general end, and is judged there
+    late = bay or (wanted == 0 and maneuver is not None and self._late_id == maneuver_id)
+    start, end = lane_change_window(v_ego, abs(wanted), room, late)
     if len(paint) == 4 and 0. < distance < start:  # 4.10: a curb-side line read solid or yellow is never less than paint
       ego = paint[2 if right_hand_traffic else 1]
       self._curb_marked = self._curb_marked or _yellow(ego) or (ego.kind == 'solid' and ego.confidence >= SOLID_WHITE_CONF_MIN)
     # a curb-side change on less than paint (curb_lane_unpainted), only on paint read this frame
     unpainted = self.always_drive and not self._curb_marked and read
-    win_start, win_end, stop_wait = stop_window(v_ego, distance, stop_d, abs(wanted), room)
+    win_start, win_end, stop_wait = stop_window(v_ego, distance, stop_d, abs(wanted), room, late)
     self._want = wanted
     want_dir = LEFT if want > 0 else RIGHT if want < 0 else 0
     if _toward(LEFT if wanted > 0 else RIGHT if wanted < 0 else 0) != self._carry or distance <= win_end or \
@@ -1407,8 +1441,6 @@ class LanePlanner:
     # lane_agreed only on paint read this frame, as curb_lane_unpainted: the yellow hold pads a frame nobody read to four lines,
     # the held one yellow and the rest unknown, and a held far-left yellow (its sign) or the list agreed every such frame
     unread_ok, cleared = self._unread_ok(wanted_dir, right_hand_traffic) and read, self._cleared(wanted_dir)
-    # the change lands in a lane the list marks for the turn: it may cross a line read solid white (change_blocker's bay)
-    bay = bay_named(maneuver, wanted)
     blocker = change_blocker(wanted_dir, lanes, paint, objects, right_hand_traffic, wanted_room, unpainted, unread_ok, cleared, bay) \
       if wanted_dir else ''
     held_only = self._held_only(wanted_dir, blocker, lanes, own, objects, right_hand_traffic, wanted_room, unpainted, unread_ok, cleared,
@@ -1501,19 +1533,29 @@ class LanePlanner:
     # LC_CONFIRM_FRAMES frames that pass by their own read, nothing read against it between them
     held_only = (held_only or soft) and direction != LaneChange.none
     if not held_only:
+      if direction != self._candidate or self._confirm == 0:
+        self._confirm_reads = 0  # the count starts over: its reads too
       self._confirm = self._confirm + 1 if direction == self._candidate else 1
+      self._confirm_reads += int(fresh and direction != LaneChange.none)
       self._soft_t = 0.
     else:
       self._soft_t += dt
       if direction != self._candidate or self._soft_t >= LC_UNSURE_MAX_S - 1e-6:
-        self._confirm = 0
+        self._confirm = self._confirm_reads = 0
     self._candidate = direction
     # review 2026-11-07 (LC-4): such a frame's wait is its blocker (lineNotBroken, noLane), not one turnpilotd counts as a
     # change pending, so the wait alternated with 'confirming' frame to frame and the turn's prompt to signal flickered (1d
     # 576.65-577.45 s, a left 119-110 m out: every 50-400 ms), its chime cut to a blip, and a lamp lit for it was taken as the
     # change's go-ahead at the offer's first frame (WARN's rule, D15's case). The count live, the change is pending
     self.confirm_live = held_only and self._confirm > 0
-    if direction == LaneChange.none or self._confirm < LC_CONFIRM_FRAMES:
+    # a named bay's shorter count, where the full count and the offer's room no longer fit before the window's end (a late
+    # bay). With room to spare the full count stands: an offer made sooner is up for more frames that can end it, and on drive
+    # 1d's bay (576-580 s, 113 m out at 11 m/s) one made five frames sooner was aborted by one frame of the model's road edge
+    # (noLane), its cooldown outlasting the approach. The shorter count spans two paint reads or more, as the full one always
+    # does: one read carried PAINT_CARRY_S passes five frames by itself, and is never an offer
+    short = bay and distance - end < v_ego * (LC_CONFIRM_FRAMES * DT_MDL + room) and \
+      self._confirm >= LC_BAY_CONFIRM_FRAMES and self._confirm_reads >= 2
+    if direction == LaneChange.none or (self._confirm < LC_CONFIRM_FRAMES and not short):
       return self._decision(idle_reason)
     if left_blindspot if want_dir == LEFT else right_blindspot:
       self._wait = 'blindspot'

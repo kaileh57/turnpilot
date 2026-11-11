@@ -6,7 +6,8 @@ import numpy as np
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.selfdrive.turnpilot.detector import light_state
 from openpilot.selfdrive.turnpilot.detector.light_state import GOVERN_BEARING_DEG, HEAD_MIN_H_PX, LIT_FRAC_MIN, MAX_READ_HEADS, \
-  MIN_ELEVATION_DEG, RUN_MAX_REL, SAMPLE_HEADS, SAMPLE_MAX_PX, SAMPLE_S, SECOND_LIT_REL, STREAK_MAX, VOTE_M, VOTE_N, HeadVoter, \
+  MIN_ELEVATION_DEG, ROUND_MAX, RUN_MAX_REL, SAMPLE_HEADS, SAMPLE_MAX_PX, SAMPLE_S, SECOND_LIT_REL, STREAK_MAX, VOTE_M, VOTE_N, VOTE_S, \
+  HEAD_DROP_S, HeadVoter, \
   LightReader, hue_color, lamp_pixels, lamp_runs, read_head
 from openpilot.selfdrive.turnpilot.scene.ranging import Lens
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
@@ -226,23 +227,25 @@ class TestNightLamps(OpenpilotTestCase):
     assert (r.state, r.reason) == ('unknown', 'twoLit'), r
     assert read([head([0, 1], 'red', h=60)])[0].reason == 'twoLit'  # adjacent lamps by day: the housing between them
 
-  def test_a_glow_with_no_head_around_it_is_unknown(self):
-    # a box drawn round the glow alone (the housing unseen, its top and bottom guessed), the glow most of it: no red or
-    # green is read there (a streak)
+  def test_a_glow_with_no_head_around_it_reads_its_hue(self):
+    # a box drawn round the glow alone (the housing unseen, its top and bottom guessed), the round glow most of it: its red
+    # or green is the hue's (ROUND_MAX)
     for color in ('red', 'green'):
       _, r = night_read([(672, self.at(0.5), color)], self.BOX, r=8., up=8., side=4., down=10.)
-      assert r.state == 'unknown', (color, r)
+      assert (r.state, r.reason) == (color, 'read'), (color, r)
 
-  def test_a_glow_filling_its_box_is_a_streak_however_round(self):
-    # something lit that fills its box is no lamp, a round red or green one too: read as one (for a red ball 22 m out that
-    # glowed 0.62 of its box), it made a governing red on 210 of 561 frames of route 29's approach to a green
+  def test_a_round_red_or_green_glow_filling_its_box_is_its_lamp(self):
+    # at night the box is drawn round the lamp's glow alone, and the glow fills it. Route 29's video through the detector and
+    # the reader, each frame at its own timestamp: at a red the car approached and stood at (two red balls, 16-35 m), a
+    # governing red was voted on 7 of 175 runs with every such glow a streak and on 75 with a round one read (ROUND_MAX).
+    # A yellow that fills its box stays a streak (a warning sign), and so does anything long (a lit pole, a bar)
     box = (660, 202, 688, 242)
     for color in ('red', 'green', 'yellow'):
       frame, r = night_read([(674., 220., color)], box, r=7., up=8., side=5., down=12.)
       runs, widest = lit_run(frame, box)
       r0, r1 = max(runs, key=lambda x: x[2])[:2]
-      assert RUN_MAX_REL * 40 < r1 - r0 + 1 <= 1.6 * widest  # round, and most of its box
-      assert (r.state, r.reason) == ('unknown', 'streak'), (color, r)
+      assert RUN_MAX_REL * 40 < r1 - r0 + 1 <= ROUND_MAX * widest  # round, and most of its box
+      assert (r.state, r.reason) == (('unknown', 'streak') if color == 'yellow' else (color, 'read')), (color, r)
     _, r = night_read([(668., 222., 'red')], (660, 200, 676, 250), r=3., up=18., side=1., down=22.)
     assert (r.state, r.reason) == ('unknown', 'streak'), r
 
@@ -425,6 +428,33 @@ class TestVote(OpenpilotTestCase):
     assert self.votes(['red', 'red', 'unknown', 'unknown', 'unknown'])[0].state == 'red'
     assert self.votes(['red', 'red', 'unknown', 'unknown', 'unknown', 'unknown'])[0].state == 'unknown'
 
+  def test_the_vote_is_counted_in_sightings_and_seconds_not_in_runs(self):
+    # the road camera's full pass runs 10 times a second on the open road and ran 2 at route 29's worst stand; the vote asks
+    # the same of a head at any rate: VOTE_N of its last VOTE_M sightings, none older than VOTE_S
+    box = (0.49, 0.25, 0.5, 0.3)
+
+    def run(sightings):
+      v, out = HeadVoter(), None
+      for t, s in sightings:
+        out = v.update(t, [(box, s)] if s is not None else [])
+      return out
+    assert VOTE_S == 1.5 and HEAD_DROP_S >= VOTE_S
+    # boxed in one run of five at 10 a second (route 29's far reds and night greens were read 0.5-0.6 s apart): two sightings
+    seen = [(0., 'red')] + [(0.1 * k, None) for k in range(1, 5)] + [(0.5, 'red')]
+    assert run(seen)[0].state == 'red'
+    # at 2 runs a second a red read 2 s ago is no vote now (five runs are 2 s)
+    slow = [(0., 'red'), (0.5, 'red'), (1.0, 'unknown'), (1.5, 'unknown'), (2.0, 'unknown')]
+    assert run(slow[:4])[0].state == 'red' and run(slow)[0].state == 'unknown'
+    assert run([(0., 'red'), (0.5, 'red'), (1.0, 'green'), (1.5, 'green'), (2.0, 'green')])[0].state == 'green'
+    # ...and a head that misses one of those runs is the same head, its sighting still voting
+    missed = run([(0., 'green'), (0.5, None), (1.0, 'green')])
+    assert missed[0].id == 0 and missed[0].state == 'green'
+    # every run at 5 a second or more: the last five sightings, as when the vote was counted in runs
+    for dt in (0.1, 0.2):
+      assert run([(k * dt, s) for k, s in enumerate(['red', 'red', 'green', 'green', 'green'])])[0].state == 'green'
+      assert run([(k * dt, s) for k, s in enumerate(['red', 'red', 'unknown', 'unknown', 'unknown'])])[0].state == 'red'
+      assert run([(k * dt, s) for k, s in enumerate(['red', 'red', 'unknown', 'unknown', 'unknown', 'unknown'])])[0].state == 'unknown'
+
   def test_heads_kept_apart_and_dropped(self):
     v = HeadVoter()
     a, b = (0.30, 0.25, 0.31, 0.3), (0.60, 0.25, 0.61, 0.3)
@@ -470,6 +500,56 @@ class TestReader(OpenpilotTestCase):
     frame, boxes = scene([head(0, 'red', y0=500)])  # well below the horizon
     assert reader.read(0., frame, STRIDE, Y_HEIGHT, LEVEL, 1.22, boxes) == []
     assert reader.gate_counts['belowHorizon'] == 1
+
+  def test_under_the_readers_floor_only_a_governing_green_is_a_head(self):
+    # route 29's video through the detector: where the car's light had turned green and went unread, its green lamps were
+    # boxed at 0.10-0.19 (109 of 123 boxes on one approach). Down to decoder.LIGHT_GREEN_CONF a box within the governing
+    # bearing is read and is a head on a run it reads green; a red or yellow there never is (a green can only let a stop
+    # go), one outside the governing bearing is not read at all, and at most GREEN_LOW_MAX of them are read a frame
+    from openpilot.selfdrive.turnpilot.detector.decoder import LIGHT_GREEN_CONF, LIGHT_READ_CONF
+    from openpilot.selfdrive.turnpilot.detector.light_state import GREEN_LOW_MAX
+    assert LIGHT_GREEN_CONF <= 0.12 < 0.15 < LIGHT_READ_CONF and GREEN_LOW_MAX == 2
+    reader = LightReader(LENS)
+    frame, boxes = scene([head(2, 'green'), head(0, 'red', x0=620), head(None, 'red', x0=700), head(2, 'green', x0=1250)])
+    boxes[:, 4] = [0.15, 0.15, 0.12, 0.15]
+    for i in range(VOTE_N):
+      out = reader.read(i * 0.1, frame, STRIDE, Y_HEIGHT, LEVEL, 1.22, boxes)
+    assert [(round(h.conf, 2), h.state, h.read, h.governs) for h in out] == [(0.15, 'green', 'green', True)]
+    # the low red is read and is no head; the dark box, a third low one in the governing bearing, and the green outside it
+    # are not read at all
+    assert sorted((round(h.conf, 2), h.read, h.reason, h.detail != '') for h in reader.rejects) == \
+      [(0.12, 'unknown', 'lowConf', False), (0.15, 'red', 'lowConf', True), (0.15, 'unknown', 'lowConf', False)]
+    assert reader.colour_counts == {'green': VOTE_N}  # the low red is counted nowhere: never a read head
+    # the same red at the reader's own floor is a head, as before
+    boxes[1, 4] = LIGHT_READ_CONF
+    assert sorted(h.read for h in reader.read(1., frame, STRIDE, Y_HEIGHT, LEVEL, 1.22, boxes)) == ['green', 'red']
+    # at most GREEN_LOW_MAX low boxes are read a frame, the most confident first
+    frame, boxes = scene([head(2, 'green', x0=560 + 40 * i) for i in range(GREEN_LOW_MAX + 2)])
+    boxes[:, 4] = 0.15
+    assert len(reader.read(2., frame, STRIDE, Y_HEIGHT, LEVEL, 1.22, boxes)) == GREEN_LOW_MAX
+    assert [h.reason for h in reader.rejects] == ['lowConf'] * 2
+
+  def test_every_box_not_published_is_kept_for_the_log_with_its_reason(self):
+    # the next drive's rlog must show every class-9 box the reader was given down to LIGHT_READ_CONF: the published heads
+    # are unchanged, and what was not published (a gate's box, a box under MIN_CONF over no lamp, a box past the cap) is
+    # kept from the last read with its confidence and why (modeld logs it: TurnpilotDetections.lightRejects)
+    reader = LightReader(LENS)
+    frame, boxes = scene([head(0, 'red'), head(None, 'red', x0=900), head(0, 'red', x0=300, y0=500), head(0, 'red', x0=1100, w=6, h=18)])
+    boxes[:, 4] = [0.4, 0.25, 0.3, 0.22]
+    out = reader.read(0., frame, STRIDE, Y_HEIGHT, LEVEL, 1.22, boxes)
+    assert [(round(h.conf, 2), h.read, h.reason) for h in out] == [(0.4, 'red', 'read')]
+    assert sorted((round(h.conf, 2), h.read, h.reason) for h in reader.rejects) == \
+      [(0.22, 'unknown', 'small'), (0.25, 'unknown', 'dark'), (0.3, 'unknown', 'belowHorizon')]
+    dark = next(h for h in reader.rejects if h.reason == 'dark')
+    assert dark.detail.startswith('h42 fr') and dark.id >= 0 and abs(dark.box[0] - 900 / W) < 1e-6
+    assert all(h.id == -1 and h.distance > 0. for h in reader.rejects if h.reason != 'dark')  # a gate's box is no head
+    # the last read's only: a frame with every box published keeps none
+    frame, boxes = scene([head(0, 'red')])
+    reader.read(0.1, frame, STRIDE, Y_HEIGHT, LEVEL, 1.22, boxes)
+    assert reader.rejects == []
+    frame, boxes = scene([head(0, 'red', x0=100 + 60 * i) for i in range(MAX_READ_HEADS + 2)])
+    assert len(reader.read(0.2, frame, STRIDE, Y_HEIGHT, LEVEL, 1.22, boxes)) == MAX_READ_HEADS
+    assert [h.reason for h in reader.rejects] == ['overCap'] * 2
 
   def test_the_funnel_is_counted_and_taken(self):
     # modeld logs the reader's funnel once a minute (modeld_detector.log_light_gates): the frames read, the boxes the gates

@@ -1356,6 +1356,27 @@ def test_auto_left_go_releases_the_latch_with_the_car_stopped():
   assert not dec.should_stop and not any(s.should_stop for s in out.stops)
 
 
+def test_auto_left_go_given_on_the_roll_up_lets_its_stop_go_before_the_latch_ever_held():
+  # the left's go while the car still rolls up to its line (unprotected_left's rolling go): read only by the held latch, the
+  # stop stayed in the plan and its cap fell to 0 at the line. It is let go where it is, cause gap, and never comes back
+  car = left_car()
+  out, dec = car.run_until(lambda out, dec: out.stops and car.v < 8., left=left_cmd())
+  assert car.policy.turn is not None and not car.policy.turn.held and car.v > 2.
+  key = car.policy.turn.key
+  out, dec, _ = car.step(left=left_cmd(go=True))
+  st = car.policy.turn.state
+  assert not out.stops and not out.released_stopped and st.done == 'released' and st.cause == 'gap' and car.policy.held is None
+  for _ in range(int(6. / DT_MDL)):
+    out, dec, _ = car.step(left=left_cmd())
+    assert not out.stops and not dec.should_stop and out.prompt == 'none'
+  assert car.policy.turn is None or car.policy.turn.key != key or car.policy.turn.state.done == 'released'
+  # announce and off never go on it: the stop stands
+  car = left_car()
+  car.run_until(lambda out, dec: out.stops and car.v < 8., left=left_cmd('announce'))
+  out, dec, _ = car.step(left=left_cmd('announce', go=True))
+  assert out.stops
+
+
 def test_auto_left_creeps_slowly_to_its_target_and_holds_there():
   car = left_car()
   held_left(car, left_cmd())

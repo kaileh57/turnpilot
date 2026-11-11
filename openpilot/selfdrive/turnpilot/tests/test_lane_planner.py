@@ -10,6 +10,7 @@ from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.turnpilot.hooks import ABORT_HOLD_S
 from openpilot.selfdrive.turnpilot.lane_planner import (LANE_UNKNOWN_REASON, LANE_WIDTH, LATCHED_YELLOW, LC_HOLD_CLEAR_S, LC_RELEASE_S,
                                                         LC_ABORT_COOLDOWN_S, LC_ABORT_SETTLE_S, LC_CONFIRM_FRAMES, LC_COOLDOWN_S,
+                                                        LC_BAY_CONFIRM_FRAMES, LC_BAY_END_MIN_M, LC_CHANGE_S, LC_END_MIN_M,
                                                         LC_REQUEST_TIMEOUT_S,
                                                         LC_UNSURE_MAX_S, LC_WARN_S, YELLOW_HOLD_S, LanePlanner,
                                                         ModelLanes, Phase, offer_room_s,
@@ -291,6 +292,7 @@ class Drive:
     self.requests, self.prompts, self.offers, self.aborts, self.decisions = [], [], [], [], []
     self.car_kw = {}  # the car's own signal (car_signals.py): lit_m, lead_m, car_block, signals_failed
     self.car_lamp = False  # with car_kw: the car's lamp lights with the offer's warning, and lit_m counts from it
+    self.left_edge_std = None  # (distance) -> the left road edge's std this frame, for an edge the model is unsure of
 
   def step(self, m, distance, objects=(), blinker=None, blindspot=None, maneuver_id=0, inputs_valid=True, stop_d=None):
     line_ys, probs, edges, stds = road(self.lanes_left, self.lanes_right)
@@ -298,6 +300,8 @@ class Drive:
       probs[3] = 0.05
     if self.night:
       probs[0] = probs[3] = 0.05
+    if self.left_edge_std is not None:
+      stds[0] = self.left_edge_std(distance)
     # the car's offset in its lane: the lines and edges slide the other way (modelV2 y is right)
     line_ys, edges = [y + self.offset for y in line_ys], [y + self.offset for y in edges]
     lanes = model_lanes(line_ys, probs, edges, stds)
@@ -1456,7 +1460,7 @@ def test_the_carried_lamp_waits_out_a_short_dropout_and_a_car_beside():
   unread = lambda left, right: paint(left=UNKNOWN, right=BW)  # noqa: E731
   read = lambda left, right: paint(left=BW, right=BW)  # noqa: E731
   for stretches in ((unread, LC_UNSURE_MAX_S - 0.2),), \
-                   ((unread, 2.), (read, (LC_CONFIRM_FRAMES - 3) * DT_MDL), (unread, 2.)):
+                   ((unread, 2.), (read, (LC_BAY_CONFIRM_FRAMES - 3) * DT_MDL), (unread, 2.)):  # (the list's turn lane, late)
     drive, m, distance = first_of_two_lefts()
     drive.night = True  # nothing agreeing a lane beyond the unread line (lane_agreed); broken white still counts the room
     drive.paint = unread
@@ -1548,10 +1552,11 @@ def first_blocked(frames):
   return next((d for d, x in frames if x.blocked), None)
 
 
-def assert_blocked_at_the_end(drive, frames):
+def assert_blocked_at_the_end(drive, frames, bay=False):
   """LaneDecision.blocked from the first frame at or past the window's end on which nothing is offered, and on every frame
-  after it for the maneuver; never before the window's end."""
-  _, end = lane_change_window(drive.v)
+  after it for the maneuver; never before the window's end. bay: the change is into a turn lane the list names, whose
+  window ends later at town speeds (lane_change_window's bay)."""
+  _, end = lane_change_window(drive.v, bay=bay)
   at = first_blocked(frames)
   assert at is not None and end - (LC_ABORT_SETTLE_S + 3. * DT_MDL) * drive.v < at <= end + 1e-6, (at, end)
   assert all(x.blocked for d, x in frames if d <= at)
@@ -1581,10 +1586,10 @@ def test_a_change_the_lane_list_still_wants_at_the_windows_end_is_blocked_for_an
   }
   for why, (drive, kw) in cases.items():
     drive.lp.always_drive = always_drive
-    frames = through_the_window(drive, TWO_LANE_RIGHT, lane_change_window(drive.v)[0] + 30., **kw)
+    frames = through_the_window(drive, TWO_LANE_RIGHT, lane_change_window(drive.v)[0] + 30., stop=10., **kw)
     assert not drive.requests or why == 'noSignal', why
     assert drive.lp.changes == 0, why
-    assert_blocked_at_the_end(drive, frames)
+    assert_blocked_at_the_end(drive, frames, bay=True)
   # DesireHelper never starting the change it was asked for (timedOut), on the planner alone
   lp = LanePlanner()
   lp.always_drive = always_drive
@@ -1655,7 +1660,7 @@ def test_blocked_only_with_the_planner_on_and_a_lane_it_can_place():
 
 def test_blocked_holds_for_its_maneuver_and_ends_with_it():
   drive = Drive(0, 1, v=2.)
-  frames = through_the_window(drive, TWO_LANE_RIGHT, 200.)
+  frames = through_the_window(drive, TWO_LANE_RIGHT, 200., stop=10.)  # (the named turn lane's end at 2 m/s: LC_BAY_END_MIN_M)
   assert frames[-1][1].blocked
   assert not drive.step(TWO_LANE_RIGHT, 300., maneuver_id=1).blocked  # the next maneuver (a reroute's): judged afresh
 
@@ -2539,3 +2544,150 @@ def test_a_bay_never_entered_is_still_skipped_at_the_windows_end():
     distance -= 8. * DT_MDL
   assert all(d.want == 1 for d in decisions) and not any(int(d.offer) for d in decisions)
   assert decisions[-1].blocked
+
+
+# route 29, 239.33-240.27 s: the frames the model saw room beyond the bay's line on (1), from its first white read at 42.0 m
+ROW_4_ROOM = (0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 1)
+
+
+def late_bay_drive(lanes=TURN_BAY, line=SW, v=7., opens=42., room=ROW_4_ROOM, to=20.):
+  """Route 29's 239-241 s left: the bay's line read `line` from `opens` m out (solid of no colour before it), the model seeing
+  room beyond it on the frames of `room` (then every other frame), its line beyond unseen, the driver's left lamp lit."""
+  def edge_std(distance):
+    i = int(round((opens - distance) / (v * DT_MDL)))
+    return 0.3 if i >= 0 and (room[i] if i < len(room) else i % 2) else 2.
+  drive = Drive(1, 0, v=v, driver_signals=True, night=True,
+                paint=lambda left, right: paint(left=(line if drive.d <= opens + 1e-6 else SOLID_NO_COLOUR) if left else SY, right=SW))
+  drive.left_edge_std = edge_std
+  m = maneuver("turn", "left", lanes)
+  drive.d = drive.d0 = opens + 50 * v * DT_MDL
+  while drive.d > to:
+    drive.step(m, drive.d, blinker=LaneChange.left)
+    drive.d -= v * DT_MDL
+  return drive
+
+
+def test_a_late_short_bay_is_requested_in_time():
+  """Route 29 (2026-11-08, 239-241 s, a sharp left at a signal, [left, straight]): the bay's line first read white 42.0 m out
+  at 7 m/s, the model seeing room beyond it on about half the frames. The tenth passing frame came at 35.3 m, the change was
+  offered and the window ended 0.3 m on (tooLate), and the left was skipped. On LC_BAY_CONFIRM_FRAMES the offer comes at
+  38.8 m and the change is under way before the window's end."""
+  drive = late_bay_drive(to=5.)
+  assert [o for o, _, _ in drive.offers] == [LaneChange.left] and [r for r, _, _ in drive.requests] == [LaneChange.left]
+  assert drive.offers[0][1] == pytest.approx(42. - 9 * 7. * DT_MDL, abs=0.01), "the fifth passing frame"
+  assert drive.requests[0][1] > lane_change_window(7., bay=True)[1] + 3., "half a second inside the window"
+  assert drive.lp.changes == 1 and (drive.lanes_left, drive.lanes_right) == (0, 1)
+  assert not drive.aborts and not any(d.blocked for d in drive.decisions)
+
+
+def test_only_the_change_into_a_named_bay_is_offered_sooner_and_later():
+  """Every other change keeps LC_CONFIRM_FRAMES and the general end: the same approach with no lane list (the line broken
+  white, as any change needs there) is offered on its tenth passing frame, 35.3 m out, and is too late 0.3 m on."""
+  drive = late_bay_drive(lanes=(), line=BW)
+  assert [(o, round(d, 2)) for o, d, _ in drive.offers] == [(LaneChange.left, round(42. - 19 * 7. * DT_MDL, 2))]
+  assert [a for a, _ in drive.aborts] == ['tooLate'] and drive.lp.changes == 0
+  # the windows themselves: a named bay's end is the change's time at the car's speed, floored, never past the general end
+  for v in (2., 3., 4., 5., 6., 7., 8., 12., 25.):
+    general = lane_change_window(v)
+    assert lane_change_window(v, bay=True) == (general[0], min(general[1], max(LC_CHANGE_S * v, LC_BAY_END_MIN_M))), v
+    assert lane_change_window(v, 2) == (lane_change_window(v, 2)[0], general[1]), "the first of two changes: the general end"
+  assert lane_change_window(5., bay=True)[1] == 25. and lane_change_window(2., bay=True)[1] == LC_BAY_END_MIN_M < LC_END_MIN_M
+  assert LC_BAY_CONFIRM_FRAMES == 5 and LC_CONFIRM_FRAMES == 10
+  # the first of two changes under a list that names the turn's lanes is no bay's: ten frames, the general end
+  m = maneuver("turn", "left", THREE_LANES_LEFT_TURN)
+  drive = Drive(2, 0, v=5., driver_signals=True)
+  distance = 37.4
+  while distance > 20.:
+    drive.step(m, distance, blinker=LaneChange.left)
+    distance -= 5. * DT_MDL
+  assert any(d.want == 2 for d in drive.decisions) and not drive.requests and drive.lp.changes == 0
+  assert [round(d, 2) for _, d, _ in drive.offers] == [round(37.4 - 9 * 5. * DT_MDL, 2)] and [a for a, _ in drive.aborts] == ['tooLate']
+
+
+def test_a_bay_opening_inside_the_general_end_is_entered_at_town_speed():
+  """The window's late end: at 5 m/s a change still completes from 25 m, so a bay whose line first reads white 33 m out
+  (inside the general 35 m, where it was skipped) is offered, requested and made."""
+  drive = late_bay_drive(v=5., opens=33., room=(1,) * 200, to=2.)
+  assert [round(d, 2) for _, d, _ in drive.offers] == [round(33. - (LC_BAY_CONFIRM_FRAMES - 1) * 5. * DT_MDL, 2)]
+  assert drive.lp.changes == 1 and not drive.aborts and not any(d.blocked for d in drive.decisions)
+
+
+@pytest.mark.parametrize("v", [5., 3.])
+def test_a_bay_opening_inside_its_windows_end_is_still_skipped(v):
+  """The wrong-lane rail: the bay's line reads white only inside the distance a change still completes in. Nothing is
+  offered there, and LC-03 calls the left blocked at the window's end, as it did at the general end."""
+  end = lane_change_window(v, bay=True)[1]
+  assert end == max(LC_CHANGE_S * v, LC_BAY_END_MIN_M) < LC_END_MIN_M
+  drive = late_bay_drive(v=v, opens=end - 1., room=(1,) * 200, to=5.)
+  assert not drive.offers and not drive.requests and drive.lp.changes == 0
+  assert all(d.want == 1 for d in drive.decisions)
+  judged = next(i for i, d in enumerate(drive.decisions) if d.blocked)
+  assert end - v * DT_MDL - 1e-6 <= drive.d0 - judged * v * DT_MDL <= end, "judged at the bay's end, once"
+  assert all(d.blocked for d in drive.decisions[judged:])
+
+
+def test_a_named_bay_never_entered_is_skipped_at_its_late_end_whatever_one_frame_says():
+  """LC-03 with the late end: a named bay whose lane the model never sees is never offered and is blocked at the window's
+  end. One frame of the model's count placing the car in the turn lane (no change wanted on it) between the general end and
+  the bay's must not judge the turn for good: it is judged once, at the bay's end, on that frame's want."""
+  for dropout in (None, 30.):
+    lp = LanePlanner()
+    m = maneuver("turn", "left", TURN_BAY)
+    no_lane, in_bay = model_lanes(*road(0, 0)), model_lanes(*road(0, 1))
+    distance, decisions, v = 60., [], 5.
+    while distance > 20.:
+      lanes = in_bay if dropout is not None and abs(distance - dropout) < v * DT_MDL / 2 else no_lane
+      decisions.append((distance, lp.update(m, distance, lanes, LaneChangeState.off, v, True, False, (), True, True, DT_MDL,
+                                             paint(left=SW, right=SW))))
+      distance -= v * DT_MDL
+    assert [d.want for _, d in decisions].count(0) == (0 if dropout is None else 1)
+    assert not any(int(d.offer) for _, d in decisions)
+    first = next(x for x, d in decisions if d.blocked)
+    assert first == pytest.approx(lane_change_window(v, bay=True)[1], abs=v * DT_MDL) and decisions[-1][1].blocked, dropout
+
+
+def test_wrong_lane_is_said_only_inside_the_named_bays_late_end():
+  """lane_mismatch: one lane from a turn lane the list names, 'Wrong Lane' waits for the end the planner still changes to."""
+  m, lanes = maneuver("turn", "left", TURN_BAY), model_lanes(*road(1, 0))
+  assert lane_mismatch(m, 30., (), 0., lanes, 5.) == LaneMismatch.none
+  assert lane_mismatch(m, 24., (), 0., lanes, 5.) == LaneMismatch.wrongLaneForTurn
+  assert lane_mismatch(m, 30., (), 0., lanes, 7.) == LaneMismatch.wrongLaneForTurn, "the general end at 7 m/s and over"
+  two_off = maneuver("turn", "left", THREE_LANES_LEFT_TURN)
+  assert lane_mismatch(two_off, 30., (), 0., model_lanes(*road(2, 0)), 5.) == LaneMismatch.wrongLaneForTurn
+
+
+def test_the_short_count_keeps_its_first_frames_read_and_needs_two():
+  """The named bay's count of five spans two paint reads: a soft frame after the first passing one keeps that frame's read
+  (pass, soft, then four carried or read), and one read carried for five frames is no offer."""
+  m, v = maneuver("turn", "left", TURN_BAY), 7.
+  room, none = night_two_lanes(), night_two_lanes(edge_std=2.)
+
+  def offered_at(frames):
+    lp, distance = LanePlanner(), 42.
+    for i, (lanes, pnt) in enumerate(frames):
+      d = lp.update(m, distance, lanes, LaneChangeState.off, v, False, False, (), True, True, DT_MDL, pnt)
+      if int(d.offer):
+        return i
+      distance -= v * DT_MDL
+    return None
+  white = paint(left=SW, right=SW)
+  assert offered_at([(room, white), (none, white), (room, ()), (room, ()), (room, white), (room, ())]) == 5
+  assert offered_at([(room, white)] + [(room, ())] * 5 + [(none, ())] * 20) is None, "one read, carried"
+  assert offered_at([(room, white)] + [(room, ())] * 3 + [(room, white)]) == 4
+
+
+def test_a_frame_wanting_two_changes_inside_the_general_end_is_judged_there():
+  """The late end is the one change into the named lane's alone: a frame on which the model's count puts the car two lanes
+  off, inside the general end, has the general end and is judged at once (toward the skip), never left to the bay's end."""
+  lp, m, v = LanePlanner(), maneuver("turn", "left", THREE_LANES_LEFT_TURN), 5.
+  one_off, two_off = model_lanes(*road(1, 1)), model_lanes(*road(2, 0))
+  distance, decisions = 60., []
+  while distance > 20.:
+    lanes = two_off if abs(distance - 30.) < v * DT_MDL / 2 else one_off
+    decisions.append((distance, lp.update(m, distance, lanes, LaneChangeState.off, v, False, False, (), True, True, DT_MDL,
+                                           paint(left=BW, right=BW), left_blindspot=True)))
+    distance -= v * DT_MDL
+  assert [d.want for x, d in decisions if x > 31.] == [1] * sum(1 for x, _ in decisions if x > 31.)
+  assert [d.want for _, d in decisions].count(2) == 1 and not any(int(d.lane_change) for _, d in decisions)
+  first = next(x for x, d in decisions if d.blocked)
+  assert first == pytest.approx(30., abs=v * DT_MDL) and all(d.blocked for x, d in decisions if x <= first)

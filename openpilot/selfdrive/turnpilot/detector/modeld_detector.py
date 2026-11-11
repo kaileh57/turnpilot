@@ -42,7 +42,9 @@ row says lightStatus disabled on its road runs (logged once) until a read succee
 read past its age-out and map_controls says it once (camera_lights_off), so a reader failing every retry all night is the
 driver's to know, not only the log's (11-06 review: retrying alone reached no one). The boxes that never become heads (the
 size and horizon gates, past MAX_READ_HEADS) are counted by the reader and logged with the heads' reasons at most once in
-LIGHT_GATES_LOG_S (turnpilot.light_gates), for the night tuning. TurnPilotCameraLights off reads none.
+LIGHT_GATES_LOG_S (turnpilot.light_gates), for the night tuning, and each road run's message carries them, with the boxes
+under MIN_CONF that read no colour, in lightRejects (logged only: every class-9 box down to LIGHT_GREEN_CONF is in lights or
+lightRejects with its confidence and reason; lightBoxes stays the MIN_CONF boxes). TurnPilotCameraLights off reads none.
 
 Which camera (choose_camera): the wide one in a turn (desiredCurvature at or above WIDE_CURVATURE while moving) and
 WIDE_HOLD_S after it, at a standstill and a crawl but for one road run in WIDE_SLOW_ROAD_EVERY, else the road one; a turn
@@ -217,7 +219,7 @@ from openpilot.cereal import custom, log, messaging
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.common.params import UnknownKeyName
-from openpilot.selfdrive.turnpilot.detector.decoder import (LIGHT_READ_CONF, decode, decode_far, decode_far_lights, decode_lights,
+from openpilot.selfdrive.turnpilot.detector.decoder import (LIGHT_GREEN_CONF, decode, decode_far, decode_far_lights, decode_lights,
                                                            decode_side, decode_signs, fill_detections, fill_far, fill_signs)
 from openpilot.selfdrive.turnpilot.detector.graph import (FAR_CROP_SIZE, NATIVE_MODES, NATIVE_SIZES, SIDE_INPUT_SIZE, Crop, crop_at,
                                                          crop_views, detector_pkl_path, far_detector_pkl_path, letterbox,
@@ -380,10 +382,15 @@ SIDE_VIEW_V_MAX = 2.0      # m/s (STOP_GO_V_MAX): side views only at or under th
 SIDE_BUDGET_S = 0.015      # a median side-view run over this (the odd step's room beside the driving model): off for the drive
 SIDE_OVERRUNS = 3          # of the last TIME_WINDOW side runs pushing the debt past DEBT_CAP_S: off for the drive
 SIDE_STATUS_S = 0.5        # sideViewStatus noRoom: the gate open this long with no side run
-# a signal mapped within this, short of its line (plan_inputs' signal_near): during a sweep the light reader reads colour only
+# a signal mapped within this (plan_inputs' signal_near): during a sweep the light reader reads colour only
 # then; out of one, with the reader reading (lights_near), it alternates the cameras at a crawl and in a turn (choose_camera)
 # and skips the paint standing
 SWEEP_SIGNAL_M = 60.
+# ...or this far past it: the plan shows a signal past its line only while its stop holds the car or still brakes it there (the
+# latch reaches 2 m past the line, a red's stop ends up to 4 m past it and a red crept over is held where the car stands), and
+# the car held at a light is where its reads matter most. Route 29's right at a red: the car stood 6 m past the mapped line
+# for 12.5 s, the signal no longer "near", and the road camera ran 26 times (2 a second) to the wide camera's 99
+SIGNAL_PAST_M = 10.
 STOP_SIGNS_DEFAULT = 'shadow'  # TurnPilotCameraStopSigns: off, or shadow (logged, never acted on)
 SIM_DROP_PARAM = 'TurnPilotSimDropDetectionsS'  # SIM ONLY (module docstring): s of no detector, read only with SIMULATION=1
 LanePaintStatus = custom.TurnpilotDetections.LanePaintStatus
@@ -549,8 +556,9 @@ LEFT_VIEWS = ('road', 'roadAndWide')  # turnpilotPlan.detectorView: only the unp
 
 def plan_inputs(plan) -> tuple[str, float, bool, bool]:
   """What modeld takes from fresh_plan's turnpilotPlan (shadow too): the detector's view, the far crop's bearing, whether
-  a signal is mapped within SWEEP_SIGNAL_M, short of its line (signal_near: a sweep's light reader reads then, and out of a
-  sweep choose_camera gives the light reader its road runs), and far_first: the unprotected left's view (from VIEW_FROM_M to
+  a signal is mapped within SWEEP_SIGNAL_M, or the car is held or still stopping up to SIGNAL_PAST_M past its line
+  (signal_near: a sweep's light reader reads then, and out of a sweep choose_camera gives the light reader its road runs),
+  and far_first: the unprotected left's view (from VIEW_FROM_M to
   its commit) with its R_req past the full pass's range (unprotectedLeft.rReq over rangeM), the band past it the far slot's
   (applied standing or slow only: ModeldDetector.detect, FAR_FIRST_V). Taken from R_req and the range alone, never from
   farNeeded, which goes false while the far slot is stale: a stale far view would then never get the frames to read again."""
@@ -559,7 +567,7 @@ def plan_inputs(plan) -> tuple[str, float, bool, bool]:
   mc = plan.mapControl
   view, ul = str(plan.detectorView), plan.unprotectedLeft
   far_first = view in LEFT_VIEWS and float(ul.rReq) > float(ul.rangeM)
-  return view, float(plan.farCropBearing), str(mc.kind) == 'signal' and 0. <= mc.distance <= SWEEP_SIGNAL_M, far_first
+  return view, float(plan.farCropBearing), str(mc.kind) == 'signal' and -SIGNAL_PAST_M <= mc.distance <= SWEEP_SIGNAL_M, far_first
 
 
 def frame_bus():
@@ -963,7 +971,11 @@ def fill_lights(tl, heads: list[LightHead], shadow: bool) -> None:
   rides on the instance after the head's id, so every road run's rlog carries it, not only the SAMPLE_S samples (instance
   is Text and only ever logged; turnpilotDetections' lights are no accepted source)."""
   tl.source, tl.shadow = custom.TurnpilotLights.Source.camera, shadow
-  out = tl.init('lights', len(heads))
+  fill_heads(tl.init('lights', len(heads)), heads)
+
+
+def fill_heads(out, heads: list[LightHead]) -> None:
+  """A list of TurnpilotLights.Light from heads (fill_lights' lights, and the reader's unpublished boxes: lightRejects)."""
   for o, h in zip(out, heads, strict=True):
     o.state, o.distance, o.instance = h.state, float(h.distance), f"head{h.id} {h.detail}".rstrip()
     o.conf, o.box, o.bearing, o.votes, o.governs = float(h.conf), [float(b) for b in h.box], float(h.bearing), int(h.votes), h.governs
@@ -999,7 +1011,7 @@ class ModeldDetector:
   native_holds: frozenset = frozenset()
   hold_t0: float | None = None
   sweep_runs = 0                 # forward runs in this sweep, for the held cycle's full wide and road alternation
-  signal_near = False             # a signal mapped within SWEEP_SIGNAL_M (plan_inputs), this step
+  signal_near = False             # a signal mapped within SWEEP_SIGNAL_M, to SIGNAL_PAST_M past its line (plan_inputs), this step
   lights_near = False             # ...and the light reader reading (light_reading): the 1:1 alternation's and the paint skip's
   steps = 0                       # step() calls, for odd_paint's age
   last_cam: str | None = None     # the camera of the last full run
@@ -1746,13 +1758,17 @@ class ModeldDetector:
     t0 = time.perf_counter()
     try:
       i = self.cameras['road']
-      heads, status = self.lights.read(model_state.frames[i], metas[i], decode_lights(raw, self.lb, LIGHT_READ_CONF))
+      heads, status = self.lights.read(model_state.frames[i], metas[i], decode_lights(raw, self.lb, LIGHT_GREEN_CONF))
     except Exception:
       td.lightStatus = light_failed(self, "lights")
       return
     light_read_ok(self, "lights")
     dt = time.perf_counter() - t0
     fill_lights(td.lights, heads, self.light_mode != 'addOnly')
+    # the boxes the reader was given and did not publish (its gates, a box under MIN_CONF reading no colour), for the log
+    # alone: with td.lights, every class-9 box down to LIGHT_GREEN_CONF, its confidence and why it is no head
+    rejects = getattr(getattr(self.lights, 'reader', None), 'rejects', None) or []
+    fill_heads(td.init('lightRejects', len(rejects)), rejects)
     td.lightStatus, td.lightTime = status, dt
     self.light_times.append(dt)
     if len(self.light_times) == TIME_WINDOW and float(np.median(self.light_times)) > LIGHT_BUDGET_S:

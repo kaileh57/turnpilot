@@ -26,6 +26,12 @@ MIN_CONF = 0.35
 # full pass had them at 0.2-0.33 from about 60 m on the qcamera replayed through yolo26n. A head from a box under MIN_CONF is
 # published only once it reads a colour (LightReader.read): what reads no lamp stays as before
 LIGHT_READ_CONF = 0.2
+# ...and down to this a box counts only if it reads green on that run (LightReader.read: a green can only let a stop go, and
+# only as CAMERA_GREEN_READS runs with no red between; a red or yellow under LIGHT_READ_CONF is never read). Route 29's
+# video through yolo26n: where the car's light had turned green and went unread, the green lamps were boxed, at 0.10-0.19:
+# 109 of the 123 boxes over a green lamp within the governing bearing on one 14 s approach (green voted on 5 of 141 runs,
+# 35 with these read), 16 of 16 and 9 of 9 at two stands' changes, 53 of 64 at a third; read, they read green cleanly
+LIGHT_GREEN_CONF = 0.1
 MAX_DETECTIONS = 64  # the message never carries more than this, highest confidence first
 MAX_LIGHTS = 16      # traffic light boxes, apart, highest confidence first
 # our own hood (and on the wide camera, the dashboard) reads as a car: a box at least this wide (fraction of the frame)

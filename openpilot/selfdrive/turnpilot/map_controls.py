@@ -276,7 +276,8 @@ YELLOW_DECEL_MAX = -MAP_DECEL_MAX  # 2.0: a yellow's stop never brakes harder th
 RED_DECEL = 3.0               # m/s^2
 RED_LAG_S = 0.5               # s from the read to that braking: the plan's frame, the accel cap's ramp, the actuator
 RED_PAST_M = 4.               # m
-# s on end of the camera boxing a head of the signal with no red or yellow read on any of them, and a stop the camera's red
+# s on end of the camera boxing a head of the signal (one with a lamp read lit or a vote held: CameraLights.dark) with no red
+# or yellow read on any of them, and a stop the camera's red
 # raised is let go, on the way to its line or held at it: a light looked at that long and not read red doesn't stop the car
 # (the model's own red-light hold stays in the planner's min()). Only an unbroken run of fresh reads with a head of it in
 # view: heads hidden (a truck ahead), out of the frame at the line, or the reader not reading say nothing about the light,
@@ -284,6 +285,9 @@ RED_PAST_M = 4.               # m
 # longest run in view and unread was 0.1 s on this reader (the drive's video through it) and 0.85 s on the car's own logged
 # votes, which went 1.7 s at most between reds, heads in view or not
 RED_GONE_S = 2.5
+# ...and in at least this many of the reader's road runs: at 2.4 runs a second or more the seconds decide, slower the runs do
+# (route 29's worst stand had 2 a second), so a slow road pass never lets a red go on fewer looks
+RED_GONE_READS = 6
 # A curb-side turn at a red or an unread signal (module docstring): s stood at its line before its go, a real stop and a
 # look, and s on end the way must have been clear by then (a crossing car between two detector runs is not a clear road)
 RIGHT_RED_DWELL_S = 1.5
@@ -291,6 +295,9 @@ RIGHT_RED_CLEAR_S = 1.0
 # never on a red it is reading: its go needs no red or yellow read for its signal, by any source, for this long (the reader
 # drops a red the car still faces for up to 1.3 s on the logs). A light never read goes after its stand and its look
 RIGHT_RED_UNREAD_S = 2.5
+# ...over at least this many of the reader's road runs since the red while the reader is reading (a slow road pass looks less
+# often in the same seconds); with no camera read in hand (the reader off or its last read aged out) the seconds alone
+RIGHT_RED_UNREAD_READS = 6
 RIGHT_RED_WAIT_REASON = "Red light: waiting for the green"
 RIGHT_RED_STOPPING_REASON = "Right on red: stopping at the line"
 RIGHT_RED_LOOKING_REASON = "Right on red: checking the way is clear"
@@ -324,6 +331,15 @@ GREEN_STEADY_S = 0.5          # s of green before it counts (the sim oracle; a c
 # never lets the car go. Never plannerd's lift: that needs an accepted green
 # (release_light)
 CAMERA_GREEN_STEADY_S = 1.0
+# ...counted in the reader's road runs, not in frames of one carried read (GreenReads): CAMERA_GREEN_READS runs reading it
+# green, the first CAMERA_GREEN_STEADY_S ago or more, none more than CAMERA_GREEN_GAP_S after the one before, and no red or
+# yellow read for it since the first. A run that boxed none of its heads, or read them no colour, says nothing either way.
+# Counted as an unbroken second of green on every frame, one blank run started it over: on route 29's video through the
+# detector and the reader, a red read on an approach turned green before the car reached its line, the governing green was
+# then voted on 7 of 9 runs in a row, and the stop stood to the line (and at 10 runs a second ten green runs in a row were
+# needed where at 2 a second two were)
+CAMERA_GREEN_READS = 3
+CAMERA_GREEN_GAP_S = 1.5
 # a held signal with no light read for it this long (a red read, then lost: on the car the camera's own stop, its read gone
 # for CAMERA_STALE_S and more) is said, once as it starts (turnpilot.signal_unseen) and on its line (SIGNAL_UNSEEN_REASON),
 # and held for a green, never let go by the timeout. BeamNG S14 (BUILD_FINDINGS N3) stood 108.6 s on "waiting for green" once
@@ -377,7 +393,12 @@ LIGHT_ASSOC_M = 25.           # a light belongs to the signal control whose stop
 LIGHT_STALE_S = 0.6           # s: an older light message is stale (unknown)
 CAMERA_STALE_S = 1.0          # s: a camera light read older than this is none (it reads on road camera runs only, ~5 Hz)
 CAMERA_ASSOC_BEFORE_M = 10.   # a camera head from this far short of a signal's line...
-CAMERA_ASSOC_PAST_M = 40.     # ...to this far past it is that signal's (far-side heads hang ~18-35 m past the line)
+# ...to this far past it is that signal's (far-side heads hang ~18-35 m past the line). The range is the head's elevation over
+# an assumed 5.5 m (light_state.ASSUMED_HEAD_M) and reads long for heads on lower poles: at route 29's left at a signal the
+# near-side head's bearing against the metres driven put it 75 m out where the reader said 104 (1.4 times), and the far-side
+# heads read 44-56 m past the line. Replayed at 56 the stop a red had raised on that approach was let go by their green 5.9 s
+# sooner; not changed here, unmeasured by day (the next light's heads on a short block)
+CAMERA_ASSOC_PAST_M = 40.
 # A head no line's window takes, short of the camera's own line at a route turn's junction (CAMERA_ROUTE: the junction less
 # CONTROL_LINE_M, nothing mapped to say where the stop is) from PROTECT_BEFORE_M before the junction, the window that makes a
 # mapped signal the junction's, is that line's too (camera_owner). 1e 7:03-7:07 (2026-11-06 replay): route_follower's junction
@@ -717,6 +738,10 @@ class CameraLights:
   status: str = 'read'         # turnpilotDetections.lightStatus
   # the road run this read is: each read made its own number, one turnpilotd carries between runs keeps it (TURN_HEAD_RUNS)
   run: int = field(default_factory=lambda: next(_READS), compare=False)
+  # those of heads whose lamps all read dark on this run and that hold no vote: in view, but no evidence that a red has
+  # gone (RED_GONE_S). Route 29's right at a red: a governing head with no lamp lit toward the car (conf 0.4-0.78, 12-26 m)
+  # was boxed for 2.0 s on end while the red heads behind it went unread, 0.5 s short of letting the red go
+  dark: list = field(default_factory=list, compare=False)
 
 
 @dataclass
@@ -742,7 +767,9 @@ def camera_light_input(msg, status: str, age_s: float, mode: str) -> CameraLight
   if status != 'read' or age_s > CAMERA_STALE_S or str(msg.source) != 'camera':
     return None
   heads = [(str(light.state), float(light.distance)) for light in msg.lights if light.governs]
-  return CameraLights(heads, bool(msg.shadow) or mode != 'addOnly', status)
+  dark = [(str(light.state), float(light.distance)) for light in msg.lights
+          if light.governs and str(getattr(light, 'reason', '')) == 'dark' and str(light.state) == 'unknown']
+  return CameraLights(heads, bool(msg.shadow) or mode != 'addOnly', status, dark=dark)
 
 
 def camera_owner(dist: float, signals):
@@ -804,6 +831,33 @@ class MapDecision:
 
 
 @dataclass
+class GreenReads:
+  """The camera's green for a stop, counted in the reader's road runs (CAMERA_GREEN_READS, CAMERA_GREEN_STEADY_S,
+  CAMERA_GREEN_GAP_S): the same evidence at any run rate, and a run that says nothing never starts it over."""
+  n: int = 0             # runs that read it green since the last red or yellow
+  first_t: float = 0.    # s since the first of them...
+  last_t: float = 0.     # ...and since the last
+  run: int | None = None  # the last run counted (CameraLights.run: a read carried between runs counts once)
+
+  def update(self, green: bool, stop: bool, run: int | None, dt: float) -> None:
+    """green: this frame's read is green for it; stop: a red or yellow is read for it; run: the read's number, None for a
+    source read every frame (each frame then counts)."""
+    if stop:
+      self.n, self.first_t, self.last_t, self.run = 0, 0., 0., None
+      return
+    if self.n:
+      self.first_t, self.last_t = self.first_t + dt, self.last_t + dt
+    if green and (run is None or run != self.run):
+      self.n, self.last_t, self.run = self.n + 1, 0., run
+    if self.n and self.last_t > CAMERA_GREEN_GAP_S + 1e-9:
+      self.n, self.first_t, self.last_t, self.run = 0, 0., 0., None
+
+  @property
+  def steady(self) -> bool:
+    return self.n >= CAMERA_GREEN_READS and self.first_t >= CAMERA_GREEN_STEADY_S - 1e-9
+
+
+@dataclass
 class ControlState:
   cap: float = NO_SPEED_CAP
   infeasible: bool = False
@@ -840,14 +894,19 @@ class ControlState:
   green_committed: bool = False  # its turn's green went stale too close to stop for at the yellow rate: committed (logged once)
   accepted: str = 'unknown'     # this frame's light from the accepted sources alone (_light)
   camera: str = 'unknown'       # this frame's camera state for it, the reader acting (add-only), else unknown
-  camera_green_t: float = 0.    # s of the camera's green for it (CAMERA_GREEN_STEADY_S)
+  camera_green_t: float = 0.    # s since the first of the camera's green reads for it not since contradicted (GreenReads)
+  camera_green: GreenReads = field(default_factory=GreenReads)  # ...and whether they make a steady green
   cam_stop: int = 0             # its heads the camera reads red or yellow this frame, the reader acting
   cam_green: int = 0            # ...and green
   cam_seen: int = 0             # ...and of any state, unknown too: the heads of it in view
   right_clear_t: float = 0.     # held for a curb-side turn's right-on-red go: s on end its way has been clear (RIGHT_RED_CLEAR_S)
   red_gone_t: float = 0.        # s on end a head of it has been in view with no red or yellow read for it (RED_GONE_S)
+  red_gone_n: int = 0           # ...and the reader's road runs in them (RED_GONE_READS)
   red_ago_t: float = 1e9        # s since a red or yellow was last read for it by any source, never read: a curb-side turn's
                                 # right-on-red go needs RIGHT_RED_UNREAD_S of it
+  red_ago_n: int = 0            # ...and the reader's road runs since (RIGHT_RED_UNREAD_READS)
+  cam_run: int | None = None    # the camera read last counted for it (CameraLights.run)
+  cam_acting: bool = False      # a camera read is in hand and acting this frame
   camera_added: bool = False    # its stop is TurnPilot's own: a camera red or yellow, or a route turn's want of a green
   accepted_stop: bool = False   # an accepted source read red or yellow for it this stop: only an accepted green ends it
   # a route turn's stop for want of a green the driver's gas went through, lifted engaged too late to stop for (_driver_go):
@@ -939,8 +998,9 @@ class MapControlPolicy:
     self.camera_off_shown: bool | None = None
     self._lights = NO_LIGHTS  # the last update's lights (turn_light)
     self._signal_turn_id: int | None = None  # the unprotected turn a signal at its junction was seen for (turn_light)
-    # [maneuver id, s of steady green, s on end a head in view there read neither] of a red or yellow read at the unprotected
-    # left's own junction with no signal mapped there: the left's light until a steady green or RED_GONE_S (_left_red_latch)
+    # [maneuver id, the green read there since (GreenReads), s on end a head in view there read neither, the reader's runs
+    # in them] of a red or yellow read at the unprotected left's own junction with no signal mapped there: the left's light
+    # until a steady green or RED_GONE_S (_left_red_latch)
     self._left_red: list | None = None
     self._right_gone: int | None = None  # the maneuver whose curb-side turn was let go on its right-on-red procedure (rightOnRed)
     self._left_red_read = False         # ...a red or yellow read for it on the last update (turn_light_read)
@@ -1099,7 +1159,8 @@ class MapControlPolicy:
     its maneuver)."""
     self._left_red_read = False
     cam = lights.camera
-    if cam is not None and cam.run != self._latch_run:
+    cam_new = cam is not None and cam.run != self._latch_run  # a read not yet looked at
+    if cam_new:
       self._latch_run, self._latch_run_m = cam.run, 0.
     else:
       self._latch_run_m += v * dt
@@ -1125,16 +1186,22 @@ class MapControlPolicy:
     if states & {'red', 'yellow'}:
       if self._left_red is None:
         cloudlog.event("turnpilot.left_red_latched", maneuver_id=mid, states=sorted(states), distance=round(dist, 1))
-      self._left_red = [mid, 0., 0.]
+      self._left_red = [mid, GreenReads(), 0., 0]
       self._signal_turn_id = mid
       self._left_red_read = True
     elif self._left_red is not None:
-      # let go as a camera stop is (_camera_releases): its green steady, or a head in view there with no red or yellow read for
-      # RED_GONE_S on end (no head in view there, or no fresh read, says nothing: the run starts again, the latch stands)
-      self._left_red[1] = self._left_red[1] + dt if 'green' in states else 0.
-      self._left_red[2] = self._left_red[2] + dt if states else 0.
-      if self._left_red[1] >= CAMERA_GREEN_STEADY_S - 1e-9 or self._left_red[2] >= RED_GONE_S - 1e-9:
-        cloudlog.event("turnpilot.left_red_released", maneuver_id=mid, green_s=round(self._left_red[1], 2),
+      # let go as a camera stop is (_camera_releases): its green steady (GreenReads: counted in the reader's runs, an
+      # accepted source's in frames), or a head in view there with no red or yellow read for RED_GONE_S on end and
+      # RED_GONE_READS runs (no head in view there, or no fresh read, says nothing: the run starts again, the latch stands)
+      green, new_run = self._left_red[1], cam_new or lights.lights is not None
+      green.update('green' in states, False, None if lights.lights is not None else self._latch_run, dt)
+      # ...a head there all dark toward the car (CameraLights.dark) is not one in view
+      n_dark = sum(lo <= d - self._latch_run_m <= hi for _, d in cam.dark) if cam is not None and not cam.shadow else 0
+      n_cam = sum(lo <= d - self._latch_run_m <= hi for _, d in cam.heads) if cam is not None and not cam.shadow else 0
+      in_view = bool({st for st, d in (lights.lights or []) if lo <= d <= hi}) or n_cam > n_dark
+      self._left_red[2], self._left_red[3] = (self._left_red[2] + dt, self._left_red[3] + new_run) if in_view else (0., 0)
+      if green.steady or (self._left_red[2] >= RED_GONE_S - 1e-9 and self._left_red[3] >= RED_GONE_READS):
+        cloudlog.event("turnpilot.left_red_released", maneuver_id=mid, green_s=round(green.first_t, 2),
                        gone_s=round(self._left_red[2], 2), distance=round(dist, 1))
         self._left_red = None
 
@@ -1624,18 +1691,32 @@ class MapControlPolicy:
         seen = self._camera_heads(c, live_signals, camera) if acting else []
         heads = [h for h in seen if h != 'unknown']
         st.camera = heads[0] if len(set(heads)) == 1 else 'unknown'
-        st.cam_stop, st.cam_green, st.cam_seen = sum(h in ('red', 'yellow') for h in heads), heads.count('green'), len(seen)
+        # in view for RED_GONE_S: its heads with a lamp read lit or a vote held; one all dark toward the car says nothing
+        dark = self._camera_heads(c, live_signals, camera, camera.dark) if acting and camera.dark else []
+        st.cam_stop, st.cam_green, st.cam_seen = sum(h in ('red', 'yellow') for h in heads), heads.count('green'), len(seen) - len(dark)
         if acting:
           # its own heads' red or yellow, else the turn's junction's (_turn_camera: a far-side head out of a set-back line's
           # own window is still that line's red, 2026-11-06), never a group's disagreeing read in place of its own red
           own = camera_state(c, live_signals, camera)
           st.light = self._camera_adds(c, st, own if own in ('red', 'yellow') else st.camera, v)
         st.green_t = st.green_t + dt if st.light == 'green' else 0.
-        green = st.cam_green > st.cam_stop and st.light not in ('red', 'yellow')
-        st.camera_green_t = st.camera_green_t + dt if green else 0.
+        stopping = bool(st.cam_stop) or st.light in ('red', 'yellow')
+        # this frame's camera read is one not yet counted for it: the timers below count the reader's runs with their
+        # seconds, so they ask the same evidence whatever the road pass's rate
+        new_run = acting and camera.run != st.cam_run
+        st.cam_acting = acting
+        if new_run:
+          st.cam_run = camera.run
+        # its green: more of its heads green than red or yellow (a red left arrow beside green balls), and no red or yellow
+        # its light; as many red as green, or its light red or yellow, ends the green read so far
+        red_light = st.light in ('red', 'yellow')
+        st.camera_green.update(st.cam_green > st.cam_stop and not red_light, red_light or st.cam_stop >= max(st.cam_green, 1),
+                               camera.run if acting else None, dt)
+        st.camera_green_t = st.camera_green.first_t
         # no head of it in view (hidden, out of the frame, the read stale) is not its red gone: the run starts again
-        st.red_gone_t = 0. if st.cam_stop or st.light in ('red', 'yellow') or not st.cam_seen else st.red_gone_t + dt
-        st.red_ago_t = 0. if st.cam_stop or st.light in ('red', 'yellow') else st.red_ago_t + dt
+        gone = not stopping and bool(st.cam_seen)
+        st.red_gone_t, st.red_gone_n = (st.red_gone_t + dt, st.red_gone_n + new_run) if gone else (0., 0)
+        st.red_ago_t, st.red_ago_n = (0., 0) if stopping else (st.red_ago_t + dt, st.red_ago_n + new_run)
         self._signal_reads(c, st, v, dt)
       if c.held:
         self._held(c, controls, v, gas_pressed, dt, out, prompts)
@@ -1723,7 +1804,7 @@ class MapControlPolicy:
     self._camera_log(live_signals, camera, v)
     return out
 
-  def _camera_heads(self, c, signals, camera: CameraLights) -> list:
+  def _camera_heads(self, c, signals, camera: CameraLights, heads: list | None = None) -> list:
     """The states of signal c's heads as the camera reads them, unknown too (ControlState.camera is what those with a colour
     agree on: its green, and its red or yellow where its own heads read neither, _camera_adds): its own heads' (camera_owner),
     or at a route turn's junction the heads of all the
@@ -1736,6 +1817,7 @@ class MapControlPolicy:
     taking: skipped, going straight on the model, or the unprotected left's; _junction_lines, JunctionLine.governs) groups the
     same way: its far-side heads are its red too, a stop from far out at its own line (S1, review 2026-11-07: a line 26 m back,
     the far head 41 m past it red from 166 m out, and the car went through at 13.4 m/s with nothing said but an error log)."""
+    heads = camera.heads if heads is None else heads  # heads: those of the read's to place instead (its dark ones)
     st = c.state
     mid = st.turn_id if st is not None else None
     jd = self._junction_d
@@ -1743,14 +1825,14 @@ class MapControlPolicy:
       rec = self._junction_lines.get(jd[0], {}).get(c.key)
       mid = jd[0] if rec is not None and rec.governs and rec.seen and not rec.passed else None
     if mid is None:
-      return [s for s, dist in camera.heads if camera_owner(dist, signals) is c]
+      return [s for s, dist in heads if camera_owner(dist, signals) is c]
     owners = list(signals)
     group = {id(o) for o in owners if o is c or (o.state is not None and o.state.turn_id == mid)}
     if jd is not None and jd[0] == mid:
       own = TrackedControl((CAMERA_ROUTE, jd[0]), 'signal', jd[1] - CONTROL_LINE_M)
       owners.append(own)
       group.add(id(own))
-    return [s for s, dist in camera.heads if id(camera_owner(dist, owners)) in group]
+    return [s for s, dist in heads if id(camera_owner(dist, owners)) in group]
 
   def _turn_camera(self, c, signals, camera: CameraLights) -> str:
     """What the camera's heads for signal c that read a colour agree on (_camera_heads), else unknown."""
@@ -1769,7 +1851,7 @@ class MapControlPolicy:
       st.accepted_stop = True
     if st.light in ('red', 'yellow'):
       st.turn_stop = False
-    if st.green_t >= GREEN_STEADY_S - 1e-9 or st.camera_green_t >= CAMERA_GREEN_STEADY_S - 1e-9:
+    if st.green_t >= GREEN_STEADY_S - 1e-9 or st.camera_green.steady:
       st.turn_go = True
     st.green_age_t = 0. if 'green' in (st.light, st.camera) else st.green_age_t + dt
     if not st.turn_go or st.green_age_t < TURN_GREEN_STALE_S - 1e-9:
@@ -1790,15 +1872,17 @@ class MapControlPolicy:
   def _camera_releases(self, st) -> str:
     """Why this signal's stop is let go on what the camera reads, '' while it isn't: a stop the camera's red or yellow raised
     (camera_added) with no accepted source's red or yellow in it (accepted_stop), on its steady green (cameraGreen:
-    CAMERA_GREEN_STEADY_S of more of its heads green than red) or once its heads, in view, have read no red or yellow for
-    RED_GONE_S on end (redGone). TurnPilot's stop and latch alone: the model's own hold stays in the planner's min(), and plannerd's lift needs
+    GreenReads, more of its heads green than red in CAMERA_GREEN_READS road runs over CAMERA_GREEN_STEADY_S) or once its
+    heads, in view, have read no red or yellow for RED_GONE_S on end and RED_GONE_READS road runs (redGone). TurnPilot's
+    stop and latch alone: the model's own hold stays in the planner's min(), and plannerd's lift needs
     an accepted green (release_light)."""
     if not st.camera_added or st.accepted_stop:
       return ''
-    if st.camera_green_t >= CAMERA_GREEN_STEADY_S - 1e-9:
+    if st.camera_green.steady:
       return 'cameraGreen'
     # never a curb-side turn's signal: with no green read its stop stands for its right-on-red go, read red or not
-    return 'redGone' if st.red_gone_t >= RED_GONE_S - 1e-9 and self._right_turn(st) is None else ''
+    gone = st.red_gone_t >= RED_GONE_S - 1e-9 and st.red_gone_n >= RED_GONE_READS
+    return 'redGone' if gone and self._right_turn(st) is None else ''
 
   def _camera_adds(self, c, st, cam: str, v: float) -> str:
     """Add-only: signal c's light raised by the camera's (module docstring). Never lowered, and never on a line the car went
@@ -1900,11 +1984,15 @@ class MapControlPolicy:
         cause = 'green'
       elif self._camera_releases(st):
         cause = self._camera_releases(st)  # a camera stop, its green steady or its red gone: the latch only
-      elif right is not None and st.dwell_t >= RIGHT_RED_DWELL_S - 1e-9 and st.right_clear_t >= RIGHT_RED_CLEAR_S - 1e-9 and \
-           st.red_ago_t >= RIGHT_RED_UNREAD_S - 1e-9 and v < LATCH_SPEED and not gas_pressed:
+      # no red or yellow read for it for RIGHT_RED_UNREAD_S and, once one was read and while the camera's reader reads,
+      # RIGHT_RED_UNREAD_READS of its road runs since: the same looks at any run rate
+      unread = st.red_ago_t >= RIGHT_RED_UNREAD_S - 1e-9 and \
+        (st.red_ago_t >= 1e8 or not st.cam_acting or st.red_ago_n >= RIGHT_RED_UNREAD_READS)
+      if cause is None and right is not None and st.dwell_t >= RIGHT_RED_DWELL_S - 1e-9 and \
+         st.right_clear_t >= RIGHT_RED_CLEAR_S - 1e-9 and unread and v < LATCH_SPEED and not gas_pressed:
         cause = 'rightOnRed'  # stood, looked, clear, no red or yellow read for it: its go on an unread light (module docstring)
       # a red read for it (or one not yet RIGHT_RED_UNREAD_S unread) is what it waits on, whatever its look says
-      right_reason = '' if right is None else (right[2] or RIGHT_RED_LOOKING_REASON) if st.red_ago_t >= RIGHT_RED_UNREAD_S - 1e-9 else \
+      right_reason = '' if right is None else (right[2] or RIGHT_RED_LOOKING_REASON) if unread else \
         RED_PAST_REASON if st.past_red else RIGHT_RED_WAIT_REASON
       reason = right_reason if right is not None else RED_PAST_REASON if st.past_red else \
         f"Red light ({self._light_source()}){'' if c.junction else ' (crossing)'}" if st.light == 'red' else \
@@ -2090,6 +2178,15 @@ class MapControlPolicy:
   def _approach(self, c, controls, v, gas_pressed, gas_lift, out, prompts) -> bool:
     """A stop sign or signal not held: the curve, the decisions, the latch. True while it is infeasible."""
     st = c.state
+    if c.kind == UNPROTECTED:
+      # the autonomous left's go with the car still rolling up to its line (unprotected_left's rolling go): its stop is let
+      # go where the latch never held it, cause gap, as its go from a stand is (_held); a go withdrawn after it is the
+      # left's own hold (LeftDecision.stops), never this stop again
+      req, left = getattr(self, '_release_req', None), getattr(self, 'left', LeftCommand())
+      if left.mode == 'auto' and left.go and req is not None and req[0] == c.key:
+        st.action = 'released'
+        self._release(c, controls, req[1], v, out)
+        return False
     if c.kind == 'signal':
       self._signal_mode(c, v)
       if st.mode != SIGNAL_STOP:  # nothing to stop for: no stop, no cap, no prompt (module docstring)

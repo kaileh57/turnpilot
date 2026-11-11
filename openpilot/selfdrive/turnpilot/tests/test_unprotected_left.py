@@ -9,8 +9,10 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot import unprotected_left as ul
 from openpilot.selfdrive.turnpilot.hooks import TAKE_CONTROL_PROMPTS
 from openpilot.selfdrive.turnpilot.route_follower import LEFT
-from openpilot.selfdrive.turnpilot.scene_policy import ONCOMING_ENTRY_M, VEL_TRUST_HITS
+from openpilot.selfdrive.turnpilot.map_controls import CAMERA_GREEN_STEADY_S
+from openpilot.selfdrive.turnpilot.scene_policy import ONCOMING_ENTRY_M, STOP_DECEL, STOP_LAG_S, VEL_TRUST_HITS
 from openpilot.selfdrive.turnpilot.tests.synthetic import scene
+from openpilot.selfdrive.turnpilot.unprotected_left import ROLL_LEAD_S, ROLL_PULSE_S, ROLL_STOP_LAG_S, VETO_MARGIN_M, roll_time
 from openpilot.selfdrive.turnpilot.unprotected_left import (BLOCKED_UNDECIDED_S, CLEAR_WINDOW_S, CREEP_MAX_M, CREEP_SHORT_M, CREEP_STALL_S, GO_LATENCY_S,
                                                            HELD_MIN_M,
                                                            LIGHT_RED_MAX_S, LIGHT_UNKNOWN_S, LONG_WAIT_REASON, PET_S, RAW_CONF,
@@ -1623,14 +1625,15 @@ def moving(box, motion):
 
 def test_a_box_going_away_or_standing_outside_the_opposing_lanes_is_no_oncoming_car():
   """Drive 29, a held left (seg 7): two cars parked at the far-left curb 40-70 m up and our own direction's car ahead were
-  far-crop band blockers on every far run for 30 s. A box the tracker says is receding never blocks; one standing blocks
+  far-crop band blockers on every far run for 30 s. A box the tracker says is receding on our own side of the oncoming
+  lanes never blocks (on their side it does: test_a_receding_box_on_the_oncoming_side_still_blocks); one standing blocks
   unless it is wholly beyond the opposing lanes' far edge (one opposing lane: 5.4 m to the turn side) or wholly on our side
   of the car's centre line. Unknown and closing boxes block wherever they are."""
   far_curb, ahead, oncoming_lane = raw(60., 7.5), raw(110., -2.8), raw(60., 3.6)
   for box in (far_curb, ahead, oncoming_lane):
     for motion in ('unknown', 'closing'):
       assert band_blockers([moving(box, motion)], 0., LEFT, math.inf, HOLD_D, lanes=1), (box.xy, motion)
-    assert not band_blockers([moving(box, 'receding')], 0., LEFT, math.inf, HOLD_D, lanes=1), box.xy
+    assert bool(band_blockers([moving(box, 'receding')], 0., LEFT, math.inf, HOLD_D, lanes=1)) == (box is not ahead), box.xy
   assert not band_blockers([moving(far_curb, 'standing')], 0., LEFT, math.inf, HOLD_D, lanes=1)
   assert not band_blockers([moving(ahead, 'standing')], 0., LEFT, math.inf, HOLD_D, lanes=1)
   # standing in the opposing lanes (a queue at its light, about to launch): it blocks
@@ -1675,3 +1678,185 @@ def test_a_car_standing_then_launching_blocks_again_inside_the_windows_freshness
       again = next(t for t, blk, _ in blocks if t > 3. and blk)
       assert again - 3. <= 2.0, (y, seed, again)
       assert all(blk for t, blk, _ in blocks if t >= again), (y, seed)
+
+
+# --- the rolling go (ROLLING_GO): asked on the approach, the left's once its line's stop is seen let go ---
+
+ROLL_KW = {'roll_light': 'none', 'roll_v': 4.65, 'lane_ok': True}
+
+
+def roll_in(j, v=6., d0=60., until=None, boxes=lambda d: (), release=True, **kw):
+  """The car rolling in at v from d0 m, un-held, a road run every other frame of boxes(distance); release: the line's stop is
+  let go the frame after a rolling go is asked (LeftInput.latch_gone, as map_controls does). Steps until the decision's state
+  leaves 'approach' or the distance is until; the decisions."""
+  j.held, j.v, j.distance = False, v, d0
+  out, gone, k = [], False, 0
+  while j.distance > (until if until is not None else 5.):
+    k += 1
+    d = j.step(boxes=boxes(j.distance), raw_new=bool(k % 2), distance=j.distance - v * DT_MDL, latch_gone=gone, **{**ROLL_KW, **kw})
+    out.append(d)
+    gone = gone or (release and d.go)
+    if d.state != 'approach':
+      break
+  return out
+
+
+def test_a_rolling_go_is_asked_at_its_point_and_is_the_lefts_only_once_the_lines_stop_is_gone():
+  j = Junction()
+  seen = roll_in(j)
+  ask = next(i for i, d in enumerate(seen) if d.go)
+  # 'far' until the point (the stop for the line about to take the car under the corner's speed, ROLL_LEAD_S before), then asked
+  assert all(d.roll == 'far' and not d.go and d.state == 'approach' for d in seen[:ask])
+  assert seen[ask].roll == 'go' and seen[ask].state == 'approach' and not seen[ask].rolled
+  d_ask = j.distance + (len(seen) - 1 - ask) * 6. * DT_MDL
+  assert 9. + 6. * (STOP_LAG_S + ROLL_LEAD_S) + 4.65 ** 2 / 3. - 0.5 < d_ask <= 9. + 6. * (STOP_LAG_S + ROLL_LEAD_S) + 4.65 ** 2 / 3.
+  # the next frame the stop is seen let go: gone, moving, rolled
+  assert seen[-1].state == 'go' and seen[-1].rolled and j.left.went and j.left.moved
+  # the same roll-in where the line's stop is kept: refused, and never asked again for this left
+  j = Junction()
+  seen = roll_in(j, release=False, until=12.)
+  assert sum(d.go for d in seen) == 1 and all(d.state == 'approach' and not d.rolled for d in seen)
+  assert seen[-1].roll == 'done' and not j.left.went
+
+
+@pytest.mark.parametrize('kw, why', [
+  ({'lane_ok': False}, 'lane'), ({'wrong_lane': True}, 'lane'), ({'signal_lit': False}, 'lamp'), ({'roll_light': 'unread'}, 'light'),
+  ({'light': 'red', 'roll_light': 'unread'}, 'light'), ({'light': 'unknown'}, 'light'), ({'other_hold': True}, 'hold'),
+  ({'scene_clear': False}, 'scene'), ({'enabled': False}, 'disengaged'), ({'junction_uncertain': True}, 'position'),
+  ({'model_holds': 'light'}, 'hold'),
+])
+def test_what_a_go_from_a_stand_needs_a_rolling_go_needs_and_a_lamp_a_lane_and_a_read_light_besides(kw, why):
+  j = Junction()
+  seen = roll_in(j, until=12., **kw)
+  assert not any(d.go for d in seen)
+  assert why in {d.roll for d in seen} and {d.roll for d in seen} <= {'far', why, 'late', 'done'}, {d.roll for d in seen}
+
+
+def green_roll(read, v=6., d0=60.):
+  """A roll-in at a signal; read(t) -> (roll_light, the camera read's number or None for a source read every frame). The
+  time a rolling go is asked, None if never."""
+  j, k = Junction(), 0
+  j.held, j.v, j.distance = False, v, d0
+  while j.distance > 12.:
+    k += 1
+    light, run = read(k * DT_MDL)
+    d = j.step(raw_new=bool(k % 2), distance=j.distance - v * DT_MDL,
+               **{**ROLL_KW, 'roll_light': light, 'roll_run': run, 'light': 'green' if light == 'green' else 'none'})
+    if d.go:
+      return k * DT_MDL
+  return None
+
+
+def test_a_rolling_go_at_a_signal_needs_map_controls_steady_green():
+  t_point = next(i for i, d in enumerate(roll_in(Junction(), until=12., roll_light='unread')) if d.roll != 'far') * DT_MDL
+  # an accepted source's green, read every frame the whole approach: asked at the point
+  assert abs(green_roll(lambda t: ('green', None)) - t_point) <= 2 * DT_MDL
+  # ...green only from 0.5 s before the point: asked once it has been green CAMERA_GREEN_STEADY_S, never sooner
+  asked = green_roll(lambda t: ('green', None) if t >= t_point - 0.5 else ('unread', None))
+  assert asked is not None and asked >= t_point - 0.5 + CAMERA_GREEN_STEADY_S - DT_MDL
+  # the camera's green by its road runs: one read carried a second (the same run on every frame) is never steady...
+  assert green_roll(lambda t: ('green', 7) if t >= t_point - 1. else ('unread', None)) is None
+  # ...CAMERA_GREEN_READS runs reading it over CAMERA_GREEN_STEADY_S are (a read every 0.2 s)...
+  assert green_roll(lambda t: ('green', int(t / 0.2))) is not None
+  # ...and a red or yellow read between them starts the count over: none by the roll's last point
+  def red_between(t):
+    return ('unread', None) if abs(t - (t_point - 0.3)) < 0.1 else ('green', int(t / 0.2))
+  j, k, asked = Junction(), 0, None
+  j.held, j.v, j.distance = False, 6., 60.
+  while j.distance > 12. and asked is None:
+    k += 1
+    light, run = red_between(k * DT_MDL)
+    red = light == 'unread'
+    d = j.step(raw_new=bool(k % 2), distance=j.distance - 6. * DT_MDL,
+               **{**ROLL_KW, 'roll_light': light, 'roll_run': run, 'light': 'red' if red else 'green'})
+    asked = k * DT_MDL if d.go else None
+  assert asked is None or asked >= t_point - 0.2 + CAMERA_GREEN_STEADY_S - DT_MDL
+
+
+def test_a_box_in_the_band_or_a_run_gap_on_the_roll_in_leaves_no_rolling_go():
+  # a car in the band on one run half a second before the point: the window isn't full again by the roll's last point
+  hit = [False]
+
+  def one_box(d):
+    if 31. < d < 32.5 and not hit[0]:
+      hit[0] = True
+      return [raw(80., 3.6)]
+    return ()
+  seen = roll_in(Junction(), boxes=one_box, until=12.)
+  assert hit[0] and not any(d.go for d in seen) and {'window', 'band'} & {d.roll for d in seen}
+  # the rule's motion exemptions hold rolling too: a car standing beyond the oncoming lane's far edge, and one going away
+  parked = dataclasses.replace(raw(60., 8.), motion='standing')
+  away = dataclasses.replace(raw(50., 0.5), motion='receding')
+  assert roll_in(Junction(), boxes=lambda d: [parked, away])[-1].rolled
+  # ...and never for one standing in the oncoming lane itself, or one whose motion isn't told
+  for b in (dataclasses.replace(raw(60., 3.6), motion='standing'), raw(60., 8.)):
+    assert not any(d.go for d in roll_in(Junction(), boxes=lambda d, b=b: [b], until=12.))
+
+
+def test_no_rolling_go_once_a_withdrawn_one_could_no_longer_stop_short_of_the_oncoming_lanes():
+  # the window fills only late (boxes until 22 m out at 6 m/s): by then a stop from 6 m/s on the comfortable curve
+  # (ROLL_STOP_LAG_S, VETO_MARGIN_M) no longer ends short of the oncoming lanes, so none is asked: 'late', then 'done'
+  seen = roll_in(Junction(), boxes=lambda d: [raw(80., 3.6)] if d > 34. else (), until=8.)
+  rolls = [d.roll for d in seen]
+  assert not any(d.go for d in seen) and 'late' in rolls and rolls[-1] == 'done'
+  first_late = next(i for i, r in enumerate(rolls) if r == 'late')
+  d_late = 60. - (first_late + 1) * 6. * DT_MDL
+  assert d_late - ONCOMING_ENTRY_M < 6. * ROLL_STOP_LAG_S + 36. / (2. * STOP_DECEL) + VETO_MARGIN_M + 6. * DT_MDL
+
+
+def test_a_rolling_go_is_rechecked_every_run_and_withdrawn_to_the_lefts_own_stop_while_the_car_can_stop():
+  j = Junction()
+  seen = roll_in(j)
+  assert seen[-1].rolled
+  # a car in the band on the next road run: withdrawn, the left's own stop on the comfortable curve from where the car is
+  d = j.step(boxes=[raw(70., 3.6)], distance=j.distance - 6. * DT_MDL, latch_gone=True, **ROLL_KW)
+  assert d.state == 'waitGap' and d.alert == 'oncomingHolding' and len(d.stops) == 1 and not j.left.went and j.left.hold_here
+  assert d.stops[0].accel_cap >= -STOP_DECEL - 1e-6 or d.stops[0].speed_cap >= 6. - STOP_DECEL  # never harder than the curve
+  # past where its stop would end HELD_MIN_M short of the junction (VETO_MARGIN_M to spare) it is never withdrawn
+  j = Junction()
+  roll_in(j)
+  while 36. / (2. * STOP_DECEL) + VETO_MARGIN_M < j.distance - HELD_MIN_M:
+    assert j.step(distance=j.distance - 6. * DT_MDL, latch_gone=True, **ROLL_KW).state == 'go'
+  d = j.step(boxes=[raw(40., 3.6)], distance=j.distance - 6. * DT_MDL, latch_gone=True, **ROLL_KW)
+  assert d.state == 'go' and not d.stops and not d.withdrawable
+
+
+def test_a_rolling_go_whose_turn_never_pulses_is_withdrawn():
+  j = Junction()
+  assert roll_in(j)[-1].rolled
+  states = [j.step(distance=j.distance - 6. * DT_MDL, latch_gone=True, desire_out=False, **ROLL_KW) for _ in range(round(ROLL_PULSE_S / DT_MDL) + 1)]
+  out = next(i for i, d in enumerate(states) if d.state != 'go')
+  assert abs((out + 1) * DT_MDL - ROLL_PULSE_S) <= DT_MDL + 1e-6
+  assert states[out].state == 'waitGap' and states[out].reason == "Turn not started, holding" and states[out].stops and j.left.hold_here
+
+
+def test_a_rolling_gos_clear_time_is_never_less_than_its_own_speed_takes():
+  # rolling at 2 m/s after the go (a lead, the model slowing): the band is judged to the range that speed's crossing needs
+  j = Junction()
+  assert roll_in(j)[-1].rolled
+  fast = j.step(distance=j.distance - 6. * DT_MDL, latch_gone=True, **ROLL_KW)
+  slow = j.step(v=2., distance=j.distance - 2. * DT_MDL, latch_gone=True, **ROLL_KW)
+  assert slow.t_req > fast.t_req + 3. and slow.r_req > fast.r_req + 40.
+  assert abs(slow.t_req - roll_time(j.distance, 1, 2.)) < 1e-6
+
+
+def test_the_public_switches_turn_the_rolling_go_off(monkeypatch):
+  j = Junction()
+  j.left.window_from_approach = False
+  assert {d.roll for d in roll_in(j, until=12.)} == {'off'}
+  monkeypatch.setattr(ul, 'ROLLING_GO', False)
+  assert {d.roll for d in roll_in(Junction(), until=12.)} == {'off'}
+  monkeypatch.undo()
+  assert {d.roll for d in roll_in(Junction(), until=12., roll_v=0.)} == {'off'}  # the corner's speed not known
+
+
+def test_a_receding_box_on_the_oncoming_side_still_blocks():
+  r = 140.
+  # going away in our own lane or the lanes to our right: no oncoming car
+  for y in (0.5, -0.5, -3.5):
+    assert not band_blockers([dataclasses.replace(raw(60., y), motion='receding')], 0., LEFT, r, HOLD_D), y
+  # read receding with its whole box beyond where the oncoming lanes begin: nothing going our way is there (a track stepping
+  # along a row of standing cars reads so), so it blocks as any box; and so does one with no range
+  for y in (3.6, 5., 8.):
+    assert band_blockers([dataclasses.replace(raw(60., y), motion='receding')], 0., LEFT, r, HOLD_D), y
+  assert band_blockers([dataclasses.replace(raw(300., 4., ranged=False), motion='receding')], 0., LEFT, r, HOLD_D)

@@ -1,4 +1,5 @@
 import time
+import types
 from collections import deque
 from contextlib import contextmanager
 
@@ -517,6 +518,34 @@ def test_standing_at_a_signal_the_lights_are_read_every_other_run(monkeypatch):
   assert {str(td.lanePaintStatus) for td in road} == {'noRoom', 'read'}
 
 
+def test_held_past_a_signals_line_the_road_camera_still_reads_the_lights_five_times_a_second(monkeypatch):
+  # route 29's right at a red: the car stood 6 m past the mapped line for 12.5 s. The plan showed no signal "near" once its
+  # line was behind the car, so the stand was the slow cycle's (one road run in 3) and, each time the car crept with the
+  # curvature frozen over WIDE_CURVATURE, the wide camera alone for WIDE_HOLD_S: 26 road runs to 99 wide ones, 2 a second, the
+  # only runs that read the light. A signal the plan shows up to SIGNAL_PAST_M past its line (it shows one there only while
+  # its stop holds the car or still brakes it) is near: the road camera every other run, 5 a second, standing and creeping
+  from openpilot.cereal import messaging
+  from openpilot.selfdrive.turnpilot.detector.modeld_detector import SIGNAL_PAST_M, SWEEP_SIGNAL_M, plan_inputs
+  msg = messaging.new_message('turnpilotPlan')
+  p = msg.turnpilotPlan
+  p.mapControl.kind = 'signal'
+  near = {}
+  for d in (SWEEP_SIGNAL_M + 1., SWEEP_SIGNAL_M - 1., 3., 0., -1.5, -6., -SIGNAL_PAST_M - 1.):
+    p.mapControl.distance = d
+    near[d] = plan_inputs(msg.as_reader().turnpilotPlan)[2]
+  assert near == {SWEEP_SIGNAL_M + 1.: False, SWEEP_SIGNAL_M - 1.: True, 3.: True, 0.: True, -1.5: True, -6.: True, -SIGNAL_PAST_M - 1.: False}
+  p.mapControl.kind, p.mapControl.distance = 'stop', -1.5
+  assert plan_inputs(msg.as_reader().turnpilotPlan)[2] is False
+  for v, curvature in ((0., 0.0117), (0.4, 0.0117), (0., 0.)):  # standing, creeping with the curvature frozen, standing straight
+    det, pm, cams = junction_drive(monkeypatch, 240, v, curvature, near[-6.])
+    runs = [c for c in cams if c is not None]
+    assert runs.count('road') == len(runs) // 2 >= 60 and max(road_gaps(cams)) == 2 * RUN_EVERY, (v, curvature)  # 5 Hz over 12 s
+    assert all(td.lightStatus == LightStatus.read for td in pm.sent if str(td.camera) == 'road')
+  # what the stand got before: the signal not near, creeping with the frozen curvature holds the wide camera throughout
+  det, pm, cams = junction_drive(monkeypatch, 240, 0.4, 0.0117, False)
+  assert [c for c in cams if c is not None].count('road') == 0
+
+
 def test_the_paint_is_skipped_outright_only_under_its_readers_floors():
   # standing near a signal the paint is skipped for the lights' room, but never where something reads it: the wrong-side
   # guard (WRONG_SIDE_MIN_SPEED) and the lane planner's changes (LC_SPEED_MIN) read it from their floors up
@@ -679,6 +708,40 @@ class TestCameraLights(OpenpilotTestCase):
     det.step(pm, det.model_state, 0.010, 0.0, log.Desire.none, [Meta(7), Meta(8)])
     assert det.lights.calls == [('host0', 7, [TRAFFIC_LIGHT, TRAFFIC_LIGHT])]
     assert [round(b.conf, 2) for b in pm.sent[0].lightBoxes] == [0.8]
+
+  def test_the_reader_is_given_boxes_down_to_the_green_floor(self):
+    # a green lamp at night is boxed at 0.10-0.19 (decoder.LIGHT_GREEN_CONF): the reader is given class 9 down to that floor
+    # (it makes a head of one only on a green read), and lightBoxes still carry MIN_CONF's alone
+    from openpilot.selfdrive.turnpilot.detector.decoder import LIGHT_GREEN_CONF, LIGHT_READ_CONF
+    assert LIGHT_GREEN_CONF < 0.15 < LIGHT_READ_CONF
+    det, pm = with_lights(make_detector()), PM()
+    det.run.raw[0, 2] = [*det.lb.to_input(800, 120), *det.lb.to_input(815, 165), 0.15, TRAFFIC_LIGHT]
+    det.run.raw[0, 3] = [*det.lb.to_input(900, 120), *det.lb.to_input(915, 165), LIGHT_GREEN_CONF - 0.02, TRAFFIC_LIGHT]
+    det.step(pm, det.model_state, 0.010, 0.0, log.Desire.none, [Meta(7), Meta(8)])
+    assert det.lights.calls == [('host0', 7, [TRAFFIC_LIGHT, TRAFFIC_LIGHT])]
+    assert [round(b.conf, 2) for b in pm.sent[0].lightBoxes] == [0.8]
+
+  def test_the_boxes_the_reader_did_not_publish_are_logged_beside_the_heads(self):
+    # an rlog alone must show every class-9 box the reader considered down to LIGHT_READ_CONF, with its confidence and why
+    # it is no head: lightRejects carries the reader's unpublished boxes on the road run's message, and neither lights nor
+    # lightBoxes (what turnpilotd and the tracker read) change for it
+    det, pm = with_lights(make_detector()), PM()
+    det.lights.reader = types.SimpleNamespace(rejects=[
+      LightHead(-1, (0.1, 0.6, 0.11, 0.65), 0.31, 'unknown', 0, 'unknown', 'belowHorizon', 4., 150., False),
+      LightHead(9, (0.6, 0.1, 0.61, 0.16), 0.22, 'unknown', 0, 'unknown', 'dark', -2., 60., True, 'h44 fr0.01/0.00/0.02')])
+    det.step(pm, det.model_state, 0.010, 0.0, log.Desire.none, [Meta(7), Meta(8)])
+    td = pm.sent[0]
+    assert [(str(x.state), str(x.read), x.reason, round(x.conf, 2), x.governs) for x in td.lightRejects] == \
+      [('unknown', 'unknown', 'belowHorizon', 0.31, False), ('unknown', 'unknown', 'dark', 0.22, True)]
+    assert td.lightRejects[1].instance == 'head9 h44 fr0.01/0.00/0.02' and len(td.lightRejects[1].box) == 4
+    assert [str(x.state) for x in td.lights.lights] == ['red'] and [round(b.conf, 2) for b in td.lightBoxes] == [0.8]
+    # a wide run reads no lights and carries none; a reader with nothing unpublished carries an empty list
+    det.since_run = RUN_EVERY
+    det.step(pm, det.model_state, 0.010, 0.03, log.Desire.none, [Meta(11), Meta(12)])
+    assert pm.sent[1].lightStatus == LightStatus.wideCamera and len(pm.sent[1].lightRejects) == 0
+    det2, pm2 = with_lights(make_detector()), PM()
+    det2.step(pm2, det2.model_state, 0.010, 0.0, log.Desire.none, [Meta(7), Meta(8)])
+    assert len(pm2.sent[0].lightRejects) == 0 and len(pm2.sent[0].lights.lights) == 1
 
   def test_add_only_mode_is_not_shadow(self):
     det, pm = with_lights(make_detector(), 'addOnly'), PM()

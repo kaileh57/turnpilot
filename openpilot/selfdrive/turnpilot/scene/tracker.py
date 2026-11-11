@@ -120,10 +120,13 @@ MOTION_MOVE_MPS = 2.5      # closing or receding: radial speed past this
 # lateral speed MOTION_MOVE_MPS: the fit's noise grows with range (route 29, cars parked 55-120 m out at a held left, one
 # fit in 15 past 2.5 m/s and none past 4.2 m/s), and one noisy fit must not throw a parked car back into the band
 MOTION_LEAVE_PER_M = 0.04
-# standing and receding only with the car this slow through the whole fit (at a left's line, its creep): moving, a near box's
-# width and bottom change with the angle it is seen at, and on route 29 parked cars passed at 10 m/s fitted -6 to -10 m/s.
-# Moving, a box is closing or unknown, never cleared
+# the car faster than this at any sighting of the fit is moving: its own travel and turn are taken out of every sighting
+# (BoxMotion.from_last), and a box is then cleared (standing, receding) only with room for what a mono range leaves of the
+# car's own speed in the box's (BoxMotion.verdict), each of the two ranges agreeing by itself
 MOTION_EGO_MAX_MPS = 3.0
+MOTION_EGO_MARGIN = 0.20       # ...standing: this share of the closing speed taken out to spare on the closing side
+MOTION_EGO_MARGIN_AWAY = 0.35  # ...receding (it clears a box anywhere in the band): this share
+MOTION_AWAY_SIGMA = 3.0        # receding, the car moving or not: the fit's radial speed this many of its own standard errors over 0
 MOTION_LOG_RANGE_STD = 0.08  # one sighting's ground range noise, as log range
 MOTION_WIDTH_STD_PX = {'far': 1.0, 'full': 2.5}  # one sighting's box width noise, road camera pixels (the full pass runs at
                                                  # 640 px across a 1344 px frame, the far crop at native resolution)
@@ -318,7 +321,8 @@ def wls_slope(t, y, w) -> tuple[float, float]:
 @dataclass
 class MotionTrack:
   group: int
-  obs: list    # (t, bearing rad in the yaw-fixed frame, bearing rad relative, log range | None, log width | None, width std, v_ego)
+  obs: list    # (t, bearing rad in the ground-fixed frame, bearing rad relative, log range | None, log width | None, width std,
+               # v_ego, the car's x, y in the ground-fixed frame)
   last_t: float
   motion: str = 'unknown'  # the last verdict (standing's hysteresis)
   line: tuple = (None, None, None)  # BoxMotion.fit_line's
@@ -326,26 +330,35 @@ class MotionTrack:
 
 class BoxMotion:
   """Run-to-run motion of the road camera's raw boxes (module constants MOTION_*). ego() hands it the car's speed and yaw
-  rate at each run; observe() takes one run's boxes and says each one's (motion, radial m/s, lateral m/s)."""
+  rate at each run, from which it dead-reckons the car's own place and heading in a ground-fixed frame (pose_at); observe()
+  takes one run's boxes and says each one's (motion, radial m/s, lateral m/s) over the ground."""
 
   def __init__(self):
     self.tracks: list[MotionTrack] = []
     self.v_ego, self.yaw_rate = 0., 0.
-    self.yaw, self.yaw_t = 0., None
+    self.x, self.y, self.yaw, self.yaw_t = 0., 0., 0., None
 
   def ego(self, t: float, v_ego: float, yaw_rate: float) -> None:
-    self.yaw_at(t)
-    self.v_ego, self.yaw_rate = float(v_ego), float(yaw_rate)
-
-  def yaw_at(self, t: float) -> float:
-    """The car's heading at camera time t (rad, left positive) in a frame fixed to the ground, integrated from yaw_rate."""
+    """The car's speed and yaw rate at camera time t: its place and heading carried there over the interval's mean speed and
+    yaw rate (the car brakes 1.5 m/s^2 into a left: the last sample held over a 0.8 s gap would be 0.5 m of travel off)."""
+    v_ego, yaw_rate = float(v_ego), float(yaw_rate)
     if self.yaw_t is None:
       self.yaw_t = t
-    if t >= self.yaw_t:
-      self.yaw += self.yaw_rate * (t - self.yaw_t)
+    elif t > self.yaw_t:
+      dt = t - self.yaw_t
+      d, dyaw = 0.5 * (self.v_ego + v_ego) * dt, 0.5 * (self.yaw_rate + yaw_rate) * dt
+      self.x += d * math.cos(self.yaw + 0.5 * dyaw)
+      self.y += d * math.sin(self.yaw + 0.5 * dyaw)
+      self.yaw += dyaw
       self.yaw_t = t
-      return self.yaw
-    return self.yaw - self.yaw_rate * (self.yaw_t - t)
+    self.v_ego, self.yaw_rate = v_ego, yaw_rate
+
+  def pose_at(self, t: float) -> tuple[float, float, float]:
+    """The car's (x, y, heading rad left positive) at camera time t in the ground-fixed frame: the last ego() sample carried
+    to t, either way, at its speed and yaw rate (a far run's time lies between two full passes')."""
+    dt = 0. if self.yaw_t is None else t - self.yaw_t
+    mid = self.yaw + 0.5 * self.yaw_rate * dt
+    return self.x + self.v_ego * dt * math.cos(mid), self.y + self.v_ego * dt * math.sin(mid), self.yaw + self.yaw_rate * dt
 
   @staticmethod
   def fit_line(trk: MotionTrack) -> None:
@@ -375,14 +388,14 @@ class BoxMotion:
     self.tracks = [trk for trk in self.tracks if t - trk.last_t <= MOTION_DROP_S]
     for trk in self.tracks:
       trk.obs = [o for o in trk.obs if t - o[0] <= MOTION_WINDOW_S] or trk.obs[-1:]
-    yaw = self.yaw_at(t)
+    ex, ey, yaw = self.pose_at(t)
     width_std = MOTION_WIDTH_STD_PX.get(view, MOTION_WIDTH_STD_PX['full'])
     obs = []
     for _, bearing, xy, width in items:
       b_rel = np.radians(bearing)
       lr = float(np.log(max(np.hypot(*xy), 1e-3))) if xy is not None else None
       lw = float(np.log(width)) if width is not None and width > 0. else None
-      obs.append((t, b_rel + yaw, b_rel, lr, lw, width_std / width if lw is not None else None, self.v_ego))
+      obs.append((t, b_rel + yaw, b_rel, lr, lw, width_std / width if lw is not None else None, self.v_ego, ex, ey))
     score = np.full((len(self.tracks), len(items)), -np.inf)
     groups = np.array([it[0] for it in items])
     ob = np.array([o[1] for o in obs])
@@ -393,6 +406,15 @@ class BoxMotion:
       if trk.last_t >= t or not same.any():
         continue  # one sighting a run
       b, lr, lw = self.predict(trk, t)
+      if len(trk.obs) == 1 and lr is not None:
+        # one sighting has no line yet: where a box standing there would be seen from the car's place now (at 5 m/s a box
+        # 25 m out and 8 m to the side swings 0.4 deg and 2% of its range in one run)
+        o = trk.obs[0]
+        r0 = math.exp(o[3])
+        px, py = o[7] + r0 * math.cos(o[1]) - ex, o[8] + r0 * math.sin(o[1]) - ey
+        r1 = max(math.hypot(px, py), 1e-3)
+        swing = math.remainder(math.atan2(py, px) - o[1], math.tau)  # the heading is integrated, never wrapped
+        b, lr, lw = o[1] + swing, math.log(r1), (None if lw is None else lw + o[3] - math.log(r1))
       db = np.abs(np.degrees(ob - b))
       with np.errstate(invalid='ignore'):
         dl = np.abs(olr - (np.nan if lr is None else lr))
@@ -421,26 +443,55 @@ class BoxMotion:
     return out
 
   @staticmethod
-  def departure(obs: list, r: float, cos_b: float) -> int:
+  def from_last(obs: list) -> list:
+    """Each sighting as it would be seen from where the car stood at the last one, were its box standing on the ground: the
+    car's own travel and turn since (the sightings' dead-reckoned poses) taken out exactly, not to first order (at 10 m/s the
+    car covers most of a 36 m box's range inside one window). Per sighting (log range by its ground range | None, that
+    range's noise share, log range by its width | None, that one's noise share, bearing rad off the last sighting's line of
+    sight | None): a noise share is how much the measured range's own relative noise grows in the carried one (an old
+    sighting from further back is a longer range carried to a shorter). The width's range is the track's own scale: the
+    median of log range plus log width over the sightings that have both. Standing still it is the sighting itself."""
+    both = [o[3] + o[4] for o in obs if o[3] is not None and o[4] is not None]
+    scale = statistics.median(both) if both else None
+    th_n, ex_n, ey_n = obs[-1][1], obs[-1][7], obs[-1][8]
+    ux, uy = math.cos(th_n), math.sin(th_n)
+    out = []
+    for o in obs:
+      dx, dy = o[7] - ex_n, o[8] - ey_n
+      along, across = dx * ux + dy * uy, -dx * uy + dy * ux
+      cos_d, sin_d = math.cos(o[1] - th_n), math.sin(o[1] - th_n)
+      row = [None, 1., None, 1., None]
+      for k, lr in ((0, o[3]), (2, scale - o[4] if scale is not None and o[4] is not None else None)):
+        if lr is None:
+          continue
+        r = math.exp(lr)
+        s = r * cos_d + along
+        if s <= 1.:
+          continue  # carried behind the car: no range to speak of
+        row[k], row[k + 1] = math.log(s), r / s
+        if row[4] is None:
+          row[4] = math.atan2(r * sin_d + across, s)
+      out.append(row)
+    return out
+
+  @staticmethod
+  def departure(obs: list, seen: list) -> int:
     """-1 (nearer) or +1 (farther) where the last MOTION_RECENT_S of sightings sit off the earlier ones' mean range by more
-    than MOTION_DEPART_SIGMA of their combined noise (log range and log width, each weighted by its noise), else 0. The
-    window's slope reads a launch late: a car standing 2 s of the 3 then moving at 2 m/s^2 fits a slope of a fraction of its
-    speed, so a stopped oncoming car that launched read standing for 2.4-3.2 s (route 29's parked cars' own noise). The car's
-    own creep along the line of sight (its speed through the sightings, cos_b at range r) is taken out."""
+    than MOTION_DEPART_SIGMA of their combined noise (log range by the ground and by the width, each weighted by its noise),
+    else 0. The window's slope reads a launch late: a car standing 2 s of the 3 then moving at 2 m/s^2 fits a slope of a
+    fraction of its speed, so a stopped oncoming car that launched read standing for 2.4-3.2 s (route 29's parked cars' own
+    noise). seen: from_last(obs), the car's own travel taken out."""
     t_end = obs[-1][0]
-    ego = [0.]  # the car's own travel at each sighting
-    for a, b in zip(obs, obs[1:], strict=False):
-      ego.append(ego[-1] + 0.5 * (a[6] + b[6]) * (b[0] - a[0]))
     num = den = 0.
-    for key, sign in ((3, 1.), (4, -1.)):  # log range, and minus log width: both fall as the car nears
-      rec = [(o, e) for o, e in zip(obs, ego, strict=True) if o[key] is not None and o[0] > t_end - MOTION_RECENT_S]
-      old = [(o, e) for o, e in zip(obs, ego, strict=True) if o[key] is not None and o[0] <= t_end - MOTION_RECENT_S]
+    for key, std in ((0, None), (2, 5)):  # the ground's log range, and the width's
+      rec = [(o, c) for o, c in zip(obs, seen, strict=True) if c[key] is not None and o[0] > t_end - MOTION_RECENT_S]
+      old = [(o, c) for o, c in zip(obs, seen, strict=True) if c[key] is not None and o[0] <= t_end - MOTION_RECENT_S]
       if len(rec) < MOTION_DEPART_OBS or len(old) < MOTION_DEPART_OBS:
         continue
       means, var = [], 0.
       for part in (rec, old):
-        w = [1. / (MOTION_LOG_RANGE_STD if key == 3 else o[5]) ** 2 for o, _ in part]
-        means.append(sum(wi * (sign * o[key] + e * cos_b / max(r, 1.)) for wi, (o, e) in zip(w, part, strict=True)) / sum(w))
+        w = [1. / ((MOTION_LOG_RANGE_STD if std is None else o[std]) * c[key + 1]) ** 2 for o, c in part]
+        means.append(sum(wi * c[key] for wi, (_, c) in zip(w, part, strict=True)) / sum(w))
         var += 1. / sum(w)
       num += (means[0] - means[1]) / var
       den += 1. / var
@@ -450,38 +501,66 @@ class BoxMotion:
     return 0 if abs(d) <= MOTION_DEPART_SIGMA * sigma else (-1 if d < 0. else 1)
 
   @staticmethod
-  def verdict(trk: MotionTrack) -> tuple[str, float | None, float | None]:
+  def fit(trk: MotionTrack) -> dict | None:
+    """The track's over-ground fit, None short of a verdict's sightings: its range now r, radial and lateral speed (m/s, +
+    away, + left), each channel's own radial speed (ground, width: None without it), the car's own fastest speed through the
+    sightings v, whether the last ones stepped off the earlier (departure), and sigma, the radial speed's own standard
+    error by the sightings' assumed noise."""
     obs = trk.obs
     if len(obs) < MOTION_MIN_OBS or obs[-1][0] - obs[0][0] < MOTION_MIN_SPAN_S - 1e-6:
-      return 'unknown', None, None
-    ranged = [o for o in obs if o[3] is not None]
-    if len(ranged) < MOTION_MIN_OBS // 2:
-      return 'unknown', None, None
-    r = math.exp(statistics.median(o[3] for o in ranged))
-    t = [o[0] for o in obs]
-    s_g, var_g = wls_slope([o[0] for o in ranged], [o[3] for o in ranged], [1. / MOTION_LOG_RANGE_STD ** 2] * len(ranged))
-    widths = [o for o in obs if o[4] is not None]
-    s_w, var_w = wls_slope([o[0] for o in widths], [-o[4] for o in widths], [1. / o[5] ** 2 for o in widths]) if widths else (0., math.inf)
+      return None
+    if sum(o[3] is not None for o in obs) < MOTION_MIN_OBS // 2:
+      return None
+    seen = BoxMotion.from_last(obs)
+    ground = [(o[0], c[0], 1. / (MOTION_LOG_RANGE_STD * c[1]) ** 2) for o, c in zip(obs, seen, strict=True) if c[0] is not None]
+    width = [(o[0], c[2], 1. / (o[5] * c[3]) ** 2) for o, c in zip(obs, seen, strict=True) if c[2] is not None]
+    if len(ground) < MOTION_MIN_OBS // 2:
+      return None
+    r = math.exp(statistics.median(g[1] for g in ground))
+    s_g, var_g = wls_slope(*zip(*ground, strict=True))
+    s_w, var_w = wls_slope(*zip(*width, strict=True)) if width else (0., math.inf)
     w_g, w_w = (1. / var_g if math.isfinite(var_g) else 0.), (1. / var_w if math.isfinite(var_w) else 0.)
     if w_g + w_w <= 0.:
-      return 'unknown', None, None
+      return None
     s_log = (s_g * w_g + s_w * w_w) / (w_g + w_w)
-    s_b, _ = wls_slope(t, [o[1] for o in obs], [1.] * len(obs))
-    v = sum(o[6] for o in obs) / len(obs)
-    still = max(abs(o[6]) for o in obs) <= MOTION_EGO_MAX_MPS
-    b = obs[-1][2]
-    radial = r * s_log + v * math.cos(b)
-    lateral = r * s_b - v * math.sin(b)
-    stood = trk.motion == 'standing' and abs(radial) < max(MOTION_MOVE_MPS, MOTION_LEAVE_PER_M * r) and \
-      abs(lateral) < MOTION_MOVE_MPS
-    departed = BoxMotion.departure(obs, r, math.cos(b))
-    if still and departed == 0 and (stood or (abs(radial) < MOTION_STAND_MPS and abs(lateral) < MOTION_STAND_MPS)):
+    borne = [(o[0], c[4]) for o, c in zip(obs, seen, strict=True) if c[4] is not None]
+    s_b, _ = wls_slope([p[0] for p in borne], [p[1] for p in borne], [1.] * len(borne))
+    return {'r': r, 'radial': r * s_log, 'lateral': r * s_b, 'ground': r * s_g if w_g else None, 'width': r * s_w if w_w else None,
+            'v': max(abs(o[6]) for o in obs), 'departed': BoxMotion.departure(obs, seen), 'sigma': r * (w_g + w_w) ** -0.5}
+
+  @staticmethod
+  def verdict(trk: MotionTrack) -> tuple[str, float | None, float | None]:
+    f = BoxMotion.fit(trk)
+    if f is None:
+      return 'unknown', None, None
+    r, radial, lateral, departed = f['r'], f['radial'], f['lateral'], f['departed']
+    # the car's own motion out of a mono range is only as good as that range: one read 15% short leaves that share of the
+    # closing speed in the box's own, away from the car (cars parked along routes 26-29, passed at 6-15 m/s: the ground's
+    # range 0.82-0.95 of the odometry's at 20-50 m, the width's 1.1-1.35 the other way). So while the car moves, a box is
+    # cleared (standing, receding) only with that share of what was taken out to spare on the closing side, and only where
+    # the ground's range and the width's each say so by themselves (the car's pitch moves a far box's bottom, never its
+    # width; the angle a near box is seen at changes its width, never its bottom)
+    moving = f['v'] > MOTION_EGO_MAX_MPS
+    taken = max(f['v'] * math.cos(trk.obs[-1][2]) - radial, 0.)  # m/s of closing the car's own travel explains
+    each = [x for x in (f['ground'], f['width']) if x is not None]
+    stood = trk.motion == 'standing'
+    # (the range's share of a standing box's leave speed is for a fit of the car at rest: moving, MOTION_MOVE_MPS alone)
+    lim = MOTION_STAND_MPS if not stood else MOTION_MOVE_MPS if moving else max(MOTION_MOVE_MPS, MOTION_LEAVE_PER_M * r)
+    stands = abs(radial) < lim and abs(lateral) < (MOTION_MOVE_MPS if stood else MOTION_STAND_MPS)
+    # receding clears a box anywhere in the band, so only on a fit that can tell: MOTION_AWAY_SIGMA of its own error clear of
+    # no speed at all (one second of sightings of a box 150 m out fits +-9 m/s)
+    recedes = radial >= MOTION_MOVE_MPS and abs(lateral) <= radial and radial > MOTION_AWAY_SIGMA * f['sigma']
+    if moving:
+      spare = MOTION_EGO_MARGIN * taken
+      stands = stands and radial - spare > -lim and f['sigma'] <= MOTION_STAND_MPS and len(each) == 2 and \
+        all(x - spare > -MOTION_MOVE_MPS for x in each)
+      recedes = recedes and radial - MOTION_EGO_MARGIN_AWAY * taken >= MOTION_MOVE_MPS and len(each) == 2 and \
+        all(x - spare >= MOTION_STAND_MPS for x in each)
+    if departed == 0 and stands:
       motion = 'standing'
-    elif radial <= -MOTION_MOVE_MPS or (still and departed < 0):
+    elif radial <= -MOTION_MOVE_MPS or departed < 0:
       motion = 'closing'  # a launch toward the car shows as a step in range and width well before the window's slope
-    elif radial <= -MOTION_MOVE_MPS:
-      motion = 'closing'
-    elif still and radial >= MOTION_MOVE_MPS and abs(lateral) <= radial:
+    elif recedes:
       motion = 'receding'  # mostly along the line of sight: a car crossing away at a wide bearing is no receding car
     else:
       motion = 'unknown'

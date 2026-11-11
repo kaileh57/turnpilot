@@ -11,10 +11,11 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot import map_controls
 from openpilot.selfdrive.turnpilot.control_tracker import TrackedControl
 from openpilot.selfdrive.turnpilot.map_controls import (RIGHT_RED_CLEAR_S, RIGHT_RED_DWELL_S, RIGHT_RED_LOOKING_REASON,
-                                                         RIGHT_RED_UNREAD_S, RIGHT_RED_WAIT_REASON,
-                                                         CAMERA_ASSOC_PAST_M, CAMERA_GREEN_STEADY_S, CAMERA_STALE_S, CONTROL_LINE_M,
-                                                         GREEN_STEADY_S, MAP_DECEL_MAX, NO_LIGHTS, OVERRUN_PAST_M, RED_GONE_S,
-                                                         PROTECT_BEFORE_M, SIGNAL_UNSEEN_REASON,
+                                                         RIGHT_RED_UNREAD_READS, RIGHT_RED_UNREAD_S, RIGHT_RED_WAIT_REASON,
+                                                         CAMERA_ASSOC_PAST_M, CAMERA_GREEN_GAP_S, CAMERA_GREEN_READS,
+                                                         CAMERA_GREEN_STEADY_S, CAMERA_STALE_S, CONTROL_LINE_M,
+                                                         GREEN_STEADY_S, MAP_DECEL_MAX, NO_LIGHTS, OVERRUN_PAST_M, RED_GONE_READS,
+                                                         RED_GONE_S, PROTECT_BEFORE_M, SIGNAL_UNSEEN_REASON,
                                                          SIGNAL_UNSEEN_S, TURN_HEAD_GAP_S, TURN_UNSEEN_S, UNPROTECTED, CameraLights,
                                                          ControlState, LeftCommand, Lights)
 from openpilot.selfdrive.turnpilot.tests.test_camera_lights import Events
@@ -125,6 +126,158 @@ def test_a_red_whose_heads_are_out_of_view_is_never_let_go_as_gone(lights):
   assert held(out, dec)
   out, dec, _ = car.run(0.4, lights=cam('unknown'))
   assert not held(out, dec) and not out.stops
+
+
+# --- the reader's road runs: the camera's green, its red gone and a right's unread red ask the same looks at any run rate ---
+
+def paced(hz, *makes):
+  """The reader's road runs hz a second, as turnpilotd hands them over: each run's read made on its frame (the makes in turn,
+  the last one from then on; a make is cam(...)'s or heads(...)'s) and carried, the same read, on the frames to the next."""
+  every, state = max(int(round(1. / (hz * DT_MDL))), 1), {'frame': 0, 'run': 0, 'read': None}
+
+  def lights(car):
+    if state['frame'] % every == 0:
+      state['read'] = makes[min(state['run'], len(makes) - 1)](car)
+      state['run'] += 1
+    state['frame'] += 1
+    return state['read']
+  return lights
+
+
+def test_a_green_read_through_blank_runs_lets_a_camera_stop_go():
+  """Route 29's video through the detector and the reader: a red read on an approach turned green before the car reached its
+  line, and the governing green was then voted on 7 of 9 road runs, the two between boxing no head. Counted as a second of
+  green unbroken on every frame, each blank run started it over and the stop stood at the green. Counted in the reader's
+  runs (GreenReads), a run that says nothing never starts it over: CAMERA_GREEN_READS green runs over CAMERA_GREEN_STEADY_S
+  with no red or yellow between let it go."""
+  assert CAMERA_GREEN_READS == 3 and CAMERA_GREEN_GAP_S >= 1.
+  car = right_at_a_signal()
+  held_at(car, LINE, lights=cam('red'))
+  st = car.policy.tracker.controls[(1, 0)].state
+  green, blank, unread = cam('green'), no_heads, cam('unknown')
+  t0 = car.t
+  out, dec = car.run_until(lambda out, dec: not held(out, dec), max_s=10.,
+                           lights=paced(10., green, green, blank, green, unread, blank, green, green, blank, green, green, blank))
+  assert CAMERA_GREEN_STEADY_S - 2 * DT_MDL <= car.t - t0 <= CAMERA_GREEN_STEADY_S + 0.25 and st.mode == 'go' and not out.stops
+  # a red read among them starts the green over, and a green gone quiet for CAMERA_GREEN_GAP_S is no green being read
+  car = right_at_a_signal()
+  held_at(car, LINE, lights=cam('red'))
+  out, dec, _ = car.run(0.8, lights=paced(10., green, green, green, green, green, green, cam('red'), green))
+  assert held(out, dec)
+  out, dec, _ = car.run(CAMERA_GREEN_STEADY_S - 0.3, lights=paced(10., green))
+  assert held(out, dec)  # under a second since the red
+  out, dec, _ = car.run(0.4, lights=paced(10., green))
+  assert not held(out, dec)
+  car = right_at_a_signal()
+  held_at(car, LINE, lights=cam('red'))
+  for _ in range(6):  # two green runs, then nothing for longer than the gap, over and over: never three that belong together
+    out, dec, _ = car.run(0.2, lights=paced(10., green))
+    assert held(out, dec)
+    out, dec, _ = car.run(CAMERA_GREEN_GAP_S + 0.2, lights=no_heads)
+    assert held(out, dec)
+
+
+@pytest.mark.parametrize("hz", [10., 5., 3.3, 2.])
+def test_a_camera_green_lets_go_after_the_same_second_at_any_run_rate(hz):
+  """The road camera's full pass runs 10 times a second on the open road, 5 beside the wide camera near a signal, 4 at a
+  left's line and ran 2 at route 29's worst stand. A steady green is CAMERA_GREEN_STEADY_S of it in CAMERA_GREEN_READS runs
+  or more: the same second at every rate, and never one read carried for a second."""
+  car = right_at_a_signal()
+  held_at(car, LINE, lights=cam('red'))
+  t0 = car.t
+  out, dec = car.run_until(lambda out, dec: not held(out, dec), max_s=10., lights=paced(hz, cam('green')))
+  assert CAMERA_GREEN_STEADY_S - 2 * DT_MDL <= car.t - t0 <= CAMERA_GREEN_STEADY_S + 1. / hz + 2 * DT_MDL, (hz, car.t - t0)
+
+
+def test_one_green_read_carried_for_a_second_is_no_steady_green():
+  # one road run reads green and turnpilotd carries that read CAMERA_STALE_S, the runs after it boxing nothing: one look,
+  # not a second of green
+  car = right_at_a_signal()
+  held_at(car, LINE, lights=cam('red'))
+  one = cam('green')(car)
+  for _ in range(int(CAMERA_STALE_S / DT_MDL) + 2):
+    out, dec, _ = car.step(lights=one)
+    assert held(out, dec)
+  out, dec, _ = car.run(20., lights=NO_LIGHTS)
+  assert held(out, dec)
+
+
+def test_a_red_is_gone_only_after_enough_of_the_readers_runs_too():
+  """RED_GONE_S of its head in view and unread lets a camera red go, and at least RED_GONE_READS road runs in them: a slow
+  road pass (a run every 0.8 s) looks four times in those seconds, and the stop stands until it has looked six."""
+  car = right_at_a_signal()
+  held_at(car, LINE, lights=cam('red'))
+  t0 = car.t
+  out, dec = car.run_until(lambda out, dec: not held(out, dec), max_s=20., lights=paced(1.25, cam('unknown')))
+  assert RED_GONE_S < 0.8 * (RED_GONE_READS - 1) - 2 * DT_MDL <= car.t - t0 <= 0.8 * (RED_GONE_READS - 1) + 2 * DT_MDL
+  car = right_at_a_signal()
+  held_at(car, LINE, lights=cam('red'))
+  t0 = car.t
+  out, dec = car.run_until(lambda out, dec: not held(out, dec), max_s=20., lights=paced(5., cam('unknown')))
+  assert RED_GONE_S - 2 * DT_MDL <= car.t - t0 <= RED_GONE_S + 0.2  # at 5 runs a second the seconds decide, as before
+
+
+def dark_head(car):
+  """The camera boxing a governing head of the signal with no lamp lit toward the car (camera_light_input's dark)."""
+  head = [('unknown', HEAD - car.s)]
+  return Lights(camera=CameraLights(head, False, 'read', dark=list(head)))
+
+
+def test_a_head_all_dark_toward_the_car_is_no_evidence_that_a_red_has_gone():
+  """Route 29's right at a red: a governing head with no lamp lit toward the car (conf 0.4-0.78, 12-26 m) was boxed on every
+  road run for 2.0 s while the red heads behind it went unread, 0.5 s short of RED_GONE_S. A head in view for the red's
+  going is one with a lamp read lit or a vote held: a dark one never lets a red go, alone or between unread lit ones."""
+  car = right_at_a_signal()
+  held_at(car, LINE, lights=cam('red'))
+  st = car.policy.tracker.controls[(1, 0)].state
+  for _ in range(int(30. / DT_MDL)):
+    out, dec, _ = car.step(lights=dark_head)
+    assert held(out, dec) and st.mode == 'stop' and st.cam_seen == 0
+  for _ in range(10):  # a lit unread head in bursts under RED_GONE_S, the dark one between them: the run starts over
+    out, dec, _ = car.run(RED_GONE_S - 0.5, lights=cam('unknown'))
+    assert held(out, dec)
+    out, dec, _ = car.run(0.3, lights=dark_head)
+    assert held(out, dec)
+  # a dark head beside a lit unread one is still that one in view
+  def both(car):
+    return Lights(camera=CameraLights([('unknown', HEAD - car.s), ('unknown', HEAD + 2. - car.s)], False, 'read',
+                                      dark=[('unknown', HEAD - car.s)]))
+  out, dec, _ = car.run(RED_GONE_S + 0.2, lights=both)
+  assert not held(out, dec)
+
+
+def test_the_cameras_read_says_which_governing_heads_are_dark():
+  from openpilot.cereal import messaging
+  from openpilot.selfdrive.turnpilot.map_controls import camera_light_input
+  tl = messaging.new_message('turnpilotDetections').turnpilotDetections.lights
+  tl.source, tl.shadow = 'camera', False
+  rows = [('unknown', 'dark', True, 20.), ('unknown', 'aspect', True, 45.), ('red', 'dark', True, 46.), ('unknown', 'dark', False, 30.),
+          ('green', 'read', True, 47.)]
+  for o, (state, reason, governs, d) in zip(tl.init('lights', len(rows)), rows, strict=True):
+    o.state, o.read, o.reason, o.governs, o.distance = state, 'unknown' if reason != 'read' else state, reason, governs, d
+  cam_in = camera_light_input(tl.as_reader(), 'read', 0., 'addOnly')
+  assert cam_in.heads == [('unknown', 20.), ('unknown', 45.), ('red', 46.), ('green', 47.)]
+  assert cam_in.dark == [('unknown', 20.)]  # dark this run and no vote held: a head still voting red is not
+
+
+def test_a_rights_unread_red_is_unread_over_enough_of_the_readers_runs_too(monkeypatch):
+  """A right at a red goes on its look once no red has been read for RIGHT_RED_UNREAD_S, and RIGHT_RED_UNREAD_READS of the
+  reader's road runs since while it reads: on a slow road pass (a run every 0.8 s) the seconds hold four looks, and it waits
+  for six. With no camera read in hand the seconds alone, as before: never a wait on a reader gone quiet."""
+  car = right_in_hand()
+  held_at(car, LINE, lights=cam('red'))
+  car.run(RIGHT_RED_DWELL_S + RIGHT_RED_CLEAR_S, lights=cam('red'))
+  t0 = car.t
+  out, dec = car.run_until(lambda out, dec: not held(out, dec), max_s=20., lights=paced(1.25, cam('unknown')))
+  st = car.policy.tracker.controls[(1, 0)].state
+  assert st.cause == 'rightOnRed'
+  assert RIGHT_RED_UNREAD_S < 0.8 * (RIGHT_RED_UNREAD_READS - 1) - 2 * DT_MDL <= car.t - t0 <= 0.8 * (RIGHT_RED_UNREAD_READS - 1) + 0.2
+  car = right_in_hand()
+  held_at(car, LINE, lights=cam('red'))
+  car.run(RIGHT_RED_DWELL_S + RIGHT_RED_CLEAR_S, lights=cam('red'))
+  t0 = car.t
+  out, dec = car.run_until(lambda out, dec: not held(out, dec), max_s=20., lights=NO_LIGHTS)
+  assert RIGHT_RED_UNREAD_S - 2 * DT_MDL <= car.t - t0 <= RIGHT_RED_UNREAD_S + 0.2
 
 
 def test_a_red_on_the_approach_whose_heads_go_out_of_view_still_stops_the_car():

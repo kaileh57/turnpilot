@@ -123,12 +123,12 @@ def test_held_left_far_curb_cars_read_standing():
     for b in frame.boxes:
       x0 = b.box[0] * CAMS.narrow_road.width
       last[min((428, 505, 536, 705), key=lambda a: abs(a - x0))] = (t - 100., b)
-  # every box seen in the last second: the parked cars read standing, the car up the road standing or receding (115 m out, its
-  # fit scatters a few m/s: neither is an oncoming car)
+  # every box seen in the last second: the parked cars read standing; the car up the road (115 m out, its fit scatters a few
+  # m/s) standing or not told, never closing, and never receding on that scatter (it stands: MOTION_AWAY_SIGMA)
   assert len(last) == 4
   for key, (t, b) in last.items():
     assert t > HELD_LEFT[-1][0] - 1., key
-    want = ('standing', 'receding') if key == 705 else ('standing',)
+    want = ('standing', 'unknown') if key == 705 else ('standing',)
     assert b.motion in want, (key, b.motion, b.radial_mps, b.lateral_mps)
 
 
@@ -208,3 +208,106 @@ def test_a_stopped_oncoming_car_that_launches_leaves_standing_quickly():
     left = next(t - 100. - 3. for t, b in seen if t - 100. > 3. and b.motion != 'standing')
     assert left <= 2.0, (seed, left)
     assert all(b.motion != 'standing' for t, b in seen if t - 100. >= 3. + left), seed
+
+
+# --- the car itself moving (a left's roll-in): its own travel and turn out of every sighting ---
+
+def roll_in(tracker, cal, world, v0=8., decel=0., yaw_rate=0., hz=8., seconds=3., noise_px=0.5, seed=0, short=1.):
+  """Runs of one car at world(t) -> (x, y left) on the ground while ours drives from the origin at v0 (m/s, braking decel
+  m/s^2, turning yaw_rate rad/s left), the full pass and the far crop alternating. short: the share of its true range the
+  ground reads it at (the road's grade, the car's pitch: a box bottom lower or higher in the frame). Returns [(t, RawBox, v)]."""
+  rng = np.random.default_rng(seed)
+  lens, rot = tracker.lenses['road'], calib_from_view(RPY)
+  x = y = yaw = 0.
+  out, dt = [], 1. / hz
+  for k in range(int(seconds * hz) + 1):
+    t = 100. + k * dt
+    v = max(v0 - decel * k * dt, 0.)
+    wx, wy = world(k * dt)
+    fx, fy = (wx - x) * math.cos(yaw) + (wy - y) * math.sin(yaw), -(wx - x) * math.sin(yaw) + (wy - y) * math.cos(yaw)
+    box = np.array(box_of(fx, fy, lens, rot))
+    box[3] = lens.project(rot.T @ np.array([fx * short, -fy * short, HEIGHT]))[1]  # its bottom as the ground range reads it
+    box = box + rng.normal(0., noise_px, 4)
+    if k % 2:
+      tracker.update_far(far_msg([box], t, k), cal)
+      frame = tracker.raw_far
+    else:
+      tracker.update(run_msg([box], t, frame_id=k), cal, car_state(v), now=t, yaw_rate=yaw_rate)
+      frame = tracker.raw
+    out.append((t, frame.boxes[0], v))
+    v_next = max(v0 - decel * (k + 1) * dt, 0.)
+    x, y, yaw = x + 0.5 * (v + v_next) * dt * math.cos(yaw), y + 0.5 * (v + v_next) * dt * math.sin(yaw), yaw + yaw_rate * dt
+  return out
+
+
+def test_a_car_parked_up_the_road_reads_standing_on_the_roll_in():
+  # braking from 6 m/s toward a left's line, a car parked 60 m up the far curb: standing by the end of the window
+  # (it read unknown on every run while the car had moved faster than 3 m/s at any sighting of the fit)
+  tracker, cal = SceneTracker(CAMS, 'mici'), calibration()
+  seen = roll_in(tracker, cal, lambda t: (60., 8.), v0=6., decel=1., seconds=3.)
+  late = [b.motion for t, b, v in seen if t - 100. >= 2.]
+  assert late.count('standing') >= 0.7 * len(late), [(b.motion, b.radial_mps) for _, b, _ in seen]
+  assert all(abs(b.radial_mps) < 1.5 for t, b, v in seen if t - 100. >= 2.)
+
+
+def test_a_car_ahead_keeping_pace_reads_receding_at_any_speed_of_ours():
+  for v in (5., 8., 12.):
+    tracker, cal = SceneTracker(CAMS, 'mici'), calibration()
+    seen = roll_in(tracker, cal, lambda t, v=v: (45. + v * t, -0.5), v0=v, seconds=3.)
+    late = [b.motion for t, b, _ in seen if t - 100. >= 2.]
+    assert late.count('receding') >= 0.7 * len(late), (v, [(b.motion, b.radial_mps) for _, b, _ in seen])
+
+
+def oncoming_fits(v0, u, short, x0=150., decel=0., yaw_rate=0., seed=0):
+  tracker, cal = SceneTracker(CAMS, 'mici'), calibration()
+  return roll_in(tracker, cal, lambda t: (x0 - u * t, 5.), v0=v0, decel=decel, yaw_rate=yaw_rate, short=short,
+                 seconds=min(3., (x0 - 8.) / (u + v0)), seed=seed)
+
+
+def test_an_oncoming_car_is_never_receding_whatever_our_speed():
+  # receding clears a box anywhere in the band: never said of a car coming, from a crawl to 20 m/s, first seen 150 m or 80 m
+  # out, ours at rest or at up to 12 m/s (steady or braking, straight or on a bend), the ground's range true, 20% long or
+  # up to 30% short, three seeds of box noise each
+  for x0 in (150., 80.):
+    for v0 in (0., 2., 4., 6., 8., 10., 12.):
+      for decel in (0., 1.5):
+        for u in (0.5, 1., 2., 3., 5., 8., 12., 20.):
+          for short in (0.7, 0.8, 1., 1.2):
+            for yaw_rate in (0., 0.03):
+              for seed in range(3):
+                seen = oncoming_fits(v0, u, short, x0, decel, yaw_rate, seed)
+                wrong = [(round(t - 100., 2), b.radial_mps) for t, b, _ in seen if b.motion == 'receding']
+                assert not wrong, (x0, v0, decel, u, short, yaw_rate, seed, wrong)
+
+
+def test_an_oncoming_car_is_never_standing_while_ours_moves():
+  # ...nor standing, ours at 4-12 m/s: at 5 m/s or more with its range true, long or 20% short (the parked cars the drives
+  # passed read 0.82-0.95 of their range at 20-50 m), at 8 m/s or more read 30% short. Slower than that it may read standing,
+  # as it does with ours at rest, and a box standing in the oncoming lanes holds the left all the same (unprotected_left)
+  for x0 in (150., 80.):
+    for v0 in (4., 6., 8., 10., 12.):
+      for decel in (0., 1.5):
+        for u, shorts in ((5., (0.8, 1., 1.2)), (8., (0.7, 0.8, 1., 1.2)), (12., (0.7, 0.8, 1., 1.2)), (20., (0.7, 0.8, 1., 1.2))):
+          for short in shorts:
+            for yaw_rate in (0., 0.03):
+              for seed in range(3):
+                seen = oncoming_fits(v0, u, short, x0, decel, yaw_rate, seed)
+                wrong = [(round(t - 100., 2), b.radial_mps) for t, b, _ in seen if b.motion == 'standing']
+                assert not wrong, (x0, v0, decel, u, short, yaw_rate, seed, wrong)
+
+
+def test_a_first_fit_of_a_far_car_is_never_receding():
+  # one second of sightings of a car standing 150 m out fits its radial speed to several m/s either way: no receding on it
+  for seed in range(8):
+    tracker, cal = SceneTracker(CAMS, 'mici'), calibration()
+    seen = drive(tracker, cal, lambda t: (150., 5.), seconds=3., noise_px=0.7, seed=seed)
+    assert all(b.motion != 'receding' for _, b in seen), (seed, [(b.motion, b.radial_mps) for _, b in seen])
+
+
+def test_the_cars_own_turn_is_taken_out():
+  # a parked car while ours turns at 0.2 rad/s at 4 m/s: no lateral speed of its own, never closing nor receding
+  tracker, cal = SceneTracker(CAMS, 'mici'), calibration()
+  seen = roll_in(tracker, cal, lambda t: (50., 3.), v0=4., yaw_rate=0.1, seconds=3.)
+  late = [b for t, b, _ in seen if t - 100. >= 2.]
+  assert all(b.motion in ('standing', 'unknown') for b in late), [(b.motion, b.radial_mps, b.lateral_mps) for b in late]
+  assert all(abs(b.lateral_mps) < 1.5 for b in late), [b.lateral_mps for b in late]

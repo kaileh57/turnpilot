@@ -270,7 +270,7 @@ from openpilot.selfdrive.turnpilot.scene_policy import (CONFIRM_STEADY_HITS, CRO
 from openpilot.selfdrive.turnpilot.turn_skip import (CURB_FIRST_PULSE_M, STOP_BEFORE_TURN_M, SkipState, TurnSkip,
                                                       can_make_turn)
 from openpilot.selfdrive.turnpilot.turn_speed import (LEFT_GO_PROFILE, NO_SPEED_CAP, POST_GO_DEFAULT, POST_GO_PROFILES, TURN_CAP_LEAD_M, PostGo,
-                                                      turn_done_deg, turn_speed_cap)
+                                                      corner_speed, turn_done_deg, turn_speed_cap)
 from openpilot.selfdrive.turnpilot.darkness import EXPOSURE_LOG_S, LEAVE_MOVING_V, SUN_EVERY_S, car_fix, dark_filter_for, sun_elevation
 from openpilot.selfdrive.turnpilot.unprotected_left import (AUTO, CLEAR_PATH_PAST_M, DRIVEN, FULL_PASS_RANGE_M, LEFT_LAUNCH_ROOM_M, LIGHT_RED_MAX_S, OFF,
                                                            ROAD_RANGE_M, STAND_UNDECIDED_S, LeftInput, UnprotectedLeft, left_mode_for,
@@ -2727,6 +2727,7 @@ class TurnPilot:
     # never a go nor a pulse of a left nobody checked (owner decision (b))
     driven = self.map_controls.driven
     range_m, far_range_m = self.left_ranges()  # the full pass's and the far slot's (review 2026-11-07, LN-2)
+    roll_light, roll_run = self.left_roll_light(rf.maneuver_id, rf.distance)
     inp = LeftInput(mode, rf.maneuver_id, upcoming.side, rf.distance, v_ego, held or stray, raw, objects, self.approach_yaw_deg,
                     upcoming.opposing_speed or None, upcoming.opposing_lanes or None, range_m,
                     scene_clear=scene.junction is None and not scene.carried and scene.person_front is None,
@@ -2751,7 +2752,14 @@ class TurnPilot:
                     model_holds='' if self.rel_takeover_held or not self.model_stops else self.left_lift_refused(rf.distance),
                     line_m=self.map_controls.left_hold_m(int(turn[0]), turn[1]),  # its hold: the mouth at a mapped signal
                     signal_line_m=self.map_controls.signal_line_m(int(turn[0]), turn[1]),  # the signal's own line there
-                    go_unfollowed=self.left_unfollowed)
+                    go_unfollowed=self.left_unfollowed,
+                    # the rolling go's (unprotected_left.ROLLING_GO): its junction's light, its corner's speed, the lane
+                    # planner's last word on the turn lane, and whether the turn has pulsed (all last frame's)
+                    roll_light=roll_light, roll_run=roll_run, roll_v=corner_speed(upcoming.angle_deg, False),
+                    lane_ok=self.left_lane_ok(),
+                    desire_out=self.desires.maneuver_id == rf.maneuver_id and self.desires.started,
+                    latch_gone=tc is not None and not tc.held and tc.key[1] == int(turn[0]) and tc.state is not None and
+                    tc.state.done == 'released' and tc.state.cause == 'gap')
     self.left_unfollowed = False  # no_move's, said to the left once
     d = self.left_now = self.left.update(inp, DT_MDL)
     if self.dark and d.state not in ('off', 'approach') and self.night_left_id != rf.maneuver_id:
@@ -2763,6 +2771,30 @@ class TurnPilot:
                      distance=round(rf.distance, 1), maneuver_id=rf.maneuver_id)
     # a left the driver took (DRIVEN) is no fault's handback: its crossing's words, the latch letting go as the driver's
     return LeftCommand(mode, d.go, d.creep_m, d.state == 'undecided' and d.why != DRIVEN, d.reason, crossed=d.crossed)
+
+  def left_lane_ok(self) -> bool:
+    """The lane planner's last update placed the car in a lane the turn leaves from, for the rolling go: it wanted no change
+    (LanePlanner._want, its count for the maneuver), could place the lane (lane_unknown), and no lane change was under way
+    (_lc_dir: its update returns before counting while the car is moving over, the want still at its reset). A name it no
+    longer has reads as not placed: no rolling go, never one from an unjudged lane."""
+    lanes = self.lanes
+    return getattr(lanes, '_want', 1) == 0 and getattr(lanes, '_lc_dir', 0) is None and not lanes.lane_unknown
+
+  def left_roll_light(self, maneuver_id: int, distance: float) -> tuple[str, int | None]:
+    """The light of the autonomous left's junction distance m ahead for its rolling go (LeftInput.roll_light, roll_run):
+    'none' with no signal mapped there (map_controls.signal_known) and no head boxed there or on the approach
+    (left_heads_here); with one, 'green' where some source reads it green now and none red or yellow
+    (map_controls.junction_lights), else 'unread': a rolling go is never given on a light nobody read (the left then rolls up
+    to its line or the junction's mouth and is judged there, as before). With it, the camera read that green is
+    (CameraLights.run: one read carried between road runs counts once toward the left's steady green), None where an
+    accepted source reads it, every frame. The last update's lights."""
+    accepted, camera = self.map_controls.junction_lights(distance)
+    states = accepted | camera
+    if not (self.map_controls.signal_known(maneuver_id, distance) or self.left_heads_here(distance)):
+      return 'none', None
+    if 'green' not in states or states & {'red', 'yellow'}:
+      return 'unread', None
+    return 'green', None if 'green' in accepted or self.camera_read is None else self.camera_read.run
 
   def observe_runs(self, tracker) -> None:
     """This tick's detector runs and tracks, for the junction watch (main(), after the tracker)."""

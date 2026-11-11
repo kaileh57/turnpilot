@@ -4002,7 +4002,7 @@ def test_a_turn_whose_lane_change_never_went_is_skipped_out_loud_never_turned_fr
   sim = Sim([(160., 'turn', 'right'), (2000., 'turn', 'left')], cruise=1.8, nav_lanes={0: TWO_LANES_RIGHT_TURN}, model_lanes=(0, 1),
             paint=BROKEN_WHITE_RIGHT)
   sim.tp.always_drive = always_drive
-  sim.run(75.)  # past the window's end (35 m at a crawl)
+  sim.run(84.)  # past the window's end (at a crawl 15 m, the named turn lane's: lane_planner.LC_BAY_END_MIN_M)
   plans, first = skipped_for_its_lane(sim, 160.)
   assert not any(p.laneChangeOffer != LaneChange.none for p in plans)
 
