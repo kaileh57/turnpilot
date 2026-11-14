@@ -507,3 +507,24 @@ def test_the_plans_inputs_pass_their_frequency_check_at_turnpilotds_own_rate():
   for frame in range(400):
     unset.update_msgs(frame * turnpilotd.DT_MDL, [messaging.new_message('carState', valid=True), messaging.new_message('modelV2', valid=True)])
   assert not unset.freq_ok['carState']
+
+
+def test_a_panda_state_that_cant_be_read_is_no_vehicle_can_and_the_loop_goes_on():
+  # car_signals.vehicle_can_seen runs in main()'s loop outside every other guard: raising, it took the daemon down. A failure
+  # reads as bus 1 not seen (the car's own lamp path unproven, the driver signals), said once
+  seen = []
+
+  def raising(panda_states):
+    seen.append(panda_states)
+    raise RuntimeError("synthetic failure")
+  real = LoopSM.__init__
+
+  def with_panda(self, *args):
+    real(self, *args)
+    self.updated['pandaStates'] = True
+    self.data['pandaStates'] = []
+  with mock.patch.object(turnpilotd, 'vehicle_can_seen', side_effect=raising), mock.patch.object(LoopSM, '__init__', with_panda):
+    plans, scenes, errors = run_main(frames=45)
+  assert len(seen) == 45 and len(plans) == len(scenes) == 45  # asked every frame, a plan out on every frame
+  assert errors.count("turnpilotd.vehicle_can_failed") == 1
+  assert not [e for e in errors if e != "turnpilotd.vehicle_can_failed"]

@@ -98,7 +98,8 @@ a clear sightline of R_req or more. Held
 short of its line (the latch reaches LATCH_NEAR_M short), where the longer crossing puts R_req past the range, the car rolls
 up to the line first (ROLL_UP_M; undecided only after ROLL_UP_STALL_S standing in it).
 The window (CLEAR_WINDOW_S) counts only road camera runs, from the hold (hold, then judge: never carried from the approach):
-a run gap over ROAD_FRESH_S, the scene's holds, an exit crosswalk or view not clear, another of TurnPilot's stops holding the
+a run gap over the freshness bound (ROAD_FRESH_S; a slower road pass, its own cadence: road_fresh_s), the scene's holds, an
+exit crosswalk or view not clear, another of TurnPilot's stops holding the
 car at or before the junction (a signal's red, a stop sign: other_hold), or its junction's signal not read green, start it
 over (DESIGN G4 go condition 5; skeptic G4). A red or yellow any source reads at the junction (map_controls.turn_light: the
 camera's in shadow too, since keeping the car where it stands never brakes it) keeps it waiting, a signal mapped there or not;
@@ -198,12 +199,13 @@ driver's (driven: the map's Driven for its maneuver), the left is done: undecide
 TURN_STARTED_DEG into it: turnpilotd.clear_driven_left, the car going straight on, missed), the crossing's prompt said.
 """
 import math
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass, field, replace
 
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
-from openpilot.selfdrive.turnpilot.map_controls import (CAMERA_GREEN_STEADY_S, LATCH_PAST_M, MAP_STOP_DECEL, SIGNAL_UNSEEN_REASON,
-                                                        SIGNAL_UNSEEN_S, GreenReads, reengage_stop_m, unprotected_turn)
+from openpilot.selfdrive.turnpilot.map_controls import (CAMERA_GREEN_STEADY_S, LATCH_PAST_M, MAP_STOP_DECEL, RED_DECEL, RED_LAG_S,
+                                                        SIGNAL_UNSEEN_REASON, SIGNAL_UNSEEN_S, GreenReads, reengage_stop_m, unprotected_turn)
 from openpilot.selfdrive.turnpilot.route_follower import UNCERTAIN_M
 from openpilot.selfdrive.turnpilot.scene_policy import (CROSSWALK_X_AFTER_M, CROSSWALK_X_BEFORE_M, ONCOMING_ENTRY_M, ONCOMING_PAST_M,
                                                         ONCOMING_Y_FAR_M, ONCOMING_Y_NEAR_M, STOP_DECEL, STOP_LAG_S, VEHICLES,
@@ -290,7 +292,10 @@ WINDOW_FROM_APPROACH = True
 # lamp lit, its turn lane reached, no signal there or its light read a steady green: map_controls.GreenReads). Its stop is let go
 # (turnpilotd), the turn pulsed, and the go checked on every frame as any go is until the car can no longer stop short of the
 # oncoming lanes; withdrawn, the car stops on the comfortable curve short of them (its own hold) and waits there as after any
-# withdrawn go. False (the public build's, as with WINDOW_FROM_APPROACH False): every left stops at its line first
+# withdrawn go. Only where a pass that runs covers the range the roll's whole exposure needs (roll_why 'range': the go comes
+# seconds before the junction and can be withdrawn for under two of them, so a car past the seen range at the go arrives with
+# the left in its lane): otherwise the car brakes to its line and is judged there as any left.
+# False (the public build's, as with WINDOW_FROM_APPROACH False): every left stops at its line first
 ROLLING_GO = True
 # a rolling go whose turn hasn't pulsed this long after it (its lane judged late, the turn too fast, held for a red) is
 # withdrawn while the car can stop: with its stop let go and no turn, the car would drive straight on through the junction
@@ -311,6 +316,17 @@ ROLL_STOP_LAG_S = 0.5
 # deadlines (ROAD_DUE_S 0.25), so a run a frame late started the window over: a model 2 ms slower than 11-06's held an empty
 # road's 35 mph left at a signalized line p50 28-35 s (the real left on the 11-06 spread, 2 road heads at 1.4x)
 ROAD_FRESH_S = PET_S / 4.
+# a road pass that runs slower than that is judged against its own cadence (UnprotectedLeft.road_fresh_s): the median gap of
+# its last ROAD_CADENCE_RUNS runs, a run within ROAD_CADENCE_SLACK of it on time, so a dropout (one gap among shorter ones)
+# still starts the window over. Held at its line the left asks roadAndWide, one detector run in three the wide camera's, and
+# the pass at a stand is as slow as 2 Hz (five runs in 2.5 s on the car): road runs 0.5-0.6 s apart, each one over
+# ROAD_FRESH_S, which alone would start the window over at every run for good. Never past ROAD_FRESH_MAX_S, a third of the
+# window (the longest dropout CRITIQUE REQUIRED 2 allows; the window is then 4 runs, 5 at 2 Hz): a pass down to 1.5 Hz.
+# What the bound takes past ROAD_FRESH_S is a longer look-back at the go, out of nothing's margin: it is added to T_req,
+# so R_req reaches further by a car's travel in it (0.25 s at 2 Hz with the wide runs: 6.5 m at 45 mph x SPEED_MARGIN)
+ROAD_FRESH_MAX_S = CLEAR_WINDOW_S / 3.
+ROAD_CADENCE_RUNS = 5
+ROAD_CADENCE_SLACK = 1.25
 FAR_FRESH_S = PET_S / 4.
 FAR_AIM_MAX_DEG = 14.      # the far crop's aim, either side of straight ahead (its half-width is 15.7 deg on a comma four)
 STALE_UNDECIDED_S = 2.     # no road run this long while waiting: a fault
@@ -392,6 +408,27 @@ EXIT_Y_NEAR_M, EXIT_Y_FAR_M = 3., 18.  # the exit crosswalk, to the turn side, C
 CROSSED_LANE_BEHIND_M = 10.
 CROSSED_LANE_Y_FAR_M = 5.4     # m to the turn side: the next lane's far edge, a lane and a half (3.6 m lanes) from the car's centre
 LANE_W_M = 3.6
+# a standing box beyond the opposing lanes' far edge (band_blockers: parked at the far curb) is no traffic only where the
+# cameras showed that what lies beyond the lanes the map counts is a strip, never a lane (far_strip): the driving model's own
+# far road edge past the junction (LeftInput.far_edge_m), read on the approach, no more than FAR_EDGE_SHORT_M short of the
+# counted lanes' far edge (short of that the two disagree: a median's kerb, an edge drawn along a queue) and less than
+# FAR_LANE_MIN_M beyond it, the narrowest lane the lane planner measured. A line the model is sure of within FAR_LINE_NEAR_M
+# short of the counted edge, or beyond it, is the lanes' edge as painted (LeftInput.far_line_m: a road of two 3 m lanes
+# mapped as one puts its divider there, a lane's room past it). Judged on the last FAR_EDGE_READS reads the model trusted
+# its edge on (2 s of them: at the stand the edge's std is past the lane planner's bar on most frames), FAR_EDGE_MIN_READS
+# of them at least, two in three saying so. Route 29's held left (one opposing lane, cars parked at the far curb): the edge
+# 6.4-7.8 m to the turn side on 45 of 57 approach runs (1.0-2.4 m past the lane's 5.4 m), no line beyond the car's own
+# over 0.24. The map's count alone is no proof: mapped as one lane on a road with two, a car standing in the second would
+# be no traffic, and it launches after the go
+FAR_EDGE_SHORT_M = 1.
+FAR_LANE_MIN_M = 2.5
+FAR_LINE_NEAR_M = LANE_W_M / 2.
+FAR_EDGE_READS = 40
+FAR_EDGE_MIN_READS = 10
+# the edge is read along the model's polyline from the maneuver point to FAR_EDGE_PAST_M beyond it (where a standing box is
+# judged: the band's cars past the junction), no further than FAR_EDGE_AHEAD_M ahead of the car; its furthest out counts
+FAR_EDGE_PAST_M = 40.
+FAR_EDGE_AHEAD_M = 80.
 BOX_X_BEFORE_M, BOX_X_AFTER_M = ONCOMING_PAST_M, 8.  # the junction box a vehicle mustn't be in...
 BOX_Y_RIGHT_M, BOX_Y_LEFT_M = 12., 18.               # ...from this far to the other side to this far to the turn side
 
@@ -540,6 +577,9 @@ class LeftInput:
   desire_out: bool = True        # the turn's desire has pulsed for this maneuver (DesireTiming.started, last frame's)
   latch_gone: bool = False       # the line's stop was let go on the left's go with the car rolling, never held
                                  # (map_controls: released, cause gap), as of last frame: a rolling go asked is then the left's
+  far_edge_m: float | None = None  # m to the turn side of the road's far edge past the junction as the driving model draws
+                                 # it this frame (turnpilotd.left_far_side), None where it doesn't trust its edge
+  far_line_m: float | None = None  # ...and of the lane line furthest that way the model is sure of beyond the car's own, None none
 
 
 @dataclass
@@ -582,6 +622,12 @@ def hold_caps(v: float) -> tuple[float, float]:
   return s.accel_cap, s.speed_cap
 
 
+def red_stop_m(v: float) -> float:
+  """m a stop for a read red takes from v m/s: map_controls' own red stop, RED_LAG_S from the read to the braking, then
+  RED_DECEL."""
+  return v * RED_LAG_S + v ** 2 / (2. * RED_DECEL)
+
+
 def t_clear(path_m: float, a: float = A_GO) -> float:
   """s from first motion to cover path_m at a (A_GO, or the slower launch the car showed) up to V_GO."""
   d_ramp = V_GO ** 2 / (2. * a)
@@ -607,6 +653,23 @@ def roll_time(distance: float, lanes: int | None, v_ego: float) -> float:
   t_req takes (no launch, so no latency)."""
   lanes = UNKNOWN_LANES if lanes is None or lanes < 1 else lanes
   return (max(distance, 0.) + CLEAR_PATH_PAST_M) / max(v_ego, ROLL_MIN_V) + PET_S + EXTRA_LANE_S * (lanes - 1)
+
+
+def roll_exposure_s(distance: float, lanes: int | None, v_ego: float, roll_v: float) -> float:
+  """s the oncoming lanes must be clear for a rolling go given distance m before the maneuver point, its whole exposure: from
+  the go until the car is through them (t_req's path) at the speeds planned, never faster: ROLL_STOP_LAG_S, v_ego down to the
+  corner's speed roll_v at MAP_STOP_DECEL, then that speed held (a car already slower keeps its own, ROLL_MIN_V at least),
+  and t_req's margins (PET_S, EXTRA_LANE_S a lane)."""
+  lanes = UNKNOWN_LANES if lanes is None or lanes < 1 else lanes
+  path = max(distance, 0.) + CLEAR_PATH_PAST_M
+  v = max(v_ego, ROLL_MIN_V)
+  v_corner = max(min(v, roll_v), ROLL_MIN_V)
+  d_slow = (v ** 2 - v_corner ** 2) / (2. * MAP_STOP_DECEL)
+  if path <= d_slow:
+    t = (v - math.sqrt(v ** 2 - 2. * MAP_STOP_DECEL * path)) / MAP_STOP_DECEL
+  else:
+    t = (v - v_corner) / MAP_STOP_DECEL + (path - d_slow) / v_corner
+  return ROLL_STOP_LAG_S + t + PET_S + EXTRA_LANE_S * (lanes - 1)
 
 
 LINE_D = 9.                # m from the hold line to the maneuver point (map_controls: HOLD_LINE_M + MAP_MARGIN_M)
@@ -693,7 +756,7 @@ def nearest_range(b) -> float:
   return min(b.near_m, WIDTH_FLOOR_M.get(b.cls, WIDTH_FLOOR_DEFAULT_M) / (2. * math.tan(ang / 2.)))
 
 
-def band_blockers(boxes, heading_deg: float, side: int, reach_m: float, distance: float, exempt=(), lanes=None) -> list:
+def band_blockers(boxes, heading_deg: float, side: int, reach_m: float, distance: float, exempt=(), lanes=None, strip: bool = False) -> list:
   """The road camera's raw vehicle boxes at RAW_CONF or more in the oncoming band within reach_m (module docstring), by
   their nearest plausible range (nearest_range). exempt: boxes that are an occluder's (not traffic). A box the tracker
   says is going away up the road (RawBox.motion receding: our own direction's traffic) is no oncoming car, but only one
@@ -701,9 +764,11 @@ def band_blockers(boxes, heading_deg: float, side: int, reach_m: float, distance
   going our way is beyond that, and a motion track passing along a row of cars standing on the oncoming side steps from one
   to the next further up, which reads as going away (routes 26 and 29: three such tracks, 33-67 m out, 5-7 m to the left).
   Neither is one standing wholly outside the opposing lanes: beyond their far edge (lanes_far_m of lanes, view_blocked's bound: parked
-  at the far curb) or wholly on our side of the car's own centre line (our direction's traffic standing ahead, in the band
-  only by BAND_TOL_DEG). One standing in the opposing lanes blocks as any other: a queue there launches, and the tracker
-  reads a launched car standing for 0.6-3 s more. The far edge is navd's lane count (two lanes where it has none)."""
+  at the far curb), but only where the cameras showed nothing but a strip beyond that edge (strip: UnprotectedLeft.far_strip;
+  navd's count alone is no proof, and a car standing in a lane it doesn't count launches); or wholly on our side of the
+  car's own centre line (our direction's traffic standing ahead, in the band only by BAND_TOL_DEG). One standing in the
+  opposing lanes blocks as any other: a queue there launches, and the tracker reads a launched car standing for 0.6-3 s
+  more. The far edge is navd's lane count (two lanes where it has none)."""
   out = []
   lane_far = lanes_far_m(lanes)
   for b in boxes:
@@ -718,7 +783,7 @@ def band_blockers(boxes, heading_deg: float, side: int, reach_m: float, distance
     rng = math.hypot(*b.xy)
     lat_far, lat_near = rng * math.sin(math.radians(edges[1])), rng * math.sin(math.radians(edges[0]))
     x = rng * math.cos(math.radians(turn_bearing(b.bearing_deg, heading_deg, side)))
-    if (b.motion == 'standing' and (lat_near >= lane_far or lat_far <= 0.)) or (b.motion == 'receding' and lat_near < LANE_NEAR_M):
+    if (b.motion == 'standing' and ((strip and lat_near >= lane_far) or lat_far <= 0.)) or (b.motion == 'receding' and lat_near < LANE_NEAR_M):
       continue
     if nearest_range(b) <= reach_m and x > distance - ONCOMING_PAST_M and lat_far > ONCOMING_Y_NEAR_M - rng * math.tan(tol) and \
        lat_near < ONCOMING_Y_FAR_M + rng * math.tan(tol):
@@ -822,6 +887,16 @@ def lanes_far_m(lanes=None) -> float:
   return LANE_NEAR_M + LANE_W_M * lanes if lanes else LANE_FAR_M
 
 
+def strip_beyond(edge_m: float, line_m: float | None, lanes=None) -> bool:
+  """One read of the model's far side (LeftInput.far_edge_m, far_line_m) shows only a strip beyond the opposing lanes the map
+  counts (lanes: lanes_far_m, two where it has none), no room for a lane it doesn't: the road's edge no more than
+  FAR_EDGE_SHORT_M short of those lanes' far edge and less than FAR_LANE_MIN_M beyond it, or beyond a line the model is
+  sure of near that edge or past it (FAR_LINE_NEAR_M: the lanes' edge as painted)."""
+  lane_far = lanes_far_m(lanes)
+  bound = line_m if line_m is not None and line_m >= lane_far - FAR_LINE_NEAR_M else lane_far
+  return edge_m >= lane_far - FAR_EDGE_SHORT_M and edge_m - bound < FAR_LANE_MIN_M
+
+
 def view_blocked(occ, heading_deg: float, side: int, reach_m: float, lanes=None) -> bool:
   """An occluder's bearings cover some of the oncoming lanes beyond it, out to reach_m: lanes of them (the opposing road's,
   navd's opposing_lanes) LANE_W_M each past LANE_NEAR_M, LANE_FAR_M's two where the count isn't known. Drive 29 (2026-11-08,
@@ -892,6 +967,7 @@ class UnprotectedLeft:
     self.maneuver_id: int | None = None
     self.always_drive = False  # TurnPilotAlwaysDrive, handed over every frame (turnpilotd.hand_always_drive; ALWAYS_DRIVE.md section 1)
     self.window_from_approach = WINDOW_FROM_APPROACH
+    self.road_gaps: deque = deque(maxlen=ROAD_CADENCE_RUNS)  # s between the road pass's last runs (road_fresh_s), the drive's
     self._reset()
 
   def _reset(self):
@@ -917,6 +993,7 @@ class UnprotectedLeft:
     self.hold_asked = 0.          # ...m on to where its stop asked the car to stand (the comfortable curve's from there)...
     self.hold_entry = 0.          # ...and to the oncoming lanes (ONCOMING_ENTRY_M), read where it began...
     self.hold_drv_frame = False   # ...and a driver's frame (disengaged) since the last engaged one: the next is a re-engage
+    self.hold_firm = False        # ...a read red's firm stop (red_stop_m, to -RED_DECEL), begun past where the comfortable curve fits
     self.roll_stall = 0.          # s standing in a roll-up to the line
     self.light_s = 0.             # s at its line with its signal's light not green (unknown, or red and yellow)
     self.unsignalled_s = 0.       # s standing at its line with no lamp on its side (LEFT_GO_NEEDS_SIGNAL)
@@ -962,6 +1039,22 @@ class UnprotectedLeft:
     self.roll_green = GreenReads()  # its signal's green reads on the approach (map_controls' steady green, by road runs)
     self.roll_said = ''           # the last reason logged at the roll's point (turnpilot.left_roll, once a reason)
     self.range_eff = 0.           # the band's reach this frame: the full pass's, or the far slot's past it
+    self.fresh_s = ROAD_FRESH_S   # this frame's freshness bound for the road view (road_fresh_s)
+    self.far_reads: deque = deque(maxlen=FAR_EDGE_READS)  # the model's last trusted reads of the far side: strip_beyond's verdicts
+
+  @property
+  def far_strip(self) -> bool:
+    """The cameras showed only a strip beyond the opposing lanes the map counts (the constants): FAR_EDGE_MIN_READS or more
+    of the model's trusted reads of the far side this approach, two in three of the last FAR_EDGE_READS saying so."""
+    return len(self.far_reads) >= FAR_EDGE_MIN_READS and 3 * sum(self.far_reads) >= 2 * len(self.far_reads)
+
+  def road_fresh_s(self) -> float:
+    """s past which the road view is stale: ROAD_FRESH_S, or where the road pass runs slower, ROAD_CADENCE_SLACK x its own
+    cadence (the median gap of its last ROAD_CADENCE_RUNS runs, three or more of them), never past ROAD_FRESH_MAX_S."""
+    if len(self.road_gaps) < 3:
+      return ROAD_FRESH_S
+    cadence = sorted(self.road_gaps)[len(self.road_gaps) // 2]
+    return min(max(ROAD_FRESH_S, ROAD_CADENCE_SLACK * cadence), ROAD_FRESH_MAX_S)
 
   def update(self, inp: LeftInput, dt: float) -> LeftDecision:
     if inp.mode not in (AUTO, ANNOUNCE):
@@ -977,11 +1070,14 @@ class UnprotectedLeft:
     # the path and the conflict point at the furthest reading of the junction: the hold line is at the nearest (BeamNG: 13 m
     # apart, the car 22 m out certifying a 9 m line's path)
     d_far = inp.distance + max(inp.spread_m, 0.)
-    treq = t_req(d_far, inp.opposing_lanes, latency, self.launch_a)
+    # the road view's freshness bound this frame, and what it takes past ROAD_FRESH_S added to the clear time: a slower road
+    # pass looks back further at the go, so R_req reaches further by a car's travel in that time
+    fresh = self.fresh_s = self.road_fresh_s()
+    treq = t_req(d_far, inp.opposing_lanes, latency, self.launch_a) + fresh - ROAD_FRESH_S
     if self.rolled and self.went:
       # a rolling go's clear time is its launch's from a stand (longer than a car rolling at the corner's speed needs) or, a
       # car rolling slower than that launch, what its own speed takes over the same path
-      treq = max(treq, roll_time(d_far, inp.opposing_lanes, inp.v_ego))
+      treq = max(treq, roll_time(d_far, inp.opposing_lanes, inp.v_ego) + fresh - ROAD_FRESH_S)
     self.roll_green.update(inp.roll_light == 'green', inp.light in ('red', 'yellow'), inp.roll_run, dt)
     rreq = r_req(v_limit, treq, d_far)
     occ = occluders(inp.objects, inp.heading_deg, side, inp.distance, inp.wrong_lane, inp.crossed_lanes)
@@ -990,22 +1086,29 @@ class UnprotectedLeft:
     beside = crossed_lane_cars(inp.objects, inp.heading_deg, side, inp.distance, inp.crossed_lanes) if inp.wrong_lane else []
     self.road_age += dt
     self.band_stand_age += dt
+    # the model's far side, read while the car faces up the road (its lateral offsets are the car's: yawed into the turn
+    # they are no longer the road's) within the road camera's stretch of the approach
+    if inp.far_edge_m is not None and inp.distance <= VIEW_FROM_M and abs(inp.heading_deg) <= BAND_TOL_DEG:
+      self.far_reads.append(strip_beyond(inp.far_edge_m, inp.far_line_m, inp.opposing_lanes))
+    strip = self.far_strip
     raw_blockers = None
     if inp.raw is not None and inp.raw.camera == 'road':
       exempt = [b for b in inp.raw.boxes if any(matches(b, o) for o in occ)]
-      raw_blockers = band_blockers(inp.raw.boxes, inp.heading_deg, side, rreq, inp.distance, exempt, inp.opposing_lanes)
+      raw_blockers = band_blockers(inp.raw.boxes, inp.heading_deg, side, rreq, inp.distance, exempt, inp.opposing_lanes, strip)
       self.road_boxes = [b for b in inp.raw.boxes if b not in exempt]  # the last road run's, for a slow launch's look (L3)
       stands = [o for o in inp.objects if str(o.cls) in VEHICLES and stands_still(o)]
       if any(matches(b, o) for b in raw_blockers for o in stands):
         self.band_stand_age = 0.
-      fresh_run = self.road_age <= ROAD_FRESH_S
+      fresh_run = self.road_age <= fresh + 1e-6
+      if math.isfinite(self.road_age):
+        self.road_gaps.append(self.road_age)
       self.road_age = 0.
       self.blocked = bool(raw_blockers)
       self.clear_s = 0. if self.blocked or not fresh_run else self.clear_s + dt
       self.near_clear_s = 0. if self.blocked or not fresh_run else self.near_clear_s + dt
       if any(b.xy is not None and math.hypot(*b.xy) <= inp.range_m for b in raw_blockers):
         self.far_only_s = 0.  # traffic within the full pass's range: not waiting on far boxes alone
-    elif self.road_age > ROAD_FRESH_S or self.blocked or not inp.scene_clear:
+    elif self.road_age > fresh + 1e-6 or self.blocked or not inp.scene_clear:
       self.clear_s = self.near_clear_s = 0.
     else:
       self.clear_s += dt
@@ -1025,7 +1128,7 @@ class UnprotectedLeft:
     if inp.far is not None and inp.far.view == 'far' and inp.far.camera == 'road':
       exempt = [b for b in inp.far.boxes if any(matches(b, o) for o in occ)]
       far_blockers = band_blockers(inp.far.boxes, inp.heading_deg, side, math.inf if far_needed else rreq, inp.distance, exempt,
-                                   inp.opposing_lanes)
+                                   inp.opposing_lanes, strip)
       self.far_blocked, self.far_run_age = bool(far_blockers), 0.
       if far_blockers:
         self.far_block_age = 0.
@@ -1033,8 +1136,11 @@ class UnprotectedLeft:
         self.far_age = self.far_stale = 0.
     if far_needed and self.far_stale > STALE_UNDECIDED_S:
       # the far slot said live but has seen nothing of the band this long (11-06: nativeStatus full, farStatus noRoom on
-      # every message): judged on the full pass's band, never a farStale handback (Kellen, 2026-11-07: no handbacks)
+      # every message): judged on the full pass's band, never a farStale handback, and
+      # on that band's own window (near_clear_s: its count went on while the far slot's age held clear_s at nothing), so
+      # the wait for a far run is never followed by a whole window more on a band clear all along
       far_needed = False
+      self.clear_s = max(self.clear_s, self.near_clear_s)
     # a far slot whose runs can't hold FAR_FRESH_S (far_behind, R2): judged on the full pass's band as one gone stale is,
     # until its runs hold FAR_FRESH_S for FAR_BEHIND_CLEAR_S again; a far box it does see holds the window FAR_BLOCK_RECENT_S
     self.far_fresh_s = self.far_fresh_s + dt if self.far_age <= FAR_FRESH_S else 0.
@@ -1172,9 +1278,10 @@ class UnprotectedLeft:
       # the hold, the latch letting go as driverWent 0.9 s later). Its own hold after a withdrawn go has its own release rule
       # (_hold_driven: the owner decisions' metres), above
       return self._driven(inp, out, '')
-    if inp.committed and not self.went:
+    if inp.committed and not self.went and not (self.hold_here and self.hold_firm):
       # the scene committed to the junction before the left's own go by a reading, engaged, the car rolling up to its line or
-      # standing held short of it: where the car is isn't known. Out loud, never a freeze
+      # standing held short of it: where the car is isn't known. Out loud, never a freeze. Never on a red's firm stop: the
+      # scene commits where the comfortable curve no longer stops the car short of the lanes, which that stop is past
       return self._undecided(out, 'position')
 
     if self.roll_pending:
@@ -1186,7 +1293,8 @@ class UnprotectedLeft:
         self.go_t = self.roll_s = self.far_only_s = self.band_stand_s = self.exit_stand_s = self.wait_s = 0.
         self.go_d, self.launch_on, self.said = inp.distance, False, set()
         cloudlog.event("turnpilot.left_go", distance=round(inp.distance, 1), r_req=round(rreq, 1), clear_s=round(self.clear_s, 1),
-                       v_limit=round(v_limit, 1), heading_deg=round(inp.heading_deg, 1), rolling=True, v=round(inp.v_ego, 2))
+                       v_limit=round(v_limit, 1), heading_deg=round(inp.heading_deg, 1), rolling=True, v=round(inp.v_ego, 2),
+                       far_strip=strip, fresh_s=round(fresh, 2))
       else:
         self.roll_off = True  # the stop stands: this left brakes to its line and is judged there
         cloudlog.event("turnpilot.left_roll_refused", error=True, held=inp.held, distance=round(inp.distance, 1),
@@ -1198,9 +1306,12 @@ class UnprotectedLeft:
       self.went = self.moved = self.rolled = False
       self.roll_off = True
     if self.went:
+      # a rolling go is certified on a road view fresh at the go, and the car reaches its last point to stop seconds later:
+      # until there a view gone stale (no road run within the freshness bound) is no clear band, as before the go
       why = 'band' if raw_blockers or far_blockers else 'beside' if beside else 'cross' if closing else 'crosswalk' if not crosswalk else \
         'view' if blocked_view else 'hold' if inp.other_hold or not inp.scene_clear else \
-        'light' if light in ('red', 'yellow') and not self.clearing else ''
+        'light' if light in ('red', 'yellow') and not self.clearing else \
+        'stale' if self.rolled and self.road_age > fresh + 1e-6 else ''
       return self._after_go(inp, out, why, len(raw_blockers or ()) + len(far_blockers or ()), dt)
 
     if not standing:
@@ -1211,7 +1322,8 @@ class UnprotectedLeft:
       if out.roll not in ('off', 'far', 'done') and out.roll != self.roll_said:
         self.roll_said = out.roll
         cloudlog.event("turnpilot.left_roll", go=not out.roll, why=out.roll, distance=round(inp.distance, 1), v=round(inp.v_ego, 2),
-                       clear_s=round(self.clear_s, 1), r_req=round(rreq, 1), light=inp.roll_light, maneuver_id=inp.maneuver_id)
+                       clear_s=round(self.clear_s, 1), r_req=round(rreq, 1), light=inp.roll_light, maneuver_id=inp.maneuver_id,
+                       roll_reach=round(self.roll_reach_m(inp, d_far), 1), seen_m=round(min(self.seen_m(inp), 999.), 1))
       if not out.roll:
         # asked of the line's stop this frame (LeftCommand.go), its pulse still held: the go is the left's from the next
         # frame, once that stop is seen let go (latch_gone), and never if it wasn't
@@ -1240,7 +1352,7 @@ class UnprotectedLeft:
       cloudlog.event("turnpilot.left_reach", r_req=round(rreq, 1), band_m=round(band_m, 1), range_m=round(inp.range_m, 1),
                      far_range_m=round(inp.far_range_m, 1), far_live=inp.far_live, far_needed=far_needed, dark=inp.dark,
                      straight_m=round(inp.straight_m, 1), short_of=short_of, wrong_lane=inp.wrong_lane,
-                     distance=round(inp.distance, 1), maneuver_id=inp.maneuver_id)
+                     far_strip=strip, far_reads=len(self.far_reads), distance=round(inp.distance, 1), maneuver_id=inp.maneuver_id)
     certified = self.clear_s >= CLEAR_WINDOW_S - 1e-6 and not blocked_view and crosswalk and inp.scene_clear and not held_else
     out.view = 'roadAndWide'
     # a left LC-03 placed in a lane it doesn't leave from (wrong_lane) once held at its line is judged from the lane it is in,
@@ -1418,7 +1530,7 @@ class UnprotectedLeft:
       # its own hold says the withdrawal's words (turnpilotd's line is the stop's reason first), but for the turned car's view:
       # what the driver needs to know while it is judged on part of the oncoming road (YAW_VIEW_DEG)
       words = out.reason if out.reason == LONG_WAIT_REASON['yaw'] else self.hold_reason
-      out.stops = [stop(inp.v_ego, 0., words, confirmed=False)]
+      out.stops = [self._hold_stop(inp.v_ego, words)]
     return out
 
   def roll_why(self, inp: LeftInput, d_far: float, window: bool, blocked_view: bool, crosswalk: bool, holds: bool, dark: bool) -> str:
@@ -1433,8 +1545,11 @@ class UnprotectedLeft:
     map_controls' own GreenReads: CAMERA_GREEN_READS road runs over CAMERA_GREEN_STEADY_S with no red or yellow between and
     green on this frame; a red or yellow; or not known whether one is there), 'hold' (another stop, the model's own,
     the cross road), 'scene' (a person, a scene hold), 'view', 'crosswalk', 'band' (a vehicle in the oncoming band on the last
-    road run), 'stale' (no road run within ROAD_FRESH_S), 'window' (the band not yet clear CLEAR_WINDOW_S), 'slow' (rolling
-    slower than the launch the clear time is for: by then the car is stopping)."""
+    road run), 'stale' (no road run within the freshness bound, road_fresh_s), 'window' (the band not yet clear CLEAR_WINDOW_S),
+    'range' (the range the roll needs seen clear for its whole exposure, roll_reach_m, is past what a pass that runs covers,
+    seen_m: a rolling go has no benefit of the doubt on range, the car brakes to its line and is judged there on the band
+    the camera covers, as any left), 'slow' (rolling slower than the launch the clear time is for: by then the car is
+    stopping)."""
     if not (ROLLING_GO and self.window_from_approach and inp.mode == AUTO) or inp.roll_v <= 0.:
       return 'off'
     if self.roll_off:
@@ -1452,8 +1567,22 @@ class UnprotectedLeft:
       'lamp' if dark or inp.signal_veto else 'light' if not light else 'hold' if holds else 'scene' if not inp.scene_clear else \
       'view' if blocked_view else 'crosswalk' if not crosswalk else \
       ('band' if self.blocked or (self.far_blocked and self.far_run_age <= FAR_FRESH_S) else
-       'stale' if self.road_age > ROAD_FRESH_S else 'window') if not window else \
+       'stale' if self.road_age > self.fresh_s + 1e-6 else 'window') if not window else \
+      'range' if self.roll_reach_m(inp, d_far) > self.seen_m(inp) else \
       'slow' if path > v * t_clear(path, self.launch_a) else ''
+
+  def roll_reach_m(self, inp: LeftInput, d_far: float) -> float:
+    """m up the oncoming lanes a rolling go from here needs seen clear: what a car at SPEED_MARGIN x the opposing limit covers
+    in the roll's whole exposure (roll_exposure_s, the road view's look-back past ROAD_FRESH_S added), from the conflict point."""
+    v_limit = inp.v_limit if inp.v_limit is not None and inp.v_limit > 0. else DEFAULT_OPPOSING_SPEED
+    return r_req(v_limit, roll_exposure_s(d_far, inp.opposing_lanes, inp.v_ego, inp.roll_v) + self.fresh_s - ROAD_FRESH_S, d_far)
+
+  def seen_m(self, inp: LeftInput) -> float:
+    """m up the oncoming road the band is really looked at by a pass that runs: the full pass to its own range (range_m), past
+    it only a far slot whose runs cover the band within FAR_FRESH_S now (never one said on that isn't running, nor one judged
+    behind), and no further than the opposing road is known to run straight on in the band (straight_m)."""
+    far = inp.far_live and inp.range_m > 0. and not self.far_behind and self.far_age <= FAR_FRESH_S
+    return min(max(inp.range_m, inp.far_range_m) if far else inp.range_m, inp.distance + max(inp.straight_m, 0.))
 
   def _past_line_m(self, inp: LeftInput) -> float:
     """m the car is past its stop line: the mapped signal's own (signal_line_m), else the nearer of its first latch and LINE_D
@@ -1482,11 +1611,13 @@ class UnprotectedLeft:
 
   def _go(self, inp: LeftInput, out: LeftDecision, rreq: float) -> LeftDecision:
     self.went, self.moved, self.hold_here, self.go_t, self.far_only_s = True, False, False, 0., 0.
+    self.hold_firm = False
     self.band_stand_s = self.exit_stand_s = self.wait_s = 0.
     self.go_d, self.launch_on = inp.distance, False
     self.said = set()
     cloudlog.event("turnpilot.left_go", distance=round(inp.distance, 1), r_req=round(rreq, 1), clear_s=round(self.clear_s, 1),
-                   v_limit=round(out.v_limit, 1), heading_deg=round(inp.heading_deg, 1))
+                   v_limit=round(out.v_limit, 1), heading_deg=round(inp.heading_deg, 1), far_strip=self.far_strip,
+                   fresh_s=round(self.fresh_s, 2))
     out.state = self.state = 'go'
     out.go, out.view, out.prompt, out.reason = True, 'road', 'leftGo', "Turning"
     if self.quiet_go:
@@ -1530,9 +1661,11 @@ class UnprotectedLeft:
     # held: it can always stay (a reading nearer than the line never makes it go on)
     can_stop = not self.moved or stop_m < inp.distance - ONCOMING_ENTRY_M
     if self.rolled:
-      # a rolling go is withdrawn only where its stop ends HELD_MIN_M or more short of the junction, VETO_MARGIN_M to spare
-      # for the frame it takes: the car then stands where its next go is judged (nearer is the position fault)
-      can_stop = stop_m + VETO_MARGIN_M < inp.distance - HELD_MIN_M
+      # a rolling go is withdrawn only where its stop, begun ROLL_STOP_LAG_S after the withdrawal (the actuator's lag, as the
+      # go's own last point budgets it: roll_why 'late'), ends HELD_MIN_M or more short of the junction, VETO_MARGIN_M to spare
+      # for the frame it takes: the car then stands where its next go is judged (nearer is the position fault). Past that
+      # point the left carries through: a stop asked there would rest the car in the oncoming lanes
+      can_stop = stop_m + inp.v_ego * ROLL_STOP_LAG_S + VETO_MARGIN_M < inp.distance - HELD_MIN_M
     out.withdrawable = inp.go_withdrawn or not self.moved or \
       (can_stop if self.rolled else stop_m + VETO_MARGIN_M < inp.distance - ONCOMING_ENTRY_M)
     if inp.signal_veto:
@@ -1563,8 +1696,9 @@ class UnprotectedLeft:
       launch_a = inp.v_ego ** 2 / (2. * moved_m)
       self.launch_a = min(self.launch_a, max(launch_a, LAUNCH_A_MIN))
       d_far = inp.distance + max(inp.spread_m, 0.)
-      rreq = r_req(out.v_limit, t_req(d_far, inp.opposing_lanes, False, self.launch_a), d_far)
-      seen = band_blockers(self.road_boxes, inp.heading_deg, inp.side, rreq, inp.distance, lanes=inp.opposing_lanes) or \
+      rreq = r_req(out.v_limit, t_req(d_far, inp.opposing_lanes, False, self.launch_a) + self.fresh_s - ROAD_FRESH_S, d_far)
+      seen = band_blockers(self.road_boxes, inp.heading_deg, inp.side, rreq, inp.distance, lanes=inp.opposing_lanes,
+                           strip=self.far_strip) or \
         (self.far_blocked and self.far_run_age <= CLEAR_WINDOW_S)
       self.launch_on = not seen
       cloudlog.event("turnpilot.left_not_launched", error=not self.launch_on, on=self.launch_on, v=round(inp.v_ego, 2),
@@ -1579,15 +1713,24 @@ class UnprotectedLeft:
       # cantStartTakeControl handback here until then): back to a wait at its line, a fresh window, and model_holds keeps the
       # next go until the model's plan moves
       why = 'model'
+    # a red read now stops a go that has moved for as long as the red's own stop still ends short of the oncoming lanes
+    # (red_stop_m: map_controls' RED_LAG_S, then -RED_DECEL; HELD_MIN_M short of the junction, where its next go is judged,
+    # VETO_MARGIN_M to spare for the frames the stop takes to bite: its accel cap asks the red's floor only as the room
+    # runs down), past where the comfortable curve does: only from there on does the left finish. Never a yellow's, nor a
+    # red latched and no longer read (the comfortable bound's, as any other withdrawal)
+    firm = not can_stop and inp.light == 'red' and inp.light_read and not self.clearing and \
+      red_stop_m(inp.v_ego) + VETO_MARGIN_M < inp.distance - HELD_MIN_M
+    if firm:
+      why, stop_m = 'light', red_stop_m(inp.v_ego)
     if not why:
       return out
-    if not can_stop:
+    if not can_stop and not firm:
       return out
     # the model's own hold: what holds it, the light only where one is known or boxed (MODEL_HOLD_REASON, AL-1)
     reason = MODEL_HOLD_REASON.get(inp.model_holds, MODEL_HOLD_REASON['']) if why == 'model' else WITHDRAWN_REASON[why]
     cloudlog.event("turnpilot.left_go_withdrawn", error=True, why=why, first_motion=first_motion, distance=round(inp.distance, 1),
-                   v=round(inp.v_ego, 2), blockers=blockers, r_req=round(out.r_req, 1))
-    self._hold(inp, stop_m, reason)
+                   v=round(inp.v_ego, 2), blockers=blockers, r_req=round(out.r_req, 1), firm=firm)
+    self._hold(inp, stop_m, reason, firm)
     self.rolled, self.roll_off = False, True
     if why == 'model':
       self.quiet_go = True  # its retries silent until the car moves (AL-1)
@@ -1596,13 +1739,22 @@ class UnprotectedLeft:
     if why == 'band':
       self.alert_t = ALERT_S
       out.alert = 'oncomingHolding'
-    out.stops = [stop(inp.v_ego, stop_m, reason, confirmed=False)]
+    out.stops = [self._hold_stop(inp.v_ego, reason, stop_m)]
     return out
 
-  def _hold(self, inp: LeftInput, stop_m: float, reason: str) -> None:
+  def _hold_stop(self, v_ego: float, reason: str, stop_m: float = 0.):
+    """Its own hold's stop stop_m on: on the comfortable curve (unconfirmed: never harder than STOP_DECEL), or a read red's
+    firm stop (hold_firm) to the point it was asked at, never harder than the red's own floor, -RED_DECEL."""
+    if not self.hold_firm:
+      return stop(v_ego, stop_m, reason, confirmed=False)
+    s = stop(v_ego, max(self.hold_asked - self.hold_m, 0.), reason)
+    return replace(s, accel_cap=max(s.accel_cap, -RED_DECEL))
+
+  def _hold(self, inp: LeftInput, stop_m: float, reason: str, firm: bool = False) -> None:
     """Its own hold from here (hold_here: after a withdrawn go), its stop stop_m on, saying reason; never a go standing on
-    it (a fresh window), its release rule's metres from here (_hold_driven)."""
+    it (a fresh window), its release rule's metres from here (_hold_driven). firm: a read red's stop (_hold_stop)."""
     self.went, self.moved, self.hold_here, self.clear_s, self.hold_reason = False, False, True, 0., reason
+    self.hold_firm = firm
     self.latch_d = inp.distance
     self.hold_m = self.hold_drv_m = self.hold_drv_past = 0.
     self.hold_asked, self.hold_entry = max(stop_m, 0.), inp.distance - ONCOMING_ENTRY_M
@@ -1705,6 +1857,7 @@ WITHDRAWN_REASON = {
   'launch': "Car started too slowly, holding",
   'cross': "Cross traffic coming, holding",
   'pulse': "Turn not started, holding",
+  'stale': "Camera not seeing oncoming traffic, holding",
 }
 # the left's line while a car in the lane it crosses holds it (crossed_lane_cars, LS-1), by the turn's side (LEFT 1, RIGHT -1)
 BESIDE_REASON = {1: "Waiting: car beside on the left", -1: "Waiting: car beside on the right"}

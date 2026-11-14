@@ -320,6 +320,38 @@ def lane_change_events(plan) -> tuple[str, ...]:
   return events + (('turnpilotLaneChangeAborted',) if str(plan.laneChangeAbort) != 'none' else ())
 
 
+class LaneSignalChime:
+  """The chime of the lane change's ask to signal ("Signal LEFT to Change Lanes"): its side's chime once, then again each
+  PROMPT_REPEAT_S while the ask shows, as the turn's prompt (CarSignalEvents); soundd loops that sound for as long as an alert
+  carries it. tick() once a selfdrived frame (LaneChangeEvents.update), on_air() from the frame's alert. An ask back within
+  CHIME_S keeps its place in the cycle; a later one is a new ask and chimes at once."""
+  def __init__(self):
+    self.side: str | None = None
+    self.shown_t = 0.
+    self.gone_t = 0.
+    self.asked = False
+
+  def tick(self, dt: float) -> None:
+    if self.asked:
+      self.shown_t, self.gone_t = self.shown_t + dt, 0.
+    else:
+      self.gone_t += dt
+      if self.gone_t >= CHIME_S:
+        self.side, self.shown_t = None, 0.
+    self.asked = False
+
+  def on_air(self, side: str) -> bool:
+    """The ask to signal side shows this frame: whether it carries its chime."""
+    if side != self.side:
+      self.side, self.shown_t = side, 0.
+    self.asked = True
+    return self.shown_t % PROMPT_REPEAT_S < CHIME_S - 1e-6
+
+
+# the lane change's ask to signal, its chime's clock: one selfdrived per process, as CAR_SIGNAL_EVENTS
+LANE_SIGNAL_CHIME = LaneSignalChime()
+
+
 class LaneChangeEvents:
   """selfdrived's lane change events: the plan's, and an abort when the plan goes away (turnpilotd stopped, shadow mode
   turned on) while a change was offered, so a warned-of change never just disappears."""
@@ -329,6 +361,7 @@ class LaneChangeEvents:
 
   def update(self, plan, dt: float) -> tuple[str, ...]:
     """plan: shown_plan's, None when stale or in shadow mode."""
+    LANE_SIGNAL_CHIME.tick(dt)
     if plan is None:
       if self.offered:
         self.offered, self._stale_t = False, ABORT_HOLD_S
@@ -466,7 +499,8 @@ class Chime:
   and plays a one-shot sound once however long alertSound holds it, so a chime stays on its line for as long as the line
   shows, as every other TurnPilot alert keeps its sound (one 10 ms frame was heard about 1 time in 5). A line put aside
   once its chime has been on air CHIME_S, or that ended after it was on air, comes back silent: chimed once, never again
-  for the same line."""
+  for the same line. A repeating chime (repeat) is not once-only: put aside behind another line it keeps its place in its
+  cycle and sounds again at its next turn, for as long as its line lasts."""
   def __init__(self, sound: str = 'none', repeat: float | None = None):
     self.sound = sound
     self.repeat = repeat  # s: a looping sound is on air CHIME_S of each this long while its line shows (None: all of it)
@@ -490,7 +524,7 @@ class Chime:
       self.on_air = True
       self.aired += dt
       return self.sound
-    if self.on_air and not self.owed:
+    if self.on_air and not self.owed and self.repeat is None:
       self.spent = True  # put aside once heard: silent when it comes back
     self.on_air = False
     return 'none'

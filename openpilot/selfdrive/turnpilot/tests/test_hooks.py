@@ -406,3 +406,26 @@ def test_the_driver_is_asked_to_signal_from_the_offers_first_frame():
   assert lane_change_text(offered('left', 0., 'left'), 'left', lit=True) == 'Changing Lanes Left Once Clear'
   # the car signals this one: its countdown, as before
   assert lane_change_text(offered('none', 2.2), 'left') == 'Lane Change Left in 3'
+
+
+def test_a_repeating_chime_put_aside_behind_another_line_sounds_again_at_its_next_turn():
+  # the signal prompt's chime repeats each PROMPT_REPEAT_S while the lamp stays dark. Put aside for one frame behind another
+  # line after its first chime, the once-only rule of a one-shot chime marked it spent and it was silent for the rest of the
+  # prompt; a one-shot chime is still heard once only
+  import pytest
+  from openpilot.selfdrive.turnpilot import hooks
+  dt = 0.01
+  chime = hooks.Chime('tpSignalLeft', hooks.PROMPT_REPEAT_S)
+  first = [chime.shown(True, dt) for _ in range(int(2. / dt))]
+  assert 'tpSignalLeft' in first and first[-1] == 'none'
+  chime.shown(False, dt)  # one frame behind another line
+  later = [chime.shown(True, dt) for _ in range(int(3 * hooks.PROMPT_REPEAT_S / dt))]
+  starts = [k for k in range(1, len(later)) if later[k] == 'tpSignalLeft' != later[k - 1]]
+  assert len(starts) == 3 and starts[0] == pytest.approx((hooks.PROMPT_REPEAT_S - 2.) / dt, abs=2)  # at its next turn, not at once
+  assert sum(s == 'tpSignalLeft' for s in later) * dt == pytest.approx(3 * hooks.CHIME_S, abs=0.05)
+  chime.ended()
+  assert chime.shown(True, dt) == 'none'  # its line over: a new prompt gets a new chime
+  once = hooks.Chime('prompt')
+  assert all(once.shown(True, dt) == 'prompt' for _ in range(150))
+  once.shown(False, dt)
+  assert once.shown(True, dt) == 'none'

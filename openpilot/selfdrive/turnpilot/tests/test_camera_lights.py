@@ -451,12 +451,24 @@ def test_unmapped_right_camera_green_read_before_the_stop_adds_nothing():
   assert car.s > 300.
 
 
-def test_unmapped_right_camera_head_of_unknown_colour_goes_with_the_model():
-  # Kellen, 2026-11-07: a colourless head makes no stop (no want of a green), and no handback for the unread light
+def test_an_unmapped_turn_that_is_no_right_in_hand_goes_with_the_model_on_a_camera_head_of_unknown_colour():
+  # a colourless head makes no stop for want of a green, and no handback for the unread light, at a turn that is not a
+  # curb-side turn in hand (update()'s right): a far-side turn, or one TurnPilot is not taking
   car = right_at()
   for _ in range(int(30. / DT_MDL)):
     out, dec, _ = car.step(lights=cam_junction('unknown', 215.))
     assert not held(out, dec) and out.prompt == 'none' and car.policy.camera_signal is None
+
+
+def test_an_unmapped_right_in_hand_stops_at_the_line_for_a_camera_head_of_unknown_colour():
+  # a right flows only on a read green wherever a light is boxed at its junction: the camera's signal is made for the
+  # colourless head, and the right stops at the junction's line for its look (test_light_rails has its stand and go)
+  from openpilot.selfdrive.turnpilot.map_controls import CONTROL_LINE_M, RIGHT_RED_LOOKING_REASON
+  car = right_at()
+  car.right = True
+  out, dec = car.run_until(held, lights=cam_junction('unknown', 215.))
+  assert -2. < 200. - CONTROL_LINE_M - car.s < 5. and car.policy.camera_signal is not None
+  assert out.prompt == 'none' and out.stops[0].reason == RIGHT_RED_LOOKING_REASON
 
 
 def test_unmapped_right_shadow_camera_red_adds_nothing():

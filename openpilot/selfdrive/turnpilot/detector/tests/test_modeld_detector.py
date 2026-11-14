@@ -743,6 +743,39 @@ class TestCameraLights(OpenpilotTestCase):
     det2.step(pm2, det2.model_state, 0.010, 0.0, log.Desire.none, [Meta(7), Meta(8)])
     assert len(pm2.sent[0].lightRejects) == 0 and len(pm2.sent[0].lights.lights) == 1
 
+  def test_a_failure_filling_the_unpublished_boxes_costs_them_alone(self):
+    # the reader's unpublished boxes are filled apart from its read: one that can't be filled (here one with no box)
+    # leaves that run's list empty, logged, and the run's heads, its lightStatus and the detector's own run stand
+    from unittest import mock
+    from openpilot.selfdrive.turnpilot.detector import modeld_detector
+    det, pm = with_lights(make_detector()), PM()
+    det.lights.reader = types.SimpleNamespace(rejects=[
+      LightHead(-1, (0.1, 0.6, 0.11, 0.65), 0.31, 'unknown', 0, 'unknown', 'belowHorizon', 4., 150., False),
+      LightHead(9, None, 0.22, 'unknown', 0, 'unknown', 'dark', -2., 60., True)])
+    with mock.patch.object(modeld_detector.cloudlog, 'exception') as said:
+      det.step(pm, det.model_state, 0.010, 0.0, log.Desire.none, [Meta(7), Meta(8)])
+    td = pm.sent[0]
+    assert td.lightStatus == LightStatus.read and [str(x.state) for x in td.lights.lights] == ['red']
+    assert len(td.lightRejects) == 0 and det.light_failures == 0 and det.failures == 0
+    assert [c.args[0] for c in said.call_args_list] == ["turnpilot light rejects failed"]
+
+  def test_a_heads_nearer_range_rides_on_its_instance_and_is_read_back(self):
+    # the reader's second range (light_state.head_near) has no field of its own in the message: it rides after the head's id,
+    # on the heads and on the unpublished boxes, and map_controls reads it back (a red's span, a low-confidence red's veto)
+    from openpilot.cereal import messaging
+    from openpilot.selfdrive.turnpilot.detector.modeld_detector import fill_heads, fill_lights
+    from openpilot.selfdrive.turnpilot.map_controls import camera_light_input
+    td = messaging.new_message('turnpilotDetections').turnpilotDetections
+    fill_lights(td.lights, [LightHead(6, (0.4, 0.1, 0.41, 0.15), 0.6, 'red', 3, 'red', 'read', 1., 70.7, True, 'h43 fr0.47/0.25/0.00', 29.36),
+                            LightHead(7, (0.5, 0.1, 0.51, 0.15), 0.6, 'green', 3, 'green', 'read', 2., 40., True, '', 40.)], False)
+    fill_heads(td.init('lightRejects', 2), [
+      LightHead(-1, (0.6, 0.1, 0.61, 0.16), 0.13, 'unknown', 0, 'red', 'lowConf', -2., 60., False, 'h44', 31.2),
+      LightHead(-1, (0.7, 0.1, 0.71, 0.16), 0.13, 'unknown', 0, 'unknown', 'lowConf', -2., 60., False)])
+    assert [x.instance for x in td.lights.lights] == ['head6 near29.4 h43 fr0.47/0.25/0.00', 'head7 near40.0']
+    cam = camera_light_input(td.lights.as_reader(), 'read', 0., 'addOnly', td.lightRejects)
+    assert cam.heads == [('red', pytest.approx(70.7)), ('green', 40.)] and cam.nears == [29.4, 40.] and cam.ids == [6, 7]
+    assert cam.vetoes == [('red', 60., 31.2, -2.)]  # the low-confidence red alone, its bearing with it: the unread box is nothing
+
   def test_add_only_mode_is_not_shadow(self):
     det, pm = with_lights(make_detector(), 'addOnly'), PM()
     det.step(pm, det.model_state, 0.010, 0.0, log.Desire.none, [Meta(1), Meta(2)])

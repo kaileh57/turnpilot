@@ -41,7 +41,7 @@ def test_lane_change_warning_left_and_right():
     assert a.alert_text_1 == f'Lane Change {side.capitalize()} in 3' and a.audible_alert == chime
     a, = alerts(name, FakeSM(plan(laneChangeOffer=side)))
     assert a.alert_text_1 == f'Signal {side.upper()} to Change Lanes'
-    # waiting on the driver's lamp (2026-11-07): the side's own chime on repeat
+    # waiting on the driver's lamp (2026-11-07): the side's own chime, from the ask's first frame
     assert a.audible_alert == (AudibleAlert.tpSignalLeft if side == 'left' else AudibleAlert.tpSignalRight)
     assert a.alert_type == f'turnpilotLaneChange{side.capitalize()}/warning'  # separate names: a chime per side later
 
@@ -660,3 +660,61 @@ def test_a_failing_light_readers_line_chimes_once_through_a_lane_line_coming_and
   assert set(shown) == {'turnpilotControlAlert/warning'}
   onsets = [i for i, s in enumerate(sounds) if s != AudibleAlert.none and (i == 0 or sounds[i - 1] == AudibleAlert.none)]
   assert onsets == [0]
+
+
+def test_the_lane_change_ask_to_signal_chimes_once_then_every_8_s_not_on_a_loop():
+  """The ask to signal a lane change ("Signal LEFT to Change Lanes") carried tpSignalLeft on every frame it showed, and soundd
+  loops that sound for as long as an alert carries it (soundd.py: loops None): with a driver who doesn't answer it played
+  until the change's window ended. Same rule as the turn's prompt: once, then every PROMPT_REPEAT_S, on air CHIME_S each time.
+  test_turnpilotd's Sim with the shipped settings: a left 500 m on, the car one lane right of it, the broken line read, the
+  driver's lamp never lit; selfdrived's own calls each frame (LaneChangeEvents.update, then the event's alert)."""
+  from openpilot.common.realtime import DT_MDL
+  from openpilot.selfdrive.selfdrived import events as ev
+  from openpilot.selfdrive.turnpilot import hooks
+  from openpilot.selfdrive.turnpilot.hooks import CHIME_S, PROMPT_REPEAT_S, LaneChangeEvents
+  from openpilot.selfdrive.turnpilot.scene.lane_paint import UNKNOWN, LinePaint
+  from openpilot.selfdrive.turnpilot.tests.shipped import shipped
+  from openpilot.selfdrive.turnpilot.tests.test_turnpilotd import Sim
+  from openpilot.selfdrive.ui import soundd
+  broken, solid = LinePaint('broken', 'white', 0.9, 0.3), LinePaint('solid', 'white', 0.9, 0.95)
+  sim = shipped(Sim([(500., "turn", "left"), (2000., "turn", "right")], cruise=15., model_lanes=(1, 0), driver_signals=None,
+                    paint=(UNKNOWN, broken, solid, UNKNOWN)))
+  hooks.LANE_SIGNAL_CHIME.__init__()
+  lane_events, on_air = LaneChangeEvents(), []  # (t, the alert's sound) on every frame the ask shows
+  for _ in range(int(30. / DT_MDL)):
+    p = sim.step(engaged=True)
+    if 'turnpilotLaneChangeLeft' in lane_events.update(p, DT_MDL):
+      alert = ev.turnpilot_lane_change_alert('left')(None, sim.sm['carState'], FakeSM(p), False, 0, None)
+      if alert.alert_text_1.startswith('Signal '):
+        on_air.append((sim.t, alert.audible_alert))
+  shown_s = len(on_air) * DT_MDL
+  assert shown_s > 2 * PROMPT_REPEAT_S, shown_s  # the premise: the ask stays up while the driver doesn't answer
+  assert soundd.sound_list[AudibleAlert.tpSignalLeft][1] is None  # soundd repeats it for as long as the alert carries it
+  chimes = [t for (t, s), (_, before) in zip(on_air[1:], on_air[:-1], strict=True) if s == AudibleAlert.tpSignalLeft != before]
+  assert on_air[0][1] == AudibleAlert.tpSignalLeft  # from its first frame
+  assert [round(t - on_air[0][0]) for t in chimes] == [8, 16]
+  chiming_s = sum(DT_MDL for _t, s in on_air if s == AudibleAlert.tpSignalLeft)
+  assert 2 * CHIME_S - 0.1 <= chiming_s <= 3 * CHIME_S + 0.1, chiming_s  # the third cut short where the ask ends
+  assert all(s in (AudibleAlert.tpSignalLeft, AudibleAlert.none) for _, s in on_air)
+
+
+def test_the_lane_change_asks_chime_keeps_its_cycle_through_a_blink_and_starts_over_for_a_new_ask():
+  from openpilot.selfdrive.turnpilot.hooks import CHIME_S, PROMPT_REPEAT_S, LaneSignalChime
+  dt, chime = 0.01, LaneSignalChime()
+
+  def frames(n, side='left', asked=True):
+    out = []
+    for _ in range(n):
+      chime.tick(dt)  # selfdrived's order: the events' update, then the frame's alerts
+      out.append(chime.on_air(side) if asked else False)
+    return out
+  first = frames(300)
+  assert all(first[:99]) and not any(first[101:])  # on air CHIME_S, then silent
+  frames(20, asked=False)  # the ask gone 0.2 s (a frame of "Checking the Lane"): no new chime when it is back
+  assert not any(frames(400))
+  later = frames(200)  # 8 s of the ask in all: its second chime
+  assert any(later)
+  frames(int(CHIME_S / dt) + 5, asked=False)  # gone for good; the next ask is a new one, chiming from its first frame
+  assert frames(1)[0]
+  assert frames(1, side='right')[0]  # the other side's ask is its own
+  assert PROMPT_REPEAT_S == 8.

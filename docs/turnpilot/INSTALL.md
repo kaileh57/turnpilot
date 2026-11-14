@@ -386,10 +386,19 @@ Each line starts with PASS, FAIL, WARN or INFO. A FAIL line is followed by a `fi
 The comma pulls from the `turnpilot` branch of `github.com/kaileh57/openpilot`, so an update is whatever has been pushed there.
 
 1. Join home Wi-Fi.
-2. Open **Settings > Software** and tap **check for update**. If it offers **download update**, tap that. When the download finishes, **install now** appears (the car must be off). The comma restarts and recompiles, which takes several minutes. If the update changed the panda firmware, pandad reflashes the panda by itself at that start ("What the branch name does").
+2. Leave the car parked and off, with the comma powered and on Wi-Fi. The comma checks for an update a minute after it comes up and downloads it by itself. Once the download is finalized and the car has been off for 3 minutes, the comma installs it by itself: it restarts and recompiles, which takes several minutes, and must stay powered. If the update changed the panda firmware, pandad reflashes the panda by itself at that start ("What the branch name does").
 3. Run preflight.
 
-Updates are on, as in stock openpilot (`DisableUpdates` 0, the default since SATURDAY_PARAMS.md's 11:50 change), so a fix pushed to the `turnpilot` branch reaches the comma through **Settings > Software** with no SSH. The updater applies a downloaded update at the next boot, and the comma boots every time the car wakes. To keep a build fixed for a test day, turn updates off over SSH and back on afterwards:
+Nothing needs tapping. To do it by hand instead, open **Settings > Software**, tap **check for update**, then **download update** if it is offered, then **install now** (the car must be off).
+
+Updates are on, as in stock openpilot (`DisableUpdates` 0, the default since SATURDAY_PARAMS.md's 11:50 change), so a fix pushed to the `turnpilot` branch reaches the comma with no SSH. How the automatic install behaves (`system/updated/updated.py`):
+
+- It runs only offroad with the ignition off for 3 minutes, never during a driver monitoring lockout, and does what **install now** does (a restart; the launch script swaps the update in).
+- A downloaded update is kept through a drive, and through a park with no Wi-Fi: if you drive off before it installed, it installs at the next park or the next boot, whichever comes first.
+- It tries each commit once (`/data/updater_auto_install_commit` holds the commit tried). If that install did not take, the comma stays on the old build and **install now** in Settings > Software is the way; the next push is tried again automatically.
+- A metered connection (a phone hotspot marked metered) still downloads only once in 3 days unless **download update** is tapped.
+
+To keep a build fixed for a test day, turn updates off over SSH and back on afterwards:
 
 ```
 python3 -m openpilot.selfdrive.turnpilot.preflight --set DisableUpdates=1

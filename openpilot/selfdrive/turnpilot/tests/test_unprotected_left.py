@@ -177,18 +177,65 @@ def test_the_streams_freshness_is_what_the_gap_rule_can_spare_never_the_schedule
   35 mph left at a signalized line waited p50 28-35 s, 20-26 of 100 holds a minute or more (test_far_first's real left, 2
   road heads at 1.4x, without CS-1's overdue run). The gap rule's margin is what a gap between runs may spend: a car at
   SPEED_MARGIN x the limit just past R_req on the last run is inside it by that travel at the go, out of PET_S. So the
-  freshness is a quarter of PET_S (half a second): runs 0.35 s apart now fill the window, 0.55 s apart still start it over."""
+  freshness is a quarter of PET_S (half a second): runs 0.35 s apart now fill the window, a run 0.55 s after the one before
+  among them still starts it over (a road pass steadily that slow is judged on its own cadence: the 2 Hz test below)."""
   assert ROAD_FRESH_S == FAR_FRESH_S == PET_S / 4.
   j = Junction()
   runs_every(j, 7, CLEAR_WINDOW_S + 1.)  # 0.35 s apart
   assert any(x.go for x in j.decisions)
   j = Junction()
-  runs_every(j, 11, CLEAR_WINDOW_S + 3.)  # 0.55 s apart
-  assert not any(x.go for x in j.decisions)
+  runs_every(j, 7, CLEAR_WINDOW_S - 0.5)  # its last run, then six frames with none
+  for _ in range(4):
+    j.step(raw_new=False)
+  assert j.step().clear_s == 0. and not any(x.go for x in j.decisions)  # the next run 0.55 s after the last
   # the far crop's runs (a 45 mph left, far needed) the same
   j = Junction(v_limit=V_45)
   runs_every(j, 7, CLEAR_WINDOW_S + 1., far=True)
   assert any(x.go and x.far_needed for x in j.decisions)
+
+
+def road_pass(j, frames, seconds, boxes=()):
+  """j's road runs every frames frames for seconds, boxes on each."""
+  for _ in range(round(seconds / (frames * DT_MDL))):
+    j.step(list(boxes))
+    for _ in range(frames - 1):
+      j.step(raw_new=False)
+
+
+def test_a_road_pass_at_2_hz_is_judged_on_its_own_cadence_and_r_req_reaches_further_for_the_longer_look_back():
+  """A left waiting at its line with the road pass at 2 Hz (road runs 0.5-0.6 s apart, one detector run in three the wide
+  camera's): every run comes over ROAD_FRESH_S after the last, which alone starts the window over each time, for good.
+  Freshness is judged against the pass's own cadence (road_fresh_s: the median gap of its last runs, ROAD_CADENCE_SLACK of
+  it on time), to ROAD_FRESH_MAX_S, and what that takes past ROAD_FRESH_S is added to the clear time, so R_req reaches
+  further by a car's travel in it."""
+  assert ul.ROAD_FRESH_MAX_S == CLEAR_WINDOW_S / 3. and ul.ROAD_CADENCE_SLACK == 1.25 and ul.ROAD_CADENCE_RUNS == 5
+  fast, slow = Junction(), Junction()
+  road_pass(fast, 2, CLEAR_WINDOW_S + 1.)   # 0.1 s apart
+  road_pass(slow, 12, CLEAR_WINDOW_S + 3.)  # 0.6 s apart
+  go_fast, go_slow = next(x for x in fast.decisions if x.go), next(x for x in slow.decisions if x.go)
+  assert fast.left.road_fresh_s() == ROAD_FRESH_S and abs(slow.left.road_fresh_s() - 0.75) < 1e-6
+  look_back = 0.75 - ROAD_FRESH_S
+  assert abs(go_slow.t_req - go_fast.t_req - look_back) < 1e-6
+  assert abs(go_slow.r_req - go_fast.r_req - V_25 * SPEED_MARGIN * look_back) < 1e-6
+  # a car between the two (its box as wide as the narrowest car: its nearest range its own) holds the slow pass's left on
+  # every run and is past the fast one's reach
+  car = raw(go_fast.r_req + 2., 3.6, width=WIDTH_FLOOR_M['car'])
+  assert go_fast.r_req < nearest_range(car) < go_slow.r_req
+  fast, slow = Junction(), Junction()
+  road_pass(fast, 2, CLEAR_WINDOW_S + 1., [car])
+  road_pass(slow, 12, CLEAR_WINDOW_S + 6., [car])
+  assert any(x.go for x in fast.decisions) and not any(x.go for x in slow.decisions)
+  assert slow.decisions[-12].blockers == 1
+  # a dropout is no cadence: one run 0.6 s late among runs 0.1 s apart starts the window over, the bound unmoved
+  j = Junction()
+  road_pass(j, 2, CLEAR_WINDOW_S - 0.5)
+  for _ in range(11):
+    j.step(raw_new=False)
+  assert j.step().clear_s == 0. and j.left.road_fresh_s() == ROAD_FRESH_S and not any(x.go for x in j.decisions)
+  # a pass slower than the bound follows (runs over ROAD_FRESH_MAX_S apart) starts the window over on every run, as before
+  j = Junction()
+  road_pass(j, 18, 6 * CLEAR_WINDOW_S)  # 0.9 s apart
+  assert j.left.road_fresh_s() == ul.ROAD_FRESH_MAX_S and not any(x.go for x in j.decisions)
 
 
 def test_goes_only_after_the_band_is_clear_on_road_frames_for_the_window():
@@ -226,11 +273,12 @@ def test_a_missing_frame_is_never_clear():
   assert d.go or any(x.go for x in j.decisions)
   j = Junction()
   gap = math.ceil(ROAD_FRESH_S / DT_MDL) + 1
-  for _ in range(round((CLEAR_WINDOW_S + 1.) / (gap * DT_MDL))):
+  for _ in range(round((CLEAR_WINDOW_S - 0.5) / 0.1)):
     j.step()
-    for _ in range(gap - 1):
-      d = j.step(raw_new=False)
-  assert not any(x.go for x in j.decisions)
+    j.step(raw_new=False)
+  for _ in range(gap - 1):
+    d = j.step(raw_new=False)
+  assert d.clear_s == 0. and j.step().clear_s == 0. and not any(x.go for x in j.decisions)
 
 
 def test_stale_road_frames_are_a_fault_never_a_wait():
@@ -1627,50 +1675,97 @@ def test_a_box_going_away_or_standing_outside_the_opposing_lanes_is_no_oncoming_
   """Drive 29, a held left (seg 7): two cars parked at the far-left curb 40-70 m up and our own direction's car ahead were
   far-crop band blockers on every far run for 30 s. A box the tracker says is receding on our own side of the oncoming
   lanes never blocks (on their side it does: test_a_receding_box_on_the_oncoming_side_still_blocks); one standing blocks
-  unless it is wholly beyond the opposing lanes' far edge (one opposing lane: 5.4 m to the turn side) or wholly on our side
-  of the car's centre line. Unknown and closing boxes block wherever they are."""
+  unless it is wholly beyond the opposing lanes' far edge (one opposing lane: 5.4 m to the turn side) where the cameras
+  showed only a strip beyond that edge (strip), or wholly on our side of the car's centre line. Unknown and closing boxes
+  block wherever they are."""
   far_curb, ahead, oncoming_lane = raw(60., 7.5), raw(110., -2.8), raw(60., 3.6)
   for box in (far_curb, ahead, oncoming_lane):
     for motion in ('unknown', 'closing'):
-      assert band_blockers([moving(box, motion)], 0., LEFT, math.inf, HOLD_D, lanes=1), (box.xy, motion)
+      assert band_blockers([moving(box, motion)], 0., LEFT, math.inf, HOLD_D, lanes=1, strip=True), (box.xy, motion)
     assert bool(band_blockers([moving(box, 'receding')], 0., LEFT, math.inf, HOLD_D, lanes=1)) == (box is not ahead), box.xy
-  assert not band_blockers([moving(far_curb, 'standing')], 0., LEFT, math.inf, HOLD_D, lanes=1)
+  assert not band_blockers([moving(far_curb, 'standing')], 0., LEFT, math.inf, HOLD_D, lanes=1, strip=True)
   assert not band_blockers([moving(ahead, 'standing')], 0., LEFT, math.inf, HOLD_D, lanes=1)
+  # the map's count alone is no proof of the far edge: the strip not shown, a car standing past it blocks
+  assert band_blockers([moving(far_curb, 'standing')], 0., LEFT, math.inf, HOLD_D, lanes=1)
   # standing in the opposing lanes (a queue at its light, about to launch): it blocks
-  assert band_blockers([moving(oncoming_lane, 'standing')], 0., LEFT, math.inf, HOLD_D, lanes=1)
+  assert band_blockers([moving(oncoming_lane, 'standing')], 0., LEFT, math.inf, HOLD_D, lanes=1, strip=True)
   # two opposing lanes (9 m): 7.5 m out is their outer lane, where a standing car blocks; unmapped lanes count as two
-  assert band_blockers([moving(far_curb, 'standing')], 0., LEFT, math.inf, HOLD_D, lanes=2)
-  assert band_blockers([moving(far_curb, 'standing')], 0., LEFT, math.inf, HOLD_D)
+  assert band_blockers([moving(far_curb, 'standing')], 0., LEFT, math.inf, HOLD_D, lanes=2, strip=True)
+  assert band_blockers([moving(far_curb, 'standing')], 0., LEFT, math.inf, HOLD_D, strip=True)
   # unranged, it can't be placed outside the lanes: it blocks
-  assert band_blockers([moving(raw(60., 7.5, ranged=False), 'standing')], 0., LEFT, math.inf, HOLD_D, lanes=1)
+  assert band_blockers([moving(raw(60., 7.5, ranged=False), 'standing')], 0., LEFT, math.inf, HOLD_D, lanes=1, strip=True)
+
+
+def test_the_far_edge_is_the_cameras_never_the_maps_lane_count_alone():
+  """A standing box beyond the opposing lanes the map counts is no traffic only where the driving model's far road edge,
+  read on the approach, leaves a strip beyond those lanes and no room for a lane the map doesn't count (strip_beyond; the
+  left's far_strip over its last trusted reads). On the map's count alone, a road mapped as one lane with two has a car
+  standing in the second lane read as no traffic, and it launches after the go."""
+  # one mapped lane (its far edge 5.4 m to the turn side). A lane and a parking strip: the edge 7.0-7.8 m out, a strip
+  for edge in (6.4, 7.0, 7.8):
+    assert ul.strip_beyond(edge, None, 1), edge
+  # two 3.6 m lanes (9.0 m), with or without a parking strip past them: room for a lane the map doesn't count
+  for edge in (ul.lanes_far_m(1) + ul.FAR_LANE_MIN_M, 9.0, 11.4):
+    assert not ul.strip_beyond(edge, None, 1), edge
+  # two 3 m lanes, the divider painted 4.5 m out and a lane's room past it to the edge at 7.5 m: no strip; the same edge with
+  # a parking strip's line 5.3 m out is one
+  assert not ul.strip_beyond(7.5, 4.5, 1) and ul.strip_beyond(7.5, 5.3, 1)
+  # an edge the model draws well short of the mapped lanes (a median's kerb, the car's own lane's edge) shows nothing of them
+  assert not ul.strip_beyond(2.3, None, 1) and not ul.strip_beyond(ul.lanes_far_m(1) - ul.FAR_EDGE_SHORT_M - 0.1, None, 1)
+  # two lanes mapped, or none (two assumed): the strip is past 9 m; a divider well inside them is no edge of theirs
+  assert ul.strip_beyond(11.2, 5.4, 2) and ul.strip_beyond(10.5, None, None) and not ul.strip_beyond(7.4, None, None)
+  # the left's verdict: FAR_EDGE_MIN_READS trusted reads at least, two in three of the last FAR_EDGE_READS a strip
+  parked = moving(raw(60., 7.5), 'standing')
+  j = Junction(v_limit=V_45)
+  assert not j.left.far_strip
+  d = far_wait(j, CLEAR_WINDOW_S + 3., far=[parked], far_range_m=300., far_live=True)  # the model's edge never trusted
+  assert not d.go and d.far_blockers == 1 and not j.left.far_strip
+  j = Junction(v_limit=V_45)
+  for _ in range(ul.FAR_EDGE_MIN_READS - 1):
+    j.step(far_edge_m=7.4)
+  assert not j.left.far_strip
+  j.step(far_edge_m=7.4)
+  assert j.left.far_strip and far_wait(j, CLEAR_WINDOW_S + 1., far=[parked], far_range_m=300., far_live=True).go
+  for edge, line in ((9.0, None), (7.5, 4.5), (2.3, None)):
+    j = Junction(v_limit=V_45)
+    d = far_wait(j, CLEAR_WINDOW_S + 3., far=[parked], far_range_m=300., far_live=True, far_edge_m=edge, far_line_m=line)
+    assert not d.go and d.far_blockers == 1 and not j.left.far_strip, (edge, line)
+  # reads from the car yawed into the turn, or further out than the road camera's stretch, are not the road's
+  yawed, far_out = Junction(), Junction()
+  for _ in range(ul.FAR_EDGE_READS):
+    yawed.step(far_edge_m=7.4, heading_deg=ul.BAND_TOL_DEG + 1.)
+    far_out.step(far_edge_m=7.4, distance=ul.VIEW_FROM_M + 5.)
+  assert not yawed.left.far_reads and not far_out.left.far_reads
 
 
 def test_the_held_left_goes_past_parked_and_departing_far_boxes_and_is_held_by_one_closing():
   """The decider on the same scene: a far crop needed (45 mph), far boxes standing at the far curb and receding up the road
   on every far run. The left goes on its window. The same boxes with no verdict (unknown), or one of them closing, hold it."""
   parked = [moving(raw(60., 7.5), 'standing'), moving(raw(45., 7.6), 'standing'), moving(raw(115., -2.8), 'receding')]
+  far_kw = {'far_range_m': 300., 'far_live': True, 'far_edge_m': 7.4}  # the model's far edge: a lane and a parking strip
   j = Junction(v_limit=V_45)
-  assert far_wait(j, CLEAR_WINDOW_S + 1., far=parked, far_range_m=300., far_live=True).go
+  assert far_wait(j, CLEAR_WINDOW_S + 1., far=parked, **far_kw).go
   j = Junction(v_limit=V_45)
-  d = far_wait(j, CLEAR_WINDOW_S + 3., far=[moving(b, 'unknown') for b in parked], far_range_m=300., far_live=True)
+  d = far_wait(j, CLEAR_WINDOW_S + 3., far=[moving(b, 'unknown') for b in parked], **far_kw)
   assert not d.go and d.clear_s == 0. and d.far_blockers == 3
   j = Junction(v_limit=V_45)
-  d = far_wait(j, CLEAR_WINDOW_S + 3., far=parked[:2] + [moving(raw(200., 3.6), 'closing')], far_range_m=300., far_live=True)
+  d = far_wait(j, CLEAR_WINDOW_S + 3., far=parked[:2] + [moving(raw(200., 3.6), 'closing')], **far_kw)
   assert not d.go and d.clear_s == 0. and d.far_blockers == 1
 
 
 def test_a_car_standing_then_launching_blocks_again_inside_the_windows_freshness():
   """Through the tracker's own BoxMotion (scene/tests/test_box_motion.py's runs: the full pass and the far crop alternating,
   pixel noise). A car standing in the opposing lanes blocks on every run, standing or launching: a queue at its light is
-  never cleared, whatever the verdict's lag. One standing beyond them (the far curb) is exempt while it stands and blocks
-  again within 2 s of pulling out toward the car: a go given in those 2 s is caught by the band's re-check on every road
-  run while the car can still stop (_after_go), as any car that appears after a go is."""
+  never cleared, whatever the verdict's lag. One standing beyond them (the far curb, the cameras having shown only a strip
+  there) is exempt while it stands and blocks again within 2 s of pulling out toward the car: a go given in those 2 s is
+  caught by the band's re-check on every road run while the car can still stop (_after_go), as any car that appears after a
+  go is."""
   from openpilot.selfdrive.turnpilot.scene.tests import test_box_motion as bm
   for y, exempt_standing in ((5., False), (8.5, True)):
     for seed in range(3):
       tracker, cal = bm.SceneTracker(bm.CAMS, 'mici'), bm.calibration()
       seen = bm.drive(tracker, cal, lambda t, y=y: (bm.launch_after_stand(t)[0], y), seconds=6., noise_px=0.5, seed=seed)
-      blocks = [(t - 100., bool(band_blockers([b], 0., LEFT, math.inf, HOLD_D, lanes=1)), b.motion) for t, b in seen]
+      blocks = [(t - 100., bool(band_blockers([b], 0., LEFT, math.inf, HOLD_D, lanes=1, strip=True)), b.motion) for t, b in seen]
       if not exempt_standing:
         assert all(blk for _, blk, _ in blocks), (y, seed, [x for x in blocks if not x[1]])
         continue
@@ -1683,6 +1778,9 @@ def test_a_car_standing_then_launching_blocks_again_inside_the_windows_freshness
 # --- the rolling go (ROLLING_GO): asked on the approach, the left's once its line's stop is seen let go ---
 
 ROLL_KW = {'roll_light': 'none', 'roll_v': 4.65, 'lane_ok': True}
+# the full pass's range in these roll-ins: past the range a roll from its first point needs seen (roll_reach_m: 179 m at
+# 6 m/s against a 25 mph road), so the go comes at that point; test_a_rolling_go_needs_its_whole_exposures_range_seen has the rest
+ROLL_RANGE = 210.
 
 
 def roll_in(j, v=6., d0=60., until=None, boxes=lambda d: (), release=True, **kw):
@@ -1702,7 +1800,7 @@ def roll_in(j, v=6., d0=60., until=None, boxes=lambda d: (), release=True, **kw)
 
 
 def test_a_rolling_go_is_asked_at_its_point_and_is_the_lefts_only_once_the_lines_stop_is_gone():
-  j = Junction()
+  j = Junction(rng=ROLL_RANGE)
   seen = roll_in(j)
   ask = next(i for i, d in enumerate(seen) if d.go)
   # 'far' until the point (the stop for the line about to take the car under the corner's speed, ROLL_LEAD_S before), then asked
@@ -1713,7 +1811,7 @@ def test_a_rolling_go_is_asked_at_its_point_and_is_the_lefts_only_once_the_lines
   # the next frame the stop is seen let go: gone, moving, rolled
   assert seen[-1].state == 'go' and seen[-1].rolled and j.left.went and j.left.moved
   # the same roll-in where the line's stop is kept: refused, and never asked again for this left
-  j = Junction()
+  j = Junction(rng=ROLL_RANGE)
   seen = roll_in(j, release=False, until=12.)
   assert sum(d.go for d in seen) == 1 and all(d.state == 'approach' and not d.rolled for d in seen)
   assert seen[-1].roll == 'done' and not j.left.went
@@ -1726,7 +1824,7 @@ def test_a_rolling_go_is_asked_at_its_point_and_is_the_lefts_only_once_the_lines
   ({'model_holds': 'light'}, 'hold'),
 ])
 def test_what_a_go_from_a_stand_needs_a_rolling_go_needs_and_a_lamp_a_lane_and_a_read_light_besides(kw, why):
-  j = Junction()
+  j = Junction(rng=ROLL_RANGE)
   seen = roll_in(j, until=12., **kw)
   assert not any(d.go for d in seen)
   assert why in {d.roll for d in seen} and {d.roll for d in seen} <= {'far', why, 'late', 'done'}, {d.roll for d in seen}
@@ -1735,7 +1833,7 @@ def test_what_a_go_from_a_stand_needs_a_rolling_go_needs_and_a_lamp_a_lane_and_a
 def green_roll(read, v=6., d0=60.):
   """A roll-in at a signal; read(t) -> (roll_light, the camera read's number or None for a source read every frame). The
   time a rolling go is asked, None if never."""
-  j, k = Junction(), 0
+  j, k = Junction(rng=ROLL_RANGE), 0
   j.held, j.v, j.distance = False, v, d0
   while j.distance > 12.:
     k += 1
@@ -1748,7 +1846,7 @@ def green_roll(read, v=6., d0=60.):
 
 
 def test_a_rolling_go_at_a_signal_needs_map_controls_steady_green():
-  t_point = next(i for i, d in enumerate(roll_in(Junction(), until=12., roll_light='unread')) if d.roll != 'far') * DT_MDL
+  t_point = next(i for i, d in enumerate(roll_in(Junction(rng=ROLL_RANGE), until=12., roll_light='unread')) if d.roll != 'far') * DT_MDL
   # an accepted source's green, read every frame the whole approach: asked at the point
   assert abs(green_roll(lambda t: ('green', None)) - t_point) <= 2 * DT_MDL
   # ...green only from 0.5 s before the point: asked once it has been green CAMERA_GREEN_STEADY_S, never sooner
@@ -1761,7 +1859,7 @@ def test_a_rolling_go_at_a_signal_needs_map_controls_steady_green():
   # ...and a red or yellow read between them starts the count over: none by the roll's last point
   def red_between(t):
     return ('unread', None) if abs(t - (t_point - 0.3)) < 0.1 else ('green', int(t / 0.2))
-  j, k, asked = Junction(), 0, None
+  j, k, asked = Junction(rng=ROLL_RANGE), 0, None
   j.held, j.v, j.distance = False, 6., 60.
   while j.distance > 12. and asked is None:
     k += 1
@@ -1782,21 +1880,21 @@ def test_a_box_in_the_band_or_a_run_gap_on_the_roll_in_leaves_no_rolling_go():
       hit[0] = True
       return [raw(80., 3.6)]
     return ()
-  seen = roll_in(Junction(), boxes=one_box, until=12.)
+  seen = roll_in(Junction(rng=ROLL_RANGE), boxes=one_box, until=12.)
   assert hit[0] and not any(d.go for d in seen) and {'window', 'band'} & {d.roll for d in seen}
   # the rule's motion exemptions hold rolling too: a car standing beyond the oncoming lane's far edge, and one going away
   parked = dataclasses.replace(raw(60., 8.), motion='standing')
   away = dataclasses.replace(raw(50., 0.5), motion='receding')
-  assert roll_in(Junction(), boxes=lambda d: [parked, away])[-1].rolled
+  assert roll_in(Junction(rng=ROLL_RANGE), boxes=lambda d: [parked, away], far_edge_m=7.4)[-1].rolled
   # ...and never for one standing in the oncoming lane itself, or one whose motion isn't told
   for b in (dataclasses.replace(raw(60., 3.6), motion='standing'), raw(60., 8.)):
-    assert not any(d.go for d in roll_in(Junction(), boxes=lambda d, b=b: [b], until=12.))
+    assert not any(d.go for d in roll_in(Junction(rng=ROLL_RANGE), boxes=lambda d, b=b: [b], until=12.))
 
 
 def test_no_rolling_go_once_a_withdrawn_one_could_no_longer_stop_short_of_the_oncoming_lanes():
   # the window fills only late (boxes until 22 m out at 6 m/s): by then a stop from 6 m/s on the comfortable curve
   # (ROLL_STOP_LAG_S, VETO_MARGIN_M) no longer ends short of the oncoming lanes, so none is asked: 'late', then 'done'
-  seen = roll_in(Junction(), boxes=lambda d: [raw(80., 3.6)] if d > 34. else (), until=8.)
+  seen = roll_in(Junction(rng=ROLL_RANGE), boxes=lambda d: [raw(80., 3.6)] if d > 34. else (), until=8.)
   rolls = [d.roll for d in seen]
   assert not any(d.go for d in seen) and 'late' in rolls and rolls[-1] == 'done'
   first_late = next(i for i, r in enumerate(rolls) if r == 'late')
@@ -1805,7 +1903,7 @@ def test_no_rolling_go_once_a_withdrawn_one_could_no_longer_stop_short_of_the_on
 
 
 def test_a_rolling_go_is_rechecked_every_run_and_withdrawn_to_the_lefts_own_stop_while_the_car_can_stop():
-  j = Junction()
+  j = Junction(rng=ROLL_RANGE)
   seen = roll_in(j)
   assert seen[-1].rolled
   # a car in the band on the next road run: withdrawn, the left's own stop on the comfortable curve from where the car is
@@ -1813,7 +1911,7 @@ def test_a_rolling_go_is_rechecked_every_run_and_withdrawn_to_the_lefts_own_stop
   assert d.state == 'waitGap' and d.alert == 'oncomingHolding' and len(d.stops) == 1 and not j.left.went and j.left.hold_here
   assert d.stops[0].accel_cap >= -STOP_DECEL - 1e-6 or d.stops[0].speed_cap >= 6. - STOP_DECEL  # never harder than the curve
   # past where its stop would end HELD_MIN_M short of the junction (VETO_MARGIN_M to spare) it is never withdrawn
-  j = Junction()
+  j = Junction(rng=ROLL_RANGE)
   roll_in(j)
   while 36. / (2. * STOP_DECEL) + VETO_MARGIN_M < j.distance - HELD_MIN_M:
     assert j.step(distance=j.distance - 6. * DT_MDL, latch_gone=True, **ROLL_KW).state == 'go'
@@ -1822,7 +1920,7 @@ def test_a_rolling_go_is_rechecked_every_run_and_withdrawn_to_the_lefts_own_stop
 
 
 def test_a_rolling_go_whose_turn_never_pulses_is_withdrawn():
-  j = Junction()
+  j = Junction(rng=ROLL_RANGE)
   assert roll_in(j)[-1].rolled
   states = [j.step(distance=j.distance - 6. * DT_MDL, latch_gone=True, desire_out=False, **ROLL_KW) for _ in range(round(ROLL_PULSE_S / DT_MDL) + 1)]
   out = next(i for i, d in enumerate(states) if d.state != 'go')
@@ -1832,7 +1930,7 @@ def test_a_rolling_go_whose_turn_never_pulses_is_withdrawn():
 
 def test_a_rolling_gos_clear_time_is_never_less_than_its_own_speed_takes():
   # rolling at 2 m/s after the go (a lead, the model slowing): the band is judged to the range that speed's crossing needs
-  j = Junction()
+  j = Junction(rng=ROLL_RANGE)
   assert roll_in(j)[-1].rolled
   fast = j.step(distance=j.distance - 6. * DT_MDL, latch_gone=True, **ROLL_KW)
   slow = j.step(v=2., distance=j.distance - 2. * DT_MDL, latch_gone=True, **ROLL_KW)
@@ -1841,13 +1939,13 @@ def test_a_rolling_gos_clear_time_is_never_less_than_its_own_speed_takes():
 
 
 def test_the_public_switches_turn_the_rolling_go_off(monkeypatch):
-  j = Junction()
+  j = Junction(rng=ROLL_RANGE)
   j.left.window_from_approach = False
   assert {d.roll for d in roll_in(j, until=12.)} == {'off'}
   monkeypatch.setattr(ul, 'ROLLING_GO', False)
-  assert {d.roll for d in roll_in(Junction(), until=12.)} == {'off'}
+  assert {d.roll for d in roll_in(Junction(rng=ROLL_RANGE), until=12.)} == {'off'}
   monkeypatch.undo()
-  assert {d.roll for d in roll_in(Junction(), until=12., roll_v=0.)} == {'off'}  # the corner's speed not known
+  assert {d.roll for d in roll_in(Junction(rng=ROLL_RANGE), until=12., roll_v=0.)} == {'off'}  # the corner's speed not known
 
 
 def test_a_receding_box_on_the_oncoming_side_still_blocks():
@@ -1860,3 +1958,33 @@ def test_a_receding_box_on_the_oncoming_side_still_blocks():
   for y in (3.6, 5., 8.):
     assert band_blockers([dataclasses.replace(raw(60., y), motion='receding')], 0., LEFT, r, HOLD_D), y
   assert band_blockers([dataclasses.replace(raw(300., 4., ranged=False), motion='receding')], 0., LEFT, r, HOLD_D)
+
+
+def test_a_rolling_go_needs_its_whole_exposures_range_seen_by_a_pass_that_runs():
+  """A rolling go comes seconds before the junction and can be withdrawn for under two of them, so an oncoming car past
+  what was seen at the go arrives with the left in its lane. It is given only where a pass that runs covers the range a car
+  at SPEED_MARGIN x the opposing limit covers in the roll's whole exposure (roll_exposure_s: the lag, down to the corner's
+  speed, through the oncoming lanes, PET_S), roll_why 'range' otherwise: the car brakes to its line and is judged there."""
+  # 30 m out at 6.9 m/s, a 4.65 m/s corner, one lane: 0.5 s, 1.5 s down to the corner's speed over 8.7 m, 29.3 m more at it, PET_S
+  assert abs(ul.roll_exposure_s(30., 1, 6.9, 4.65) - (0.5 + 1.5 + (38. - 8.66) / 4.65 + PET_S)) < 0.01
+  assert ul.roll_exposure_s(30., 2, 6.9, 4.65) - ul.roll_exposure_s(30., 1, 6.9, 4.65) == pytest.approx(0.5)
+  assert ul.roll_exposure_s(30., 1, 3., 4.65) == pytest.approx(0.5 + 38. / 3. + PET_S)  # slower than the corner: its own speed
+  first = next(d for d in roll_in(Junction(rng=ROLL_RANGE)) if d.go)
+  # the car's full pass (98 m) against a 25, 35 or 45 mph road: never asked, 'range' from the roll's first point on
+  for v_limit in (V_25, 15.65, V_45):
+    seen = roll_in(Junction(v_limit=v_limit, rng=ul.FULL_PASS_RANGE_M), until=12.)
+    assert not any(d.go for d in seen) and 'range' in {d.roll for d in seen}, v_limit
+  # ...against a 15 mph road it is, later: once the exposure left is short enough for the 98 m
+  slow = roll_in(Junction(v_limit=6.7, rng=ul.FULL_PASS_RANGE_M), until=12.)
+  assert any(d.go for d in slow) and 'range' in {d.roll for d in slow}
+  # a far slot whose runs cover the band within FAR_FRESH_S extends what is seen to its range: asked as on a longer pass
+  j = Junction(rng=ul.FULL_PASS_RANGE_M)
+  far = [d for d in roll_in(j, far=[], far_range_m=ROLL_RANGE, far_live=True) if d.go]
+  assert far and abs(far[0].r_req - first.r_req) < 2.
+  # ...one said on that isn't running, or whose range is short of the roll's, does not
+  for kw in ({'far_range_m': ROLL_RANGE, 'far_live': True}, {'far': [], 'far_range_m': 120., 'far_live': True}):
+    seen = roll_in(Junction(rng=ul.FULL_PASS_RANGE_M), until=12., **kw)
+    assert not any(d.go for d in seen) and 'range' in {d.roll for d in seen}, kw
+  # the opposing road not known straight on out to the roll's range: not seen either
+  seen = roll_in(Junction(rng=ROLL_RANGE), until=12., straight_m=100.)
+  assert not any(d.go for d in seen) and 'range' in {d.roll for d in seen}

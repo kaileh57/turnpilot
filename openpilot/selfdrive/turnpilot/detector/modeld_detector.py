@@ -968,16 +968,19 @@ def fill_lights(tl, heads: list[LightHead], shadow: bool) -> None:
   """A TurnpilotLights builder from the camera's heads: each head's vote, and this frame's read and its reason (the gate
   that stopped it), so a night drive's rlog says which gate kills the colour (11-06: 667 reads, 0 greens, unexplained).
   Since 2026-11-07 the read's detail (light_state's HeadRead.detail: the thirds' shares, the lit run, its core, the hues)
-  rides on the instance after the head's id, so every road run's rlog carries it, not only the SAMPLE_S samples (instance
-  is Text and only ever logged; turnpilotDetections' lights are no accepted source)."""
+  rides on the instance after the head's id, so every road run's rlog carries it, not only the SAMPLE_S samples
+  (turnpilotDetections' lights are no accepted source)."""
   tl.source, tl.shadow = custom.TurnpilotLights.Source.camera, shadow
   fill_heads(tl.init('lights', len(heads)), heads)
 
 
 def fill_heads(out, heads: list[LightHead]) -> None:
-  """A list of TurnpilotLights.Light from heads (fill_lights' lights, and the reader's unpublished boxes: lightRejects)."""
+  """A list of TurnpilotLights.Light from heads (fill_lights' lights, and the reader's unpublished boxes: lightRejects). The
+  instance is the head's id, its nearer range where it has one ('near<m>': light_state.head_near; map_controls reads both
+  back, camera_light_input) and the read's detail."""
   for o, h in zip(out, heads, strict=True):
-    o.state, o.distance, o.instance = h.state, float(h.distance), f"head{h.id} {h.detail}".rstrip()
+    near = f" near{h.near:.1f}" if getattr(h, 'near', None) is not None else ''
+    o.state, o.distance, o.instance = h.state, float(h.distance), f"head{h.id}{near} {h.detail}".rstrip()
     o.conf, o.box, o.bearing, o.votes, o.governs = float(h.conf), [float(b) for b in h.box], float(h.bearing), int(h.votes), h.governs
     o.read, o.reason = h.read, str(h.reason)
 
@@ -1765,10 +1768,15 @@ class ModeldDetector:
     light_read_ok(self, "lights")
     dt = time.perf_counter() - t0
     fill_lights(td.lights, heads, self.light_mode != 'addOnly')
-    # the boxes the reader was given and did not publish (its gates, a box under MIN_CONF reading no colour), for the log
-    # alone: with td.lights, every class-9 box down to LIGHT_GREEN_CONF, its confidence and why it is no head
-    rejects = getattr(getattr(self.lights, 'reader', None), 'rejects', None) or []
-    fill_heads(td.init('lightRejects', len(rejects)), rejects)
+    # the boxes the reader was given and did not publish (its gates, a box under MIN_CONF reading no colour, a red or yellow
+    # under LIGHT_READ_CONF: turnpilotd's veto of a green beside it): with td.lights, every class-9 box down to
+    # LIGHT_GREEN_CONF, its confidence and why it is no head. A failure here costs this run's rejects, never the detector run
+    try:
+      rejects = getattr(getattr(self.lights, 'reader', None), 'rejects', None) or []
+      fill_heads(td.init('lightRejects', len(rejects)), rejects)
+    except Exception:
+      td.init('lightRejects', 0)
+      cloudlog.exception("turnpilot light rejects failed")
     td.lightStatus, td.lightTime = status, dt
     self.light_times.append(dt)
     if len(self.light_times) == TIME_WINDOW and float(np.median(self.light_times)) > LIGHT_BUDGET_S:

@@ -2691,3 +2691,41 @@ def test_a_frame_wanting_two_changes_inside_the_general_end_is_judged_there():
   assert [d.want for _, d in decisions].count(2) == 1 and not any(int(d.lane_change) for _, d in decisions)
   first = next(x for x, d in decisions if d.blocked)
   assert first == pytest.approx(30., abs=v * DT_MDL) and all(d.blocked for x, d in decisions if x <= first)
+
+
+def test_the_turn_lane_is_reached_only_on_a_lane_list_with_the_car_placed_in_a_lane_it_marks():
+  """LanePlanner.turn_lane_reached (turnpilotd.left_lane_ok: the rolling left's lane): positive evidence the car is in a lane
+  the turn leaves from, never the lack of a judgement. No change wanted reads the same for a car placed in the turn's lane,
+  for no maneuver handed in and for the frames of a lane change (the want still at its reset)."""
+  m = maneuver("turn", "left", THREE_LANES_LEFT_TURN)
+
+  def reached(drive, man=m, **kw):
+    d = drive.step(man, 60., **kw)
+    return drive.lp.turn_lane_reached(), d.want
+  # in the list's left-turn lane, two lanes counted to the curb: reached
+  assert reached(Drive(0, 2)) == (True, 0)
+  # a lane off it: a change wanted
+  assert reached(Drive(1, 1)) == (False, 1)
+  # no lane list: a turn wants one change toward its side whatever the model counts, never a lane reached
+  for lanes in ((0, 0), (0, 2), (2, 0)):
+    assert reached(Drive(*lanes), maneuver("turn", "left")) == (False, 1), lanes
+  # no maneuver handed in (TurnPilot not acting on one): nothing wanted, and nothing reached
+  assert reached(Drive(0, 2), None) == (False, 0)
+  # the curb side's count not known (after dark: no line beyond the ego lane's), the car anywhere in the list: lane unknown
+  night = Drive(0, 2, night=True)
+  assert reached(night) == (False, 0) and night.lp.lane_unknown
+  # a lane change under way (the update returns before it counts): not reached until it has ended and the lane is placed again
+  lp = LanePlanner()
+  args = (model_lanes(*road(0, 2)), 15., False, False, (), False, True, DT_MDL)
+  lp.update(m, 60., args[0], LaneChangeState.off, *args[1:], maneuver_id=0)
+  assert lp.turn_lane_reached()
+  lp.update(m, 60., args[0], LaneChangeState.laneChangeStarting, *args[1:], maneuver_id=0)
+  assert not lp.turn_lane_reached()
+  # the bay rule: beside the centre line (the far-side ego line read yellow), the list's bay still to open: the far-most lane
+  # of its direction is the lane the turn leaves from
+  bay = Drive(0, 0, paint=lambda left, right: paint(left=SY))
+  for _ in range(BAY_YELLOW_READS + 1):
+    got = reached(bay, maneuver("turn", "left", LEFT_BAY))
+  assert got == (True, 0) and bay.lp.bay.shut
+  # ...and the same approach with no yellow read there: counted from the curb, the list's curb lane, two changes wanted
+  assert reached(Drive(0, 0), maneuver("turn", "left", LEFT_BAY)) == (False, 2)

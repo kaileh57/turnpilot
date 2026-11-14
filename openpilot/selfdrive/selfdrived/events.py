@@ -14,7 +14,8 @@ from openpilot.common.realtime import DT_CTRL
 from openpilot.selfdrive.locationd.calibrationd import MIN_SPEED_FILTER
 from openpilot.common.hardware import HARDWARE
 from openpilot.selfdrive.turnpilot.hooks import (ABORT_TEXT, CAR_SIGNAL_EVENTS, CONTROL_ALERT_TEXT, CONTROL_PROMPT_TEXT, CONTROL_STATUS_ALERTS,
-                                               KEEP_FOLLOW, KEEP_REROUTED, LOUD_ALERTS, SILENT_PROMPTS, SILENT_STATUS_ALERTS, TAKE_CONTROL_PROMPTS,
+                                               KEEP_FOLLOW, KEEP_REROUTED, LANE_SIGNAL_CHIME, LOUD_ALERTS, SILENT_PROMPTS, SILENT_STATUS_ALERTS,
+                                               TAKE_CONTROL_PROMPTS,
                                                fresh_plan, lane_change_text, shown_plan, too_fast_title)
 
 AlertSize = log.SelfdriveState.AlertSize
@@ -288,8 +289,11 @@ def turnpilot_lane_change_alert(side: str) -> AlertCallbackType:
     lit = CS is not None and bool(CS.leftBlinker if side == 'left' else CS.rightBlinker)
     text = lane_change_text(plan, side, lit)
     if not held and text.startswith('Signal '):
-      # waiting on the driver's lamp: the side's chime on repeat until it is lit (Kellen, 2026-11-07: very clear left vs right)
-      sound = AudibleAlert.tpSignalLeft if side == 'left' else AudibleAlert.tpSignalRight
+      # waiting on the driver's lamp: the side's own chime (left clear from right), once and then every PROMPT_REPEAT_S until
+      # it is lit, as the turn's prompt; soundd would loop it for the whole wait
+      sound = AudibleAlert.none
+      if LANE_SIGNAL_CHIME.on_air(side):
+        sound = AudibleAlert.tpSignalLeft if side == 'left' else AudibleAlert.tpSignalRight
     elif text.endswith('Checking the Lane'):
       sound = AudibleAlert.none  # the driver's lamp lit, the request withheld a frame or two: nothing to ask, nothing to chime (LC-3)
     return Alert(text, "Car in blind spot" if held else "TurnPilot, for the route",

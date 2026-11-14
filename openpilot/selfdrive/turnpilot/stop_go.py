@@ -117,7 +117,9 @@ Faults (7.1), each stopSignTakeControl with its reason, the car held (by the lat
 has let go): H1 a needed view without a run for DET_FAULT_S (under vision the forward views alone are needed; held:
 cameraPaused for FAULT_GRACE_S first; moving before commit, the capped abort first), H2 the position unknown (no or a failed
 junctionInfo, navd's fixes spread over 2 x POS_ERR_M on the last 20 m before the latch, or the latch more than H2_LINE_M from a
-surveyed stop point with no queue; held: junctionUncertain
+surveyed stop point with no queue; a step of navd's position, a GPS jump that stays or comes back, is no spread: the stop is
+the fresh reading's and the car stops, looks and goes, only readings that keep disagreeing or drift apart are the fault
+(settled_spread); held: junctionUncertain
 for FAULT_GRACE_S first), H3, H5, H7 (a person in the 0-3 m front zone not
 seen leaving, across views, FRONT_ZONE_MAX_S: the hold is the rail, the handback asks the driver to look where no camera
 can). Under vision what is left of H3 and H5 is a fault's (the driver's signal against the ladder's other turn, the model
@@ -235,6 +237,7 @@ RED_HOLD_REASON = "red light read at the junction"
 YAW_GO_DEG = 3.                 # deg the car may be yawed off its approach at a go (2.4 item 3)
 STEER_GO_DEG = 10.              # deg of steering wheel angle still straight
 H2_SPREAD_M = 2. * sr.POS_ERR_M
+H2_STEP_M = sr.POS_ERR_M        # m between two fixes in a row, more than which is a step of navd's position (settled_spread)
 H2_LINE_M = sr.POS_ERR_M + 1.   # m the latch may lie from a surveyed stop point with no queue to explain it (7.1 H2)
 CROSS_DONE_YAW_DEG = 60.
 DRIVE_OFF_M, DRIVE_OFF_V = 2., 2.  # the driver drove a decider's own hold off (map_controls' DRIVE_OFF_M, COMMIT_SPEED)
@@ -401,7 +404,9 @@ class Frame:
   wall_t: float | None = None    # the wall clock while valid
   side_status: str = 'unset'     # turnpilotDetections.sideViewStatus, latest
   lenses: dict = field(default_factory=dict)  # consumer: the Lens.spec it reports (the tracker, the side views)
-  position_spread: float = 0.    # m, navd's fixes of the control less the odometer, over the last 20 m before the latch (H2)
+  # m, navd's fixes of the control less the odometer, over the last 20 m before the latch, a step taken out (settled_spread): H2
+  position_spread: float = 0.
+  position_step: float = 0.      # m of that spread a step accounts for (the fixes' whole spread less position_spread), logged
   v_ego: float = 0.
   a_ego: float = 0.
   odo_m: float = 0.              # turnpilotd's odometer, m (faults included)
@@ -445,6 +450,31 @@ class Frame:
 # m between two junction nodes (MapJunction.lat/lon) that are one junction to SignalJunctions: navd's node is Valhalla's end of
 # the control's edge, the same node every lookup of the same approach, and a divided junction's nodes lie a carriageway apart
 SIGNAL_SAME_M = 30.
+
+
+def settled_spread(fixes) -> float:
+  """m navd's fixes of a control disagree by for the position fault (H2), a step taken out. fixes: the control's
+  (odometer m, navd's distance plus it) over its last 20 m, oldest first (control_tracker.TrackedControl.fixes). Their spread;
+  but where it is over H2_SPREAD_M because the readings stepped (a GPS jump: more than H2_STEP_M from one fix to the next, as
+  a jump near a junction is) and the latest reading's level is left only once (the readings before a step that stays, or
+  the excursion of a step that came back), the spread on the latest reading's level alone: the stop is where the fresh
+  reading puts it and the car still stops, looks and goes. Readings that keep leaving the latest one's level, that drift
+  apart with no step, or that walk on step after step (the readings off the latest level spread over H2_SPREAD_M themselves)
+  are a spread that persists: the whole of it."""
+  vals = [float(x) for _, x in fixes]
+  if len(vals) < 2:
+    return 0.
+  spread = max(vals) - min(vals)
+  if spread <= H2_SPREAD_M:
+    return spread
+  on = [abs(x - vals[-1]) <= H2_STEP_M for x in vals]
+  edges = [k for k in range(len(vals) - 1) if on[k] != on[k + 1]]
+  stepped = all(abs(vals[k + 1] - vals[k]) > H2_STEP_M for k in edges)
+  off = [x for x, o in zip(vals, on, strict=True) if not o]
+  if len(edges) > 2 or not stepped or max(off) - min(off) > H2_SPREAD_M:  # ...or what it stepped from was no level itself
+    return spread
+  level = [x for x, o in zip(vals, on, strict=True) if o]
+  return max(level) - min(level)
 
 
 def junction_point(info) -> tuple[int, float, float]:
@@ -657,6 +687,7 @@ class StopGo:
     self.needed: set = set()
     self.paused_s = 0.
     self.h2_s = 0.
+    self.step_said = False         # a step of navd's position at this control was logged (Frame.position_step)
     self.line_fault = ''           # the latch and the surveyed stop point disagree (H2's third trigger), why
     self.front: dict[int, dict] = {}       # person trackId: in the front zone, its y and vy, lost
     self.front_s = 0.
@@ -815,6 +846,10 @@ class StopGo:
     if (f.mode == VISION) != self.vision and self.state in WAITING + ('approach', 'off'):
       self._set_lanes(f, f.mode == VISION)  # the mode changed before any go: the lanes as the mode now judges them
     self.t += f.dt
+    if f.position_step > 0. and not self.step_said:
+      self.step_said = True  # no position fault: the stop stays on the fresh reading (settled_spread)
+      cloudlog.event("turnpilot.stop_go_position_step", key=list(self.key) if self.key else [], state=self.state,
+                     step_m=round(f.position_step, 1), spread_m=round(f.position_spread, 1))
     if self.alt is not None and f.signal_veto and not self.alt.get('vetoed') and self.state not in ('committed', 'inLane', 'done', 'ladder'):
       # a turn signal veto of the other turn before it starts (turnpilotd, with its lamp armed: the driver's lamp the other way,
       # hazards, our lamp put out): never taken. A go out for it is withdrawn (_going: signalVeto, its capped abort) and the car,

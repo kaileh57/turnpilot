@@ -1234,6 +1234,7 @@ class LanePlanner:
     self._pending = ''                # an abort in REQUEST, said once DesireHelper is seen not to have started
     self._pending_t = 0.
     self._wait, self._want, self._unreachable = 'none', 0, False  # this frame's LaneDecision.wait, want, unreachable
+    self._listed_none = False         # this frame a maneuver with a lane list wanted no change (turn_lane_reached)
     self._end_open = False            # this frame the window's end, not yet judged, would call the wanted change blocked (end_pending)
     # this frame a soft one inside a live confirm count (soft_block or the white hold alone, the count kept): the change still
     # pending, whatever its wait says (turnpilotd's lane_pending, LC-4)
@@ -1291,6 +1292,7 @@ class LanePlanner:
     has been lit for the offer's side (car_signals.py), lead_m the legal lead, car_block the port holding off (the
     driver's other side, hazards), signals_failed the car's signal failed mid-offer: the driver's path takes over."""
     self._wait, self._want, self._unreachable = 'none', 0, False
+    self._listed_none = False
     self._end_open = False
     self.confirm_live = False
     if self._abort_t > 0.:
@@ -1412,6 +1414,7 @@ class LanePlanner:
     unpainted = self.always_drive and not self._curb_marked and read
     win_start, win_end, stop_wait = stop_window(v_ego, distance, stop_d, abs(wanted), room, late)
     self._want = wanted
+    self._listed_none = wanted == 0 and bool(_nav_lanes(maneuver))
     want_dir = LEFT if want > 0 else RIGHT if want < 0 else 0
     if _toward(LEFT if wanted > 0 else RIGHT if wanted < 0 else 0) != self._carry or distance <= win_end or \
        not self.paint_rule or not inputs_valid or car_block:
@@ -1815,6 +1818,14 @@ class LanePlanner:
     changing = lc_state in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing)
     return self._end_open and self._want * side > 0 and self._done_id == maneuver_id and self._judged_id != maneuver_id and \
       not changing
+
+  def turn_lane_reached(self) -> bool:
+    """The last update placed the car in a lane its maneuver leaves from, on what was read: the maneuver has a lane list and
+    wants no change of it (the car's lane, counted from the curb side, is one the list marks, or the bay rule holds: beside
+    the centre line, the bay to open), that lane could be placed (not lane_unknown), and no lane change is under way. Never
+    for want of a judgement: no maneuver handed in, one with no lane list (a turn then always wants one change toward its
+    side) or a change under way is not a lane reached."""
+    return self._listed_none and self._lc_dir is None and not self.lane_unknown
 
   def _decision(self, reason: str = "", request: bool = False, prompt: bool = False) -> LaneDecision:
     wait = 'none' if self.phase != Phase.IDLE or self.ours or self._lc_dir is not None else self._wait

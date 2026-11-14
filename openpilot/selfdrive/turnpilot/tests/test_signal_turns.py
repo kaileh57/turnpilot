@@ -257,13 +257,15 @@ def test_the_cameras_read_says_which_governing_heads_are_dark():
     o.state, o.read, o.reason, o.governs, o.distance = state, 'unknown' if reason != 'read' else state, reason, governs, d
   cam_in = camera_light_input(tl.as_reader(), 'read', 0., 'addOnly')
   assert cam_in.heads == [('unknown', 20.), ('unknown', 45.), ('red', 46.), ('green', 47.)]
-  assert cam_in.dark == [('unknown', 20.)]  # dark this run and no vote held: a head still voting red is not
+  # dark this run, or not read as a vertical head at all (aspect), and no vote held: a head still voting red is not
+  assert cam_in.dark == [('unknown', 20.), ('unknown', 45.)]
 
 
 def test_a_rights_unread_red_is_unread_over_enough_of_the_readers_runs_too(monkeypatch):
   """A right at a red goes on its look once no red has been read for RIGHT_RED_UNREAD_S, and RIGHT_RED_UNREAD_READS of the
-  reader's road runs since while it reads: on a slow road pass (a run every 0.8 s) the seconds hold four looks, and it waits
-  for six. With no camera read in hand the seconds alone, as before: never a wait on a reader gone quiet."""
+  reader's road runs since: on a slow road pass (a run every 0.8 s) the seconds hold four looks, and it waits for six. A
+  reader that gives no road run at all for RIGHT_RED_QUIET_S (off, failing) leaves the seconds alone to decide: never a wait
+  for good on a reader gone quiet."""
   car = right_in_hand()
   held_at(car, LINE, lights=cam('red'))
   car.run(RIGHT_RED_DWELL_S + RIGHT_RED_CLEAR_S, lights=cam('red'))
@@ -277,7 +279,7 @@ def test_a_rights_unread_red_is_unread_over_enough_of_the_readers_runs_too(monke
   car.run(RIGHT_RED_DWELL_S + RIGHT_RED_CLEAR_S, lights=cam('red'))
   t0 = car.t
   out, dec = car.run_until(lambda out, dec: not held(out, dec), max_s=20., lights=NO_LIGHTS)
-  assert RIGHT_RED_UNREAD_S - 2 * DT_MDL <= car.t - t0 <= RIGHT_RED_UNREAD_S + 0.2
+  assert map_controls.RIGHT_RED_QUIET_S - 2 * DT_MDL <= car.t - t0 <= map_controls.RIGHT_RED_QUIET_S + 0.2
 
 
 def test_a_red_on_the_approach_whose_heads_go_out_of_view_still_stops_the_car():
@@ -350,8 +352,8 @@ def test_a_camera_green_with_a_red_head_still_read_is_no_green():
 
 
 def test_a_stop_is_let_go_by_more_green_heads_than_red():
-  # route 29, 8:46: three green balls over the lanes and a left-turn head still red beside them. The heads disagree, so no
-  # green was the signal's, and a car stopped at that light's red would have stood at its greens for good
+  # route 29, 8:46: three green balls over the lanes and a left-turn head still red beside them. The signal's state is the
+  # majority of its heads going straight or to the curb side (map_controls.movement_state): the car's light is green
   car = right_at_a_signal()
   held_at(car, LINE, lights=heads('red', 'red', 'red', 'red'))
   out, dec, _ = car.run(CAMERA_GREEN_STEADY_S + 0.2, lights=heads('green', 'green', 'green', 'red'))

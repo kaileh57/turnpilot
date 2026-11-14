@@ -13,8 +13,9 @@ from openpilot.selfdrive.turnpilot.maps.defaults import FAR_CROP_LEFT_RANGE_M
 from openpilot.selfdrive.turnpilot.scene.tracker import RawBox, RawFrame
 from openpilot.selfdrive.turnpilot.scene_policy import HOLD_LINE_M, ONCOMING_ENTRY_M
 from openpilot.selfdrive.turnpilot.tests.synthetic import junction_of, nav_instruction
+from openpilot.selfdrive.turnpilot.tests.shipped import shipped
 from openpilot.selfdrive.turnpilot.tests.test_camera_lights import detections as light_detections
-from openpilot.selfdrive.turnpilot.tests.test_turnpilotd import Sim
+from openpilot.selfdrive.turnpilot.tests.test_turnpilotd import THREE_LANES_LEFT_TURN, Sim
 from openpilot.selfdrive.turnpilot.turn_speed import POST_GO_PROFILES
 from openpilot.selfdrive.turnpilot.turnpilotd import GO_LINE_M, LEFT_NO_MOVE_S, NO_MOVE_S, TurnPilot, auto_left_for, left_range_for
 from openpilot.selfdrive.turnpilot import unprotected_left as ul_mod
@@ -162,6 +163,47 @@ def test_it_waits_through_an_oncoming_stream_silently_and_goes_after_it():
   assert len(waited) * DT_MDL > 15. and not any(str(p.controlPrompt) in TAKE_CONTROL_PROMPTS for p in plans)
   assert all(str(p.controlPrompt) == 'waitingForGap' for p in waited[5:])
   assert sim.trace[go - 1][1] < 0.3 and t_go[0] <= LINE + 0.1 and sim.s > JUNCTION + 30.
+
+
+def stood_s_after_the_road_clears(period_s):
+  """s from an oncoming car passing the junction to the left's go, None if it hasn't gone 60 s later: the shipped settings,
+  one oncoming car at the limit that makes the left wait at its line, the road camera's runs every period_s, the band
+  empty on every one after it."""
+  sim = shipped(left_sim())
+  state = {'t0': None, 'last': -math.inf}
+
+  def car_s(sim):  # 8 s from the junction when the car is 60 m out
+    if state['t0'] is None and JUNCTION - sim.s < 60.:
+      state['t0'] = sim.t
+    return None if state['t0'] is None else JUNCTION + V_25 * 8. - V_25 * (sim.t - state['t0'])
+
+  def raw(sim):
+    if sim.t - state['last'] < period_s - 1e-6:
+      return None
+    state['last'] = sim.t
+    x = car_s(sim)
+    return RawFrame([raw_box(x - sim.s, 3.6)] if x is not None and 0. < x - sim.s < 98. else [], 'road', sim.t)
+  sim.raw = raw
+  t_clear = None
+  for _ in range(int(120. / DT_MDL)):
+    plan = sim.step(engaged=True)
+    x = car_s(sim)
+    if t_clear is None and x is not None and x < JUNCTION - 5.:
+      t_clear = sim.t  # the oncoming car is through the junction
+    if t_clear is not None and str(plan.unprotectedLeft.state) == 'go':
+      return sim.t - t_clear
+    if t_clear is not None and sim.t - t_clear > 60.:
+      return None
+  return None
+
+
+@pytest.mark.parametrize('period_s', [0.2, 0.5, 0.6])  # 5 Hz; 2 Hz; 2 Hz with one detector run in three the wide camera's
+def test_a_left_waiting_at_its_line_goes_once_the_road_clears_at_a_2_hz_road_pass_too(period_s):
+  # road runs over ROAD_FRESH_S apart started the window over at every run: "Waiting for a gap" for good on an empty road.
+  # The pass's own cadence is its freshness (unprotected_left.road_fresh_s): three runs to read it, then one window
+  waited = stood_s_after_the_road_clears(period_s)
+  assert waited is not None, f"road runs {period_s} s apart: still waiting 60 s after the road cleared"
+  assert waited <= CLEAR_WINDOW_S + 2.5, waited
 
 
 def standing_run(raw_at, track_at, seconds, vx=0., stream=(), leaves_t=math.inf):
@@ -979,6 +1021,50 @@ def test_a_signal_whose_light_nothing_reads_is_gone_on_the_clear_band():
   plans = run_objects(sim, 50.)
   assert any(p.desire == Desire.turnLeft for p in plans)
   assert not any(str(p.controlPrompt) == 'leftUndecidedTakeControl' or str(p.unprotectedLeft.state) == 'undecided' for p in plans)
+
+
+def stood_s_after_the_green(far_status, ran=False):
+  """s from TurnPilot letting its signal stop go to the left's go: the shipped settings, a left held at a mapped signal's red
+  that turns green (the camera reading its head on every road run), the road empty, the driver's lamp lit; far_status: the
+  full pass's farStatus on every message, no far run on this approach; ran: one reached the left earlier this drive."""
+  sim = shipped(Sim([(JUNCTION, "turn", "left", (0., 270., 2, 'present', V_25, 1, STRAIGHT_M)), (1500., "turn", "right", junction_of("right"))],
+                    nav_lanes={0: THREE_LANES_LEFT_TURN}, model_lanes=(0, 2), controls=[(JUNCTION - 8.5, 'signal')]))
+  sim.answers_prompt = True
+  sim.raw = road_runs()
+  sim.tp.far_ran = ran
+  light = {'state': 'red'}
+  none = messaging.new_message('turnpilotLights').as_reader().turnpilotLights
+
+  def lights(sim):
+    if int(round(sim.t / DT_MDL)) % 2 == 0:
+      td = light_detections(light['state'], JUNCTION + 15. - sim.s, shadow=False).as_builder()
+      td.farStatus = far_status
+      sim.sm.put('turnpilotDetections', td.as_reader())
+    return none
+  sim.lights = lights
+  while not (sim.v < 0.05 and sim.s > JUNCTION - 28.5):
+    sim.step(engaged=True)
+    assert sim.t < 60.
+  for _ in range(int(5. / DT_MDL)):  # 5 s at the red, the band empty all the while
+    assert sim.step(engaged=True).shouldStop
+  light['state'] = 'green'
+  t_release = None
+  for _ in range(int(20. / DT_MDL)):
+    plan = sim.step(engaged=True)
+    if t_release is None and str(plan.mapControl.kind) != 'signal':
+      t_release = sim.t  # the signal's stop let go: the left's own hold from here
+    if t_release is not None and str(plan.unprotectedLeft.state) == 'go':
+      return sim.t - t_release
+  return None
+
+
+@pytest.mark.parametrize('far_status, ran', [('off', False), ('noRoom', False), ('noRoom', True)])
+def test_a_left_let_go_by_its_light_goes_one_window_later_whatever_a_far_slot_that_isnt_running_says(far_status, ran):
+  # the car's full pass says farStatus noRoom for minutes on end with no far run coming. A far slot that has not run this
+  # drive is not waited for; one that has is waited for STALE_UNDECIDED_S at the stand and the left then goes on the full
+  # pass's own window, clear all along, never on a second one from nothing (4.5 s). One window, as with the far slot off
+  stood = stood_s_after_the_green(far_status, ran)
+  assert stood is not None and CLEAR_WINDOW_S - 0.1 <= stood <= CLEAR_WINDOW_S + 0.5, stood
 
 
 def camera_signal_sim(read):

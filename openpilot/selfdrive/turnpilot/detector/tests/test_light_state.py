@@ -504,8 +504,9 @@ class TestReader(OpenpilotTestCase):
   def test_under_the_readers_floor_only_a_governing_green_is_a_head(self):
     # route 29's video through the detector: where the car's light had turned green and went unread, its green lamps were
     # boxed at 0.10-0.19 (109 of 123 boxes on one approach). Down to decoder.LIGHT_GREEN_CONF a box within the governing
-    # bearing is read and is a head on a run it reads green; a red or yellow there never is (a green can only let a stop
-    # go), one outside the governing bearing is not read at all, and at most GREEN_LOW_MAX of them are read a frame
+    # bearing is read and is a head on a run it reads green; a red or yellow there never is (it raises no stop: it is kept
+    # with the unpublished boxes, read red, where map_controls takes it for a veto of the green beside it), one outside the
+    # governing bearing is not read at all, and at most GREEN_LOW_MAX of them are heads a frame
     from openpilot.selfdrive.turnpilot.detector.decoder import LIGHT_GREEN_CONF, LIGHT_READ_CONF
     from openpilot.selfdrive.turnpilot.detector.light_state import GREEN_LOW_MAX
     assert LIGHT_GREEN_CONF <= 0.12 < 0.15 < LIGHT_READ_CONF and GREEN_LOW_MAX == 2
@@ -515,19 +516,36 @@ class TestReader(OpenpilotTestCase):
     for i in range(VOTE_N):
       out = reader.read(i * 0.1, frame, STRIDE, Y_HEIGHT, LEVEL, 1.22, boxes)
     assert [(round(h.conf, 2), h.state, h.read, h.governs) for h in out] == [(0.15, 'green', 'green', True)]
-    # the low red is read and is no head; the dark box, a third low one in the governing bearing, and the green outside it
-    # are not read at all
+    # the low red is read and is no head; the dark box, a third low one in the governing bearing, is read too on a run a
+    # low box reads green (a red there must not go unread behind two greens); the green outside the bearing is not read
     assert sorted((round(h.conf, 2), h.read, h.reason, h.detail != '') for h in reader.rejects) == \
-      [(0.12, 'unknown', 'lowConf', False), (0.15, 'red', 'lowConf', True), (0.15, 'unknown', 'lowConf', False)]
+      [(0.12, 'unknown', 'dark', True), (0.15, 'red', 'lowConf', True), (0.15, 'unknown', 'lowConf', False)]
+    assert [h.near is not None for h in reader.rejects if h.read == 'red'] == [True]  # its nearer range goes with it
     assert reader.colour_counts == {'green': VOTE_N}  # the low red is counted nowhere: never a read head
     # the same red at the reader's own floor is a head, as before
     boxes[1, 4] = LIGHT_READ_CONF
     assert sorted(h.read for h in reader.read(1., frame, STRIDE, Y_HEIGHT, LEVEL, 1.22, boxes)) == ['green', 'red']
-    # at most GREEN_LOW_MAX low boxes are read a frame, the most confident first
+    # at most GREEN_LOW_MAX low boxes are heads a frame, the most confident first
     frame, boxes = scene([head(2, 'green', x0=560 + 40 * i) for i in range(GREEN_LOW_MAX + 2)])
     boxes[:, 4] = 0.15
     assert len(reader.read(2., frame, STRIDE, Y_HEIGHT, LEVEL, 1.22, boxes)) == GREEN_LOW_MAX
-    assert [h.reason for h in reader.rejects] == ['lowConf'] * 2
+    assert [(h.read, h.reason) for h in reader.rejects] == [('green', 'lowConf')] * 2
+    # two low greens never keep a less confident red beside them unread: it is read, and said red
+    frame, boxes = scene([head(2, 'green', x0=560), head(2, 'green', x0=600), head(0, 'red', x0=640)])
+    boxes[:, 4] = [0.18, 0.17, 0.13]
+    assert [h.read for h in reader.read(3., frame, STRIDE, Y_HEIGHT, LEVEL, 1.22, boxes)] == ['green', 'green']
+    assert [(round(h.conf, 2), h.read, h.reason) for h in reader.rejects] == [(0.13, 'red', 'lowConf')]
+    # ...nor does a green head at any confidence beside three low boxes, the red the least confident
+    frame, boxes = scene([head(2, 'green', x0=520), head(None, 'red', x0=560), head(None, 'red', x0=600), head(0, 'red', x0=640)])
+    boxes[:, 4] = [0.5, 0.18, 0.17, 0.13]
+    assert [h.read for h in reader.read(3.5, frame, STRIDE, Y_HEIGHT, LEVEL, 1.22, boxes) if h.read != 'unknown'] == ['green']
+    assert [(round(h.conf, 2), h.read, h.reason) for h in reader.rejects if h.conf < 0.15] == [(0.13, 'red', 'lowConf')]
+    # with no green read or voted the boxes past GREEN_LOW_MAX stay unread, as before: the read's time is bounded
+    reader = LightReader(LENS)
+    frame, boxes = scene([head(None, 'red', x0=560), head(None, 'red', x0=600), head(0, 'red', x0=640)])
+    boxes[:, 4] = [0.18, 0.17, 0.13]
+    assert reader.read(4., frame, STRIDE, Y_HEIGHT, LEVEL, 1.22, boxes) == []
+    assert [(round(h.conf, 2), h.read, h.reason) for h in reader.rejects][-1] == (0.13, 'unknown', 'lowConf')
 
   def test_every_box_not_published_is_kept_for_the_log_with_its_reason(self):
     # the next drive's rlog must show every class-9 box the reader was given down to LIGHT_READ_CONF: the published heads

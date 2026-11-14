@@ -53,7 +53,12 @@ gates is a head, and its state is read (its reason the published Light.reason: r
   reads there read their colour).
 Under LIGHT_READ_CONF, down to decoder.LIGHT_GREEN_CONF, a box within the governing bearing is read too (GREEN_LOW_MAX a
 frame) and is a head only on a run it reads green: at night the detector boxes a lit green lamp less surely than a red one,
-and a green can only let a stop go. A red or yellow there is never a head.
+and a green can only let a stop go. A red or yellow there is never a head, and raises no stop, but it is said with the run's
+unpublished boxes (rejects: read red or yellow, reason lowConf) and map_controls takes no green and no red gone for a signal
+beside one (CameraLights.vetoes: a red lamp boxed at 0.13 beside a green arrow boxed at 0.15 must not leave the arrow's
+green to speak for the signal). On a run where a head reads or votes green, at any confidence, the low-confidence boxes
+within the governing bearing past GREEN_LOW_MAX are read as well (MAX_READ_HEADS reads in all), so no green is counted
+with a less confident red beside it unread.
 The reader reads boxes down to decoder.LIGHT_READ_CONF, under the detector's MIN_CONF (route 29, 2026-11-08: a red read only
 at its line, its heads first boxed at MIN_CONF 40 m out and then not for 1.7 s; the full pass had them at 0.2-0.33 from about
 60 m), and a head from a box under MIN_CONF is published only once it reads a colour or holds a vote. Every box it
@@ -67,7 +72,11 @@ governs the car's lane when its bearing lies within GOVERN_BEARING_DEG of the la
 driving model's path at the head's distance), and the governing state is what all governing heads with a state agree
 on, else unknown.
 
-Distance is to the head, from its elevation and an assumed height: the stop line is not known from the camera.
+Distance is to the head, from its elevation and an assumed height: the stop line is not known from the camera. A head hung
+lower than assumed ranges long by it (a pole-mounted head 3 m up, 2.4 times), so each head has a second, nearer range
+(head_near, LightHead.near): its box's height against a standard head's (HEAD_M), never nearer than the lowest mounting
+allows (LOW_HEAD_M) and never past the elevation's. The published distance stays the elevation's (a green placed too near
+could let another junction's stop go); map_controls takes a red or yellow for a line that either range reaches.
 
 What tunes it next (2026-11-07): each read carries a detail (HeadRead.detail: the thirds' lamp shares, the lit run, its
 core's centre and rows, its pixels and widest row, its peak value, the saturated pixels per colour), published with the head
@@ -135,6 +144,11 @@ YELLOW_SPAN = (1 / 3, 2 / 3)
 ARROW_MIN_PX = 10           # lamp pixels needed to judge the lamp's shape; fewer is unknown (tooFewLampPx)
 SYMMETRY_MIN = 0.6          # the lamp's mask against its mirror image about its own centre (IoU): a ball, not an arrow
 ASSUMED_HEAD_M = 5.5        # m, a head's centre over the road (MUTCD clearance 15-19 ft to its bottom)
+# the nearer range (head_near): a three-lamp vertical head's housing, 12 in lamps in 14 in sections; and the lowest a head's
+# centre hangs, a pole-mounted head 8 ft to its bottom. Route 29, a red on a pole at a junction's near corner: 70.7 m by its
+# elevation, 29.3 m by its box (41.7 px; its lamp's blown core 10 px, a 0.3 m lamp at 34 m), the floor 29.4 m
+HEAD_M = 1.07
+LOW_HEAD_M = 3.0
 MAX_RANGE = 150.            # m, the farthest distance it says
 # a head's state is the colour most of its last VOTE_M sightings read, once VOTE_N of them did (a tie is unknown). Two, not
 # four: at night a head is boxed in some runs only, and four reads in five runs came 2.3 s after the first red read of route
@@ -198,6 +212,7 @@ class HeadRead:
   # them grown, c its core's centre over the box's height, cr its core's rows, n its lamp pixels, wd its widest row's, runs
   # how many, pk its peak value, hue its saturated pixels per colour; empty for a gated box or a bad aspect
   detail: str = ''
+  near: float | None = None   # m to the head by its box's height where that is nearer (head_near)
 
 
 def lamp_pixels(nv12: np.ndarray, stride: int, y_height: int, x0: int, y0: int, x1: int, y1: int):
@@ -296,11 +311,22 @@ def head_place(lens: Lens, rpy_calib, cam_height: float, box) -> tuple[float, fl
   return bottom_elev, bearing, distance
 
 
+def head_near(lens: Lens, cam_height: float, box, distance: float) -> float:
+  """m to the head of a class-9 box by its height against a standard head's (HEAD_M), where that is nearer than distance
+  (head_place's, from its elevation over ASSUMED_HEAD_M), and never nearer than a head at the lowest mounting (LOW_HEAD_M)
+  at that elevation would be. A box drawn round a lamp's glow alone is shorter than its head and says a longer range: the
+  elevation's stands."""
+  rise = max(ASSUMED_HEAD_M - cam_height, 0.5)
+  floor = distance * max(LOW_HEAD_M - cam_height, 0.5) / rise
+  by_size = lens.f * HEAD_M / max(float(box[3]) - float(box[1]), 1.)
+  return min(distance, max(by_size, floor))
+
+
 def read_head(nv12: np.ndarray, stride: int, y_height: int, lens: Lens, rpy_calib, cam_height: float, box) -> HeadRead:
   """One class-9 box's read (module docstring). box: a decode() row, x0 y0 x1 y1 in full-frame pixels."""
   x0, y0, x1, y1 = (float(b) for b in box[:4])
   bottom_elev, bearing, distance = head_place(lens, rpy_calib, cam_height, box)
-  out = HeadRead('unknown', 'read', bearing=bearing, distance=distance)
+  out = HeadRead('unknown', 'read', bearing=bearing, distance=distance, near=head_near(lens, cam_height, box, distance))
   bw, bh = x1 - x0, y1 - y0
   if max(bh, bw) < HEAD_MIN_H_PX:
     out.reason, out.gated = 'small', True
@@ -446,6 +472,7 @@ class LightHead:
   distance: float
   governs: bool
   detail: str = ''    # this frame's read's (HeadRead.detail)
+  near: float | None = None  # m to the head by its box's height where nearer than distance (HeadRead.near)
 
 
 def nv12_crop(nv12: np.ndarray, stride: int, y_height: int, width: int, height: int, box) -> dict:
@@ -500,7 +527,7 @@ class LightReader:
   def read(self, t: float, nv12: np.ndarray, stride: int, y_height: int, rpy_calib, cam_height: float, boxes,
            path=None) -> list[LightHead]:
     """boxes: decode_lights() rows; path: (x, y left) of the lane ahead (tracker.predicted_path), None for straight."""
-    reads, rejects, low_read = [], [], 0
+    reads, rejects, low_read, low_left = [], [], 0, []
 
     def lane_bearing(distance: float) -> float:
       return math.degrees(math.atan2(float(np.interp(distance, path[0], path[1])), distance)) if path is not None else 0.
@@ -513,8 +540,11 @@ class LightReader:
         # under LIGHT_READ_CONF (down to decoder.LIGHT_GREEN_CONF) a box counts only if it reads green: read only within
         # the governing bearing and at most GREEN_LOW_MAX a frame, the rest left unread (lowConf)
         _, bearing, distance = head_place(self.lens, rpy_calib, cam_height, box)
-        if low_read >= GREEN_LOW_MAX or abs(bearing - lane_bearing(distance)) > GOVERN_BEARING_DEG:
+        if abs(bearing - lane_bearing(distance)) > GOVERN_BEARING_DEG:
           rejects.append(LightHead(-1, norm, float(box[4]), 'unknown', 0, 'unknown', 'lowConf', bearing, distance, False))
+          continue
+        if low_read >= GREEN_LOW_MAX:
+          low_left.append((box, norm, bearing, distance))
           continue
         low_read += 1
       if len(reads) >= MAX_READ_HEADS:
@@ -527,19 +557,33 @@ class LightReader:
         rejects.append(LightHead(-1, norm, float(box[4]), 'unknown', 0, 'unknown', r.reason, r.bearing, r.distance, False))
         continue
       if low and r.state != 'green':
-        # no head: what it read is kept for the log (a red or yellow read under LIGHT_READ_CONF says lowConf)
+        # no head: what it read is kept (a red or yellow read under LIGHT_READ_CONF says lowConf: map_controls' veto)
         rejects.append(LightHead(-1, norm, float(box[4]), 'unknown', 0, r.state, r.reason if r.state == 'unknown' else 'lowConf',
-                                 r.bearing, r.distance, False, r.detail))
+                                 r.bearing, r.distance, False, r.detail, r.near))
         continue
       self.head_counts[r.reason] += 1
       if r.state != 'unknown':
         self.colour_counts[r.state] += 1
       reads.append((norm, float(box[4]), r))
     heads = self.voter.update(t, [(norm, r.state) for norm, _, r in reads])
+    # the low-confidence boxes within the governing bearing past GREEN_LOW_MAX: read on a run a head reads or votes green
+    # (at any confidence: the green map_controls would count), for a red or yellow among them (never a head: a third green
+    # there is left unpublished too); else left unread
+    green = any(r.state == 'green' for _, _, r in reads) or any(hd.state == 'green' for hd in heads)
+    more = len(reads)
+    for box, norm, bearing, distance in low_left:
+      if not green or more >= MAX_READ_HEADS:
+        rejects.append(LightHead(-1, norm, float(box[4]), 'unknown', 0, 'unknown', 'lowConf', bearing, distance, False))
+        continue
+      more += 1
+      r = read_head(nv12, stride, y_height, self.lens, rpy_calib, cam_height, box)
+      self.gate_counts[r.reason] += r.gated
+      reason = r.reason if r.gated or r.state == 'unknown' else 'lowConf'
+      rejects.append(LightHead(-1, norm, float(box[4]), 'unknown', 0, r.state, reason, r.bearing, r.distance, False, r.detail, r.near))
     out = []
     for hd, (norm, conf, r) in zip(heads, reads, strict=True):
       out.append(LightHead(hd.id, norm, conf, hd.state, hd.votes, r.state, r.reason, r.bearing, r.distance,
-                           abs(r.bearing - lane_bearing(r.distance)) <= GOVERN_BEARING_DEG, r.detail))
+                           abs(r.bearing - lane_bearing(r.distance)) <= GOVERN_BEARING_DEG, r.detail, r.near))
     if out and (self.sample_t is None or not 0. <= t - self.sample_t < SAMPLE_S):
       self.sample_t = t
       self.sample(t, nv12, stride, y_height, out)

@@ -239,13 +239,13 @@ from openpilot.selfdrive.turnpilot.hooks import (ABORT_HOLD_S, CLEAR_DESIRE, CON
 from openpilot.selfdrive.turnpilot.detector.light_state import LIGHT_MODE_DEFAULT, camera_lights_mode
 from openpilot.selfdrive.turnpilot.map_controls import (CAMERA_OFF_REASON, CAMERA_STALE_S, KEEP_TURN, LATCH_PAST_M, LIGHT_STALE_S,
                                                          MAP_MARGIN_M, OFF_ROUTE_DRIVE_REASON, OFF_ROUTE_REASON,
-                                                         PROTECT_PAST_M, YELLOW_DECEL, YELLOW_DECEL_MAX, LeftCommand,
+                                                         PROTECT_BEFORE_M, PROTECT_PAST_M, YELLOW_DECEL, YELLOW_DECEL_MAX, LeftCommand,
                                                          MapControlPolicy, StopCommand, camera_light_input, is_stop, light_input,
                                                          right_red_blocked, turn_stop_feasible, unprotected_turn)
 from openpilot.selfdrive.turnpilot import stop_rules as sr
 from openpilot.selfdrive.turnpilot.control_tracker import OFF_ROUTE
 from openpilot.selfdrive.turnpilot.stop_go import MODE_DEFAULT, STOP_SWEEP_M, Frame, SignalJunctions, StopGo, StopGoDecision, junction_point, \
-  mode_for, side_views_live
+  mode_for, settled_spread, side_views_live
 from openpilot.selfdrive.turnpilot.car_signals import (TurnSignalIntent, TurnSignalOut, driver_signals_for, identity_for,
                                                         read_mode, record_matches, vehicle_can_seen)
 from openpilot.selfdrive.turnpilot.lane_planner import (SAMPLE_IDX, LanePlanner, Phase, keep_blocker, lane_change_window,
@@ -912,6 +912,7 @@ class TurnPilot:
     self.left_lanes_off = 1  # ...the changes it left unmade there (its want, the latest one: LeftInput.crossed_lanes, LEFTS-2)
     self.far_status = 'off'     # the full pass's latest farStatus (watch_far)
     self.far_status_age = float('inf')
+    self.far_ran = False        # a far run has reached the left this drive (unprotected_left: one that never ran isn't waited for)
     self.far_off_t = 0.         # s farViewOff has left to show
     self.side_status = 'unset'  # the detector's latest sideViewStatus (watch_far)
     self.side_off_t = 0.        # s sideCamerasOff has left to show
@@ -1467,7 +1468,8 @@ class TurnPilot:
         stop_infeasible = True
     elif engaged and upcoming is None:
       turn = KEEP_TURN  # the route gone with the handback: it carries on, dead-reckoned
-    left_cmd = self.unprotected_left(turn, upcoming, rf, v_ego, acting, objects, raw, raw_far, enabled=bool(sm['carControl'].enabled))
+    left_cmd = self.unprotected_left(turn, upcoming, rf, v_ego, acting, objects, raw, raw_far, enabled=bool(sm['carControl'].enabled),
+                                     model=model)
     # the stop-sign decider before map_update, so its release, the end of shouldStop and its go land in one plan
     sg = self.sg_now = self.stop_go_update(sm, cs, model, v_ego, acting, objects, rf)
     # the stop-sign ladder's other turn in hand (stop_go: 7.1 rung 2, O12), or done in place of the route's turn here: the route's
@@ -1617,7 +1619,8 @@ class TurnPilot:
                                                  took_over, extra_stops=mapd.stops + left_stops + sg.stops, heading_deg=scene_yaw,
                                                  path=predicted_path(model), extra_objects=extra_objects if available else (),
                                                  driver=not sm['carControl'].enabled or cs.gasPressed,
-                                                 raw_people=self.people_in_front(model))
+                                                 raw_people=self.people_in_front(model),
+                                                 cross_yield=not alt_on and self.uncontrolled_turn(scene_m, scene_d))
     self.last_holding = decision.holding
     # a TurnPilot stop in force brings the car to rest at or short of the junction (shouldStop at its end: a walker's
     # hold, a red, a stop sign), braking toward it on the speed cap's curve (shouldStop false until about standstill) or
@@ -2702,10 +2705,11 @@ class TurnPilot:
     return left_reach(*self.left_ranges(), self.far_live(route))
 
   def unprotected_left(self, turn, upcoming, rf, v_ego: float, acting: bool, objects, raw, raw_far=None,
-                       enabled: bool = True) -> LeftCommand | None:
+                       enabled: bool = True, model=None) -> LeftCommand | None:
     """This frame's autonomous unprotected left (unprotected_left.py; left_now) for the route's unprotected turn the car is
     taking (turn, map_controls' tuple), and its command for the hold line's latch. TurnPilotAutoLeft off, or TurnPilot not
     acting (handed back): off, the latch handed back as G1's. Fed the last frame's latch and scene (whether they held)."""
+    self.far_ran = self.far_ran or raw_far is not None
     mode = self.auto_left if acting else OFF
     if not isinstance(turn, tuple) or mode == OFF:
       self.left.update(LeftInput(OFF, rf.maneuver_id, 0, 0., v_ego, False, None, [], 0., None, None), DT_MDL)
@@ -2727,6 +2731,7 @@ class TurnPilot:
     # never a go nor a pulse of a left nobody checked (owner decision (b))
     driven = self.map_controls.driven
     range_m, far_range_m = self.left_ranges()  # the full pass's and the far slot's (review 2026-11-07, LN-2)
+    far_edge_m, far_line_m = self.left_far_side(model, upcoming.side, rf.distance)  # the model's far side of the road
     roll_light, roll_run = self.left_roll_light(rf.maneuver_id, rf.distance)
     inp = LeftInput(mode, rf.maneuver_id, upcoming.side, rf.distance, v_ego, held or stray, raw, objects, self.approach_yaw_deg,
                     upcoming.opposing_speed or None, upcoming.opposing_lanes or None, range_m,
@@ -2737,7 +2742,9 @@ class TurnPilot:
                     spread_m=rf.junction_spread, other_hold=stop_d is not None and stop_d <= rf.distance + PROTECT_PAST_M,
                     light=self.map_controls.turn_light(int(turn[0]), turn[1]), far=raw_far, far_range_m=far_range_m,
                     light_read=self.map_controls.turn_light_read(int(turn[0]), turn[1]),
-                    far_live=self.far_live(route=True),  # on: a spell without room is waited through on its runs' freshness
+                    # on: a spell without room is waited through on its runs' freshness. A far slot said on that has not
+                    # run once this drive (farStatus noRoom on every message) is no slot to wait for: the full pass's band
+                    far_live=self.far_live(route=True) and self.far_ran,
                     straight_m=float(upcoming.opposing_straight_m),
                     signal_lit=self.signal_out.signal_lit, signal_veto=self.signal_out.left_veto,
                     enabled=enabled, driven=driven is not None and driven.maneuver_id == rf.maneuver_id, dark=self.dark,
@@ -2756,7 +2763,7 @@ class TurnPilot:
                     # the rolling go's (unprotected_left.ROLLING_GO): its junction's light, its corner's speed, the lane
                     # planner's last word on the turn lane, and whether the turn has pulsed (all last frame's)
                     roll_light=roll_light, roll_run=roll_run, roll_v=corner_speed(upcoming.angle_deg, False),
-                    lane_ok=self.left_lane_ok(),
+                    lane_ok=self.left_lane_ok(), far_edge_m=far_edge_m, far_line_m=far_line_m,
                     desire_out=self.desires.maneuver_id == rf.maneuver_id and self.desires.started,
                     latch_gone=tc is not None and not tc.held and tc.key[1] == int(turn[0]) and tc.state is not None and
                     tc.state.done == 'released' and tc.state.cause == 'gap')
@@ -2773,12 +2780,31 @@ class TurnPilot:
     return LeftCommand(mode, d.go, d.creep_m, d.state == 'undecided' and d.why != DRIVEN, d.reason, crossed=d.crossed)
 
   def left_lane_ok(self) -> bool:
-    """The lane planner's last update placed the car in a lane the turn leaves from, for the rolling go: it wanted no change
-    (LanePlanner._want, its count for the maneuver), could place the lane (lane_unknown), and no lane change was under way
-    (_lc_dir: its update returns before counting while the car is moving over, the want still at its reset). A name it no
-    longer has reads as not placed: no rolling go, never one from an unjudged lane."""
-    lanes = self.lanes
-    return getattr(lanes, '_want', 1) == 0 and getattr(lanes, '_lc_dir', 0) is None and not lanes.lane_unknown
+    """The lane planner's last update placed the car in a lane the turn leaves from, for the rolling go
+    (LanePlanner.turn_lane_reached): a maneuver with a lane list wanting no change of it, the lane placed, no lane change
+    under way. A turn with no lane list always wants a change toward its side: no rolling go there, never one from an
+    unjudged lane."""
+    return self.lanes.turn_lane_reached()
+
+  def left_far_side(self, model, side: int, distance: float) -> tuple[float | None, float | None]:
+    """(far_edge_m, far_line_m) for the autonomous left (LeftInput; unprotected_left.strip_beyond): the road's far edge to the
+    turn's side as the driving model draws it past the junction distance m ahead, where it trusts that edge (roadEdgeStds
+    under the lane planner's EDGE_STD_MAX): the furthest out its polyline runs from the maneuver point to FAR_EDGE_PAST_M
+    beyond it, within FAR_EDGE_AHEAD_M of the car (a flare past the junction widens it); and the lane line furthest that
+    way it is sure of beyond the car's own (LINE_PROB_MIN, at the lane planner's sample). None for what it doesn't give."""
+    from openpilot.selfdrive.turnpilot.lane_planner import EDGE_STD_MAX, LINE_PROB_MIN
+    from openpilot.selfdrive.turnpilot.unprotected_left import FAR_EDGE_AHEAD_M, FAR_EDGE_PAST_M
+    if model is None:
+      return None, None
+    edges, lines, i, j = model.roadEdges, model.laneLines, 0 if side == LEFT else 1, 0 if side == LEFT else 3
+    if len(edges) < 2 or len(model.roadEdgeStds) < 2 or model.roadEdgeStds[i] >= EDGE_STD_MAX:
+      return None, None
+    ys = [-float(y) * side for x, y in zip(edges[i].x, edges[i].y, strict=False)
+          if max(distance, 0.) <= x <= min(distance + FAR_EDGE_PAST_M, FAR_EDGE_AHEAD_M)]
+    if not ys:
+      return None, None
+    sure = len(lines) == 4 and len(model.laneLineProbs) == 4 and model.laneLineProbs[j] > LINE_PROB_MIN and len(lines[j].y) > SAMPLE_IDX
+    return max(ys), -float(lines[j].y[SAMPLE_IDX]) * side if sure else None
 
   def left_roll_light(self, maneuver_id: int, distance: float) -> tuple[str, int | None]:
     """The light of the autonomous left's junction distance m ahead for its rolling go (LeftInput.roll_light, roll_run):
@@ -2932,10 +2958,14 @@ class TurnPilot:
       up = rf.upcoming
       to_node = (float(src.d) + float(info.get('stopPointDistance', 0.) or 0.)) if src is not None else None
       ours = len(up.lanes) if up is not None and up.lanes and to_node is not None and abs(rf.distance - to_node) <= ALT_LANES_M else 0
+      # navd's fixes of the control for the position fault: a step of them (a GPS jump) is no spread (stop_go.settled_spread)
+      raw_spread = float(src.fix_spread) if src is not None else 0.
+      spread = settled_spread(src.fixes) if src is not None and getattr(src, 'fixes', None) is not None else raw_spread
+      step = max(raw_spread - spread, 0.)
       f = Frame(control=ctl, approach=ahead, junction=junction, route_cert=str(info.get('certification', 'unchecked')), maneuver=maneuver,
                 objects=objs, tracks=tracks, runs=runs, live=live, vis=vis,
                 surveys=self.survey_source(), wall_t=self.decider_clock(), side_status=side_status, lenses=lenses,
-                position_spread=src.fix_spread if src is not None else 0., v_ego=v_ego, a_ego=float(cs.aEgo), odo_m=self.odo_m,
+                position_spread=spread, position_step=step, v_ego=v_ego, a_ego=float(cs.aEgo), odo_m=self.odo_m,
                 yaw20_deg=sum(y for _, y in self.yaw20), approach_yaw_deg=self.approach_yaw_deg, turned_deg=self.sg_turned,
                 heading_deg=self.sg_heading,
                 steer_deg=float(cs.steeringAngleDeg), desire_out=d.maneuver_id == alt_id and d.started and d.side != 0 and not d.done,
@@ -3797,6 +3827,20 @@ class TurnPilot:
       cloudlog.event("turnpilot.side_doubt", why=doubt, paint=[[str(q.kind), str(q.color), round(q.confidence, 2)] for q in paint])
     self.side_doubt = self.side_doubt or doubt
 
+  def uncontrolled_turn(self, maneuver, distance: float) -> bool:
+    """The turn distance m ahead is at a junction nothing is known to control: no stop sign, yield or signal of the map's within
+    its window (PROTECT_BEFORE_M before it to PROTECT_PAST_M past it; a cross road's yield is a control too: its traffic gives
+    way), no signal the camera stops for there, and no light head read there or in the last HEAD_CLEAR_M driven
+    (left_heads_here: cross traffic closing on its red is no reason to brake at a green). Whatever navd's controls status:
+    a map that says nothing is no control. Such a turn yields to the cross traffic the cameras track (scene_policy.cross_stops)."""
+    if maneuver is None or maneuver.kind != TURN:
+      return False
+    mc = self.map_controls
+    if mc.camera_signal is not None or \
+       any(distance - PROTECT_BEFORE_M <= c.d <= distance + PROTECT_PAST_M for c in mc.tracker.controls.values()):
+      return False
+    return not self.left_heads_here(distance)
+
   def crosswalk_standoff(self, sm, v_ego: float, acting: bool, decision) -> bool:
     """The right-turn crosswalk hold's standoff (ALWAYS_DRIVE.md SC-02, unconditional; module constants): its clocks, the note's
     chime at PED_NOTE_S, and the handback once every walker it is for has stood STAND_UNDECIDED_S, held while it stands the car."""
@@ -4147,7 +4191,8 @@ class TurnPilot:
       td = sm['turnpilotDetections']
       status = str(td.lightStatus)
       if status != 'wideCamera':
-        self.camera_read, self.camera_age = camera_light_input(td.lights, status, 0., self.camera_mode), 0.
+        # ...with the run's unpublished boxes: a red or yellow read under the reader's confidence floor lets no green count
+        self.camera_read, self.camera_age = camera_light_input(td.lights, status, 0., self.camera_mode, td.lightRejects), 0.
     cam = self.camera_read
     if cam is None or (cam.status != 'disabled' and self.camera_age > CAMERA_STALE_S):
       return None
@@ -4709,9 +4754,15 @@ def main():
   long_control: bool | None = None
   invalid_frames = PLAN_INPUT_GRACE_FRAMES
   vehicle_can = False  # a frame seen on bus 1 this drive: the vehicle-CAN cable is fitted (the car's own lamp path, proven)
+  vehicle_can_failed = False  # reading it raised: said once, and read as not seen
   while True:
     sm.update(0)
-    vehicle_can = vehicle_can or bool(sm.updated.get('pandaStates') and vehicle_can_seen(sm['pandaStates']))
+    try:
+      vehicle_can = vehicle_can or bool(sm.updated.get('pandaStates') and vehicle_can_seen(sm['pandaStates']))
+    except Exception:
+      if not vehicle_can_failed:
+        vehicle_can_failed = True
+        log_error("turnpilotd.vehicle_can_failed")
     if sm.frame % int(1. / DT_MDL) == 0:
       enabled = params.get_bool("TurnPilotEnabled")
       shadow = params.get_bool("TurnPilotShadowMode")

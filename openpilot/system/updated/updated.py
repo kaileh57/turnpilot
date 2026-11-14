@@ -30,6 +30,15 @@ FINALIZED = os.path.join(STAGING_ROOT, "finalized")
 
 OVERLAY_INIT = Path(os.path.join(BASEDIR, ".overlay_init"))
 
+# TurnPilot: a finalized update installs itself while the car is parked (auto_install_ok). The commit an install was last
+# tried for is kept here, outside the staging area (init_overlay wipes that after every boot), so a failed install is tried
+# once and then left to the Software screen's button
+AUTO_INSTALL_FILE = os.getenv("UPDATER_AUTO_INSTALL_FILE", "/data/updater_auto_install_commit")
+AUTO_INSTALL_PARKED_S = 3 * 60.  # s offroad with the ignition off, seen on every poll, before it installs
+AUTO_INSTALL_POLL_S = 10.        # s between looks at the car while idle
+AUTO_INSTALL_RESTART_S = 120.    # s the updater stands by for manager's restart after starting an install
+AUTO_INSTALL_STATE = "installing update..."  # UpdaterState, the Software screen's line, while the comma restarts into it
+
 # do not allow to engage after this many hours onroad and this many routes
 HOURS_NO_CONNECTIVITY_MAX = 27
 ROUTES_NO_CONNECTIVITY_MAX = 84
@@ -123,13 +132,142 @@ def dismount_overlay() -> None:
     run(["sudo", "umount", "-l", OVERLAY_MERGED])
 
 
+def overlay_valid() -> bool:
+  """The overlay this updater made is still mounted and BASEDIR/.git has not changed since: what was fetched and finalized on
+  it still applies to the tree it would replace."""
+  if not (OVERLAY_INIT.is_file() and os.path.ismount(OVERLAY_MERGED)):
+    return False
+  git_dir_path = os.path.join(BASEDIR, ".git")
+  new_files = run(["find", git_dir_path, "-newer", str(OVERLAY_INIT)])
+  return not len(new_files.splitlines())
+
+
+def keep_finalized() -> bool:
+  """Whether a finalized update found at start stays installable: only one made on the overlay that is still valid (updated
+  was stopped by a drive and started again, no boot in between). Anything else, or a check that fails, invalidates it as
+  stock does: after a boot init_overlay rebuilds the staging area anyway."""
+  try:
+    if not Path(os.path.join(FINALIZED, ".overlay_consistent")).is_file() or not overlay_valid():
+      return False
+    # the same commit as the running tree is no update (a fetch finalizes whatever the branch's tip is)
+    return run(["git", "rev-parse", "HEAD"], FINALIZED).rstrip() != run(["git", "rev-parse", "HEAD"], BASEDIR).rstrip()
+  except Exception:
+    cloudlog.exception("updated: finalized update check failed, invalidating it")
+    return False
+
+
+def launch_would_install() -> bool:
+  """The launch script's own conditions for swapping the finalized update in at the boot hold now: BASEDIR's init file there
+  with nothing in BASEDIR/.git newer (overlay_valid, which asks the mount too), the finalized tree consistent, and no backup
+  of an earlier swap in the way. A restart without them installs nothing."""
+  return overlay_valid() and Path(os.path.join(FINALIZED, ".overlay_consistent")).is_file() and \
+    not os.path.isdir(os.path.join(STAGING_ROOT, "old_openpilot"))
+
+
+def keep_overlay_after_failure(fetching: bool) -> bool:
+  """A loop that failed leaves the overlay as it is (stock recreates it, which wipes the staging area) only when nothing was
+  fetched into it this loop and a finalized update is pending on it: a check that fails away from Wi-Fi is no reason to
+  throw a finished download away. A failure once the fetch began, or with nothing pending, is stock's."""
+  return not fetching and keep_finalized()
+
+
+def auto_install_ok(update_ready: bool, commit: str | None, attempted: str | None, offroad: bool | None, ignition: bool | None,
+                    parked_s: float, lockout: bool = False, current: str | None = None) -> bool:
+  """Install the finalized update now, as the Software screen's install button would (DoReboot: the launch script swaps it
+  in at the boot). Only with an update ready (Updater.update_ready, stock's own test), its commit known, not the running
+  tree's (current) and not the one an install was already tried for, the device known offroad and the ignition known off for
+  AUTO_INSTALL_PARKED_S, and no driver monitoring lockout a restart would clear. Anything unknown is a no."""
+  if not update_ready or not commit or commit in (attempted, current) or lockout:
+    return False
+  return offroad is True and ignition is False and parked_s >= AUTO_INSTALL_PARKED_S
+
+
+def read_attempted(path: str | None = None) -> str | None:
+  try:
+    return Path(path or AUTO_INSTALL_FILE).read_text().strip() or None
+  except FileNotFoundError:
+    return None
+
+
+def write_attempted(commit: str, path: str | None = None) -> None:
+  """commit recorded as tried, on disk before anything restarts."""
+  path = path or AUTO_INSTALL_FILE
+  tmp = path + ".tmp"
+  with open(tmp, "w") as f:
+    f.write(commit)
+    f.flush()
+    os.fsync(f.fileno())
+  os.replace(tmp, path)
+  os.sync()
+
+
+class ParkedWatch:
+  """Whether the car is parked, from deviceState and pandaStates: (offroad, ignition), each None while its service isn't
+  alive, and for how long both have read parked on every look."""
+  def __init__(self, sm=None):
+    if sm is None:
+      from openpilot.cereal import messaging
+      sm = messaging.SubMaster(['deviceState', 'pandaStates'])
+    self.sm = sm
+    self.since: float | None = None
+
+  def read(self) -> tuple[bool | None, bool | None]:
+    self.sm.update(0)
+    offroad = (not self.sm['deviceState'].started) if self.sm.alive['deviceState'] else None
+    ignition = any(ps.ignitionLine or ps.ignitionCan for ps in self.sm['pandaStates']) if self.sm.alive['pandaStates'] else None
+    return offroad, ignition
+
+  def parked_s(self, offroad: bool | None, ignition: bool | None, now: float) -> float:
+    if offroad is True and ignition is False:
+      self.since = now if self.since is None else self.since
+      return now - self.since
+    self.since = None
+    return 0.
+
+
+def maybe_auto_install(params, updater, watch: ParkedWatch, now: float | None = None) -> bool:
+  """One look at the car and the finalized update; True once the install was started (the commit recorded as tried, the
+  Software screen's line set, DoReboot put: manager restarts the comma and the launch script installs). A failure anywhere
+  starts nothing."""
+  try:
+    offroad, ignition = watch.read()
+    parked_s = watch.parked_s(offroad, ignition, time.monotonic() if now is None else now)
+    if parked_s < AUTO_INSTALL_PARKED_S or not updater.update_ready:
+      return False
+    commit = updater.get_commit_hash(FINALIZED)
+    if not auto_install_ok(True, commit, read_attempted(), offroad, ignition, parked_s, params.get_bool("DriverTooDistracted"),
+                           updater.get_commit_hash(BASEDIR)):
+      return False
+    offroad, ignition = watch.read()  # once more, right before it restarts
+    if offroad is not True or ignition is not False or not launch_would_install():
+      return False
+    write_attempted(commit)
+    cloudlog.event("updated.auto_install", commit=commit, parked_s=round(parked_s))
+    params.put("UpdaterState", AUTO_INSTALL_STATE, block=True)
+    params.put_bool("DoReboot", True, block=True)
+    return True
+  except Exception:
+    cloudlog.exception("updated: auto install check failed")
+    return False
+
+
+def idle(wait_helper, t: float, look) -> None:
+  """wait_helper.sleep(t), with a look at the car (look()) every AUTO_INSTALL_POLL_S; a request from the Software screen
+  ends it at once, as it ends the sleep."""
+  end = time.monotonic() + t
+  while not wait_helper.ready_event.is_set():
+    left = end - time.monotonic()
+    if left <= 0.:
+      return
+    look()
+    wait_helper.sleep(min(left, AUTO_INSTALL_POLL_S))
+
+
 def init_overlay() -> None:
 
   # Re-create the overlay if BASEDIR/.git has changed since we created the overlay
   if OVERLAY_INIT.is_file() and os.path.ismount(OVERLAY_MERGED):
-    git_dir_path = os.path.join(BASEDIR, ".git")
-    new_files = run(["find", git_dir_path, "-newer", str(OVERLAY_INIT)])
-    if not len(new_files.splitlines()):
+    if overlay_valid():
       # A valid overlay already exists
       return
     else:
@@ -257,6 +395,13 @@ class Updater:
       on_target_branch = self.get_branch(FINALIZED) == self.target_branch
       return ((hash_mismatch or branch_mismatch) and on_target_branch)
     return False
+
+  @property
+  def finalized_current(self) -> bool:
+    """The finalized update is ready and is the target branch's tip as just checked: fetching again would only invalidate
+    it for the minutes the copy takes, and a drive starting then would lose it."""
+    tip = self.branches[self.target_branch] if len(self.branches) else ""
+    return bool(tip) and self.update_ready and self.get_commit_hash(FINALIZED) == tip
 
   @property
   def update_available(self) -> bool:
@@ -437,8 +582,18 @@ def main() -> None:
     update_failed_count = 0 # TODO: Load from param?
     wait_helper = WaitTimeHelper()
 
-    # invalidate old finalized update
-    set_consistent_flag(False)
+    # invalidate old finalized update, but for one this boot's updater finalized before a drive stopped it: that one is
+    # still what the Software screen offered, and stays pending
+    if not keep_finalized():
+      set_consistent_flag(False)
+    watch = ParkedWatch()
+
+    def look() -> bool:
+      if maybe_auto_install(params, updater, watch):
+        # manager restarts the comma on DoReboot: nothing is fetched or invalidated meanwhile
+        time.sleep(AUTO_INSTALL_RESTART_S)
+        cloudlog.error("updated: the comma did not restart for the install")
+      return False
 
     # set initial state
     params.put("UpdaterState", "idle", block=True)
@@ -450,6 +605,7 @@ def main() -> None:
 
       # Attempt an update
       exception = None
+      fetching = False
       try:
         # TODO: reuse overlay from previous updated instance if it looks clean
         init_overlay()
@@ -459,7 +615,7 @@ def main() -> None:
 
         if not system_time_valid() or first_run:
           first_run = False
-          wait_helper.sleep(60)
+          idle(wait_helper, 60, look)
           continue
 
         update_failed_count += 1
@@ -476,7 +632,10 @@ def main() -> None:
           cloudlog.info("skipping fetch, connection metered")
         elif wait_helper.user_request == UserRequest.CHECK:
           cloudlog.info("skipping fetch, only checking")
+        elif not user_requested_fetch and updater.finalized_current:
+          cloudlog.info("skipping fetch, the finalized update is the branch's tip")
         else:
+          fetching = True
           updater.fetch_update()
           write_time_to_param(params, "UpdaterLastFetchTime")
         update_failed_count = 0
@@ -488,11 +647,13 @@ def main() -> None:
           returncode=e.returncode
         )
         exception = f"command failed: {e.cmd}\n{e.output}"
-        OVERLAY_INIT.unlink(missing_ok=True)
+        if not keep_overlay_after_failure(fetching):
+          OVERLAY_INIT.unlink(missing_ok=True)
       except Exception as e:
         cloudlog.exception("uncaught updated exception, shouldn't happen")
         exception = str(e)
-        OVERLAY_INIT.unlink(missing_ok=True)
+        if not keep_overlay_after_failure(fetching):
+          OVERLAY_INIT.unlink(missing_ok=True)
 
       try:
         params.put("UpdaterState", "idle", block=True)
@@ -503,7 +664,7 @@ def main() -> None:
 
       # infrequent attempts if we successfully updated recently
       wait_helper.user_request = UserRequest.NONE
-      wait_helper.sleep(5*60 if update_failed_count > 0 else 1.5*60*60)
+      idle(wait_helper, 5*60 if update_failed_count > 0 else 1.5*60*60, look)
 
 
 if __name__ == "__main__":

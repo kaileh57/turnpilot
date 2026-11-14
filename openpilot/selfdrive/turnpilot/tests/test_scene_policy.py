@@ -1536,3 +1536,181 @@ def test_stood_is_its_own_stop_braking_the_car_to_rest_in_force_all_along():
   assert not sp.tracks[60].earned and not sp.tracks[60].stood
   frames(sp, (0.,) * 20)
   assert sp.person_front is None
+
+
+def committed_right(sp, mid=3, v=3.):
+  """sp over a right's hold line at v with nobody about: committed."""
+  sp.update([], True, RIGHT_TURN, HOLD_LINE_M - 0.5, v, maneuver_id=mid)
+  assert sp.committed_id == mid
+  return sp
+
+
+def late_walker(sp, x, y, v, dist, mid=3, frames=12, track=9, **kw):
+  """The last of frames updates with a walker first tracked at (x, y) from the car, a hit every other frame (10 a second)."""
+  for k in range(frames):
+    d = sp.update(scene([ped(x, y, age=1 + k // 2, conf=0.8, trackId=track)]).objects, True, RIGHT_TURN, dist, v, maneuver_id=mid, **kw)
+  return d
+
+
+def test_a_walker_first_tracked_after_the_commit_holds_the_curb_side_turn_while_it_can_stop_short_of_her():
+  # committed over its line with nobody tracked (her track lapsed at the corner), a right finishes its turn for good against
+  # every junction hold; a walker in its crosswalk zone tracked then, ahead of the bumper and beyond the car's stopping
+  # distance, still stops it short of her: a person holds the car before or after the commit
+  sp = committed_right(ScenePolicy())
+  d = late_walker(sp, 7., -3., 3., 6.)
+  assert d.holding and d.reason == "pedestrian in crosswalk" and sp.committed_id == 3
+  assert sp.junction is not None and sp.junction.d_stop == pytest.approx(math.hypot(7., 3.) - PED_STOP_GAP_M)
+  assert d.accel_cap == NO_ACCEL_CAP and not d.hard_brake  # in the junction: the comfortable curve alone, never the hard tier
+  # closed loop from there, she standing: the car comes to rest short of her and is held
+  v, dist, x = 3., 6., 7.
+  for k in range(int(6. / DT_MDL)):
+    d = sp.update(scene([ped(x, -3., age=7 + k // 2, conf=0.8, trackId=9)]).objects, True, RIGHT_TURN, dist, v, maneuver_id=3)
+    a = max(min(plan_accel(d.accel_cap, d.speed_cap, v), 0.5), -3.5)
+    v = max(v + (min(a, -1.) if d.should_stop else a) * DT_MDL, 0.)
+    dist, x = dist - v * DT_MDL, x - v * DT_MDL
+  assert v == 0. and d.should_stop and math.hypot(x - 1.9, 3.) > 3.  # m from the bumper to her
+  # she is gone: nothing holds the committed turn
+  d = sp.update([], True, RIGHT_TURN, dist, v, maneuver_id=3)
+  assert not d.holding and sp.junction is None
+
+
+def test_a_committed_turn_passing_a_walker_it_can_no_longer_stop_short_of_finishes_its_turn():
+  # level with the bonnet, or inside the car's comfortable stopping distance (3 m at 3 m/s, plus the bumper): the turn is
+  # finished, no stop is asked in the junction that can't be made short of her
+  for x, y in ((1.5, -3.), (2.2, -2.), (4., -2.5)):
+    sp = committed_right(ScenePolicy())
+    d = late_walker(sp, x, y, 3., 3.)
+    assert d.reason != "pedestrian in crosswalk" and sp.junction is None, (x, y)
+  # just beyond it she is stopped for, on the curve: a confirmed walker 5 m off never gets the hard tier or its alert here
+  sp = committed_right(ScenePolicy())
+  d = late_walker(sp, 4.5, -2.5, 3., 4., frames=20)
+  assert d.reason == "pedestrian in crosswalk" and d.accel_cap == NO_ACCEL_CAP and not d.hard_brake
+  assert plan_accel(d.accel_cap, d.speed_cap, 3.) >= -STOP_DECEL - 1e-6
+  # faster, the same walker 7 m off is inside the stop: 5 m/s stops in 8.3 m
+  sp = committed_right(ScenePolicy(), v=5.)
+  late_walker(sp, 6.5, -3., 5., 6.)
+  assert sp.junction is None
+
+
+def test_a_late_walker_hold_keeps_the_evidence_rules_of_any_crosswalk_hold():
+  sp = committed_right(ScenePolicy())
+  # a track of a few hits is no walker: no hold on a two-hit false positive
+  assert not late_walker(sp, 7., -3., 3., 6., frames=4).holding
+  # a low-confidence walker (never confirmed) is a walker all the same: held for
+  sp = committed_right(ScenePolicy())
+  for k in range(12):
+    d = sp.update(scene([ped(5.5, -2., age=1 + k // 2, conf=0.55, trackId=9)]).objects, True, RIGHT_TURN, 5., 3., maneuver_id=3)
+  assert d.holding and d.reason == "pedestrian in crosswalk" and d.accel_cap == NO_ACCEL_CAP
+  # everyone it is for standing is what turnpilotd's standoff reads (holders_standing), by the hold's own walkers
+  assert sp.holders_standing is True
+  # the driver took over at the line and drives it: his release stands, no hold comes back
+  sp = ScenePolicy()
+  sp.released_id = 3
+  assert not late_walker(sp, 7., -3., 3., 6.).holding
+  # a far-side turn's commitment is as it was: no crosswalk rule there
+  sp = ScenePolicy()
+  sp.update([], True, LEFT_TURN, 3., 5., maneuver_id=4)
+  assert sp.committed_id == 4
+  for k in range(12):
+    d = sp.update(scene([ped(7., 3., age=1 + k // 2, conf=0.8, trackId=9)]).objects, True, LEFT_TURN, 3., 3., maneuver_id=4)
+  assert not d.holding
+
+
+def test_a_late_walker_hold_is_carried_through_a_scene_gap_and_judged_in_the_road_frame():
+  sp = committed_right(ScenePolicy())
+  d = late_walker(sp, 7., -3., 3., 6.)
+  d_stop = sp.junction.d_stop
+  d = sp.update([], False, RIGHT_TURN, 5.9, 2., maneuver_id=3)  # the scene gone: the hold stays, moved with the car
+  assert d.holding and d.reason == "pedestrian in crosswalk" and sp.junction.d_stop == pytest.approx(d_stop - 2. * DT_MDL)
+  # the car 40 deg into its right: a walker straight ahead of it 6 m off is in the mouth of the road it turns into (the
+  # crosswalk zone is the road's, not the car's turned frame)
+  sp = committed_right(ScenePolicy())
+  assert late_walker(sp, 6., 0.5, 2.5, 2., heading_deg=40.).holding
+  assert sp.holders_standing is True  # ...and her standing read from that hold's walkers, not the car's turned frame
+
+
+def test_a_late_walker_hold_is_for_the_lane_the_turn_enters_never_the_far_kerb():
+  from openpilot.selfdrive.turnpilot.scene_policy import LATE_WALKER_X_AFTER_M
+  # the car 6 m before the maneuver point: someone on the far kerb of the cross road, 6 m past it, holds a turn at its line
+  # (the crosswalk zone) but never one already in the junction; 3 m past it, by the lane the turn enters, she does
+  sp = committed_right(ScenePolicy())
+  late_walker(sp, 6. + LATE_WALKER_X_AFTER_M + 2., -5., 3., 6.)
+  assert sp.junction is None
+  sp = committed_right(ScenePolicy())
+  assert late_walker(sp, 6. + LATE_WALKER_X_AFTER_M - 1., -5., 3., 6.).reason == "pedestrian in crosswalk"
+  assert late_walker(ScenePolicy(), 30. + LATE_WALKER_X_AFTER_M + 2., -5., 5., 30.).reason == "pedestrian in crosswalk"  # short of the line
+
+
+def cross_car(x, y, vy, age=40, **kw):
+  return car(x, y, vy=vy, age=age, conf=0.8, **kw)
+
+
+def cross(sp, objects, maneuver, dist, v, mid=5, frames=1, **kw):
+  for _ in range(frames):
+    d = sp.update(scene(objects).objects, True, maneuver, dist, v, maneuver_id=mid, cross_yield=True, **kw)
+  return d
+
+
+def test_cross_traffic_holds_a_turn_with_no_mapped_control_by_the_stop_sign_gos_tracked_test():
+  from openpilot.selfdrive.turnpilot import stop_rules as sr
+  from openpilot.selfdrive.turnpilot.scene_policy import CROSS_REASON
+  # a car on the cross road 30 m to the left closing at 9 m/s, the junction 20 m ahead: 3.2 s from our path, under the
+  # tracked test's gap (T_GAP_LEFT 7.5 s, T_GAP_RIGHT_STRAIGHT 6.5 s): it holds either turn, at the hold line
+  for maneuver in (LEFT_TURN, RIGHT_TURN):
+    d = cross(ScenePolicy(), [cross_car(19., 30., -9.)], maneuver, 20., 5.)
+    assert d.holding and d.reason == CROSS_REASON and d.rest_d == pytest.approx(20. - HOLD_LINE_M)
+  # only with the flag: a junction with a control is its control's (the default, and every caller but turnpilotd's)
+  assert not ScenePolicy().update(scene([cross_car(19., 30., -9.)]).objects, True, LEFT_TURN, 20., 5., maneuver_id=5).holding
+  # from the right: a left crosses that lane too, a right never enters it
+  assert cross(ScenePolicy(), [cross_car(21., -30., 9.)], LEFT_TURN, 20., 5.).reason == CROSS_REASON
+  assert not cross(ScenePolicy(), [cross_car(21., -30., 9.)], RIGHT_TURN, 20., 5.).holding
+  # far enough to stop for us and leave its gap: no hold (the tracked test passes)
+  far = max(sr.t_gap('left') * 9., sr.tracked_r_req(9., sr.t_cue(HOLD_LINE_M))) + 3.
+  assert not cross(ScenePolicy(), [cross_car(19., far, -9.)], LEFT_TURN, 20., 5.).holding
+  assert cross(ScenePolicy(), [cross_car(19., far - 10., -9.)], LEFT_TURN, 20., 5.).holding
+  # standing, going away, moving along our road, or off the cross road's band: not cross traffic
+  for other in (cross_car(19., 12., 0.), cross_car(19., 12., 9.), car(19., 4., vx=-12., vy=-1.5, age=40), cross_car(45., 30., -9.),
+                cross_car(5., 30., -9.)):
+    assert cross(ScenePolicy(), [other], LEFT_TURN, 20., 5.).reason != CROSS_REASON, other  # (the oncoming one is the oncoming hold's)
+  # a new track's velocity isn't the tracker's: beyond our own road it is taken as closing, on the comfortable curve only
+  d = cross(ScenePolicy(), [cross_car(19., 30., 0., age=6)], LEFT_TURN, 12., 6.)
+  assert d.reason == CROSS_REASON and d.accel_cap == NO_ACCEL_CAP
+  # ...never one on our own road's lanes (a new oncoming track two lanes over), for either turn
+  for y in (4., 7.5, 11.):
+    assert cross(ScenePolicy(), [cross_car(19., y, 0., age=6)], RIGHT_TURN, 12., 6.).reason != CROSS_REASON, y
+    assert cross(ScenePolicy(), [car(19., y, vx=-12., age=6)], RIGHT_TURN, 12., 6.).reason != CROSS_REASON, y
+  # with a trusted one closing too, the hold names that one
+  d = cross(ScenePolicy(), [cross_car(19., 30., -9., trackId=1), cross_car(19., -30., 0., age=6, trackId=2)], LEFT_TURN, 12., 2.)
+  assert d.reason == CROSS_REASON
+  # a confirmed, trusted one may brake harder than the curve to make the line
+  d = cross(ScenePolicy(), [cross_car(11., 30., -9.)], LEFT_TURN, 12., 6., frames=12)
+  assert d.reason == CROSS_REASON and d.accel_cap < -STOP_DECEL
+
+
+def test_the_cross_hold_stops_short_of_the_cross_road_or_not_at_all_and_keeps_a_clear_window():
+  from openpilot.selfdrive.turnpilot.scene_policy import CROSS_CLEAR_S, CROSS_ENTRY_M, CROSS_REASON, cross_hold_stop
+  # past the hold line: where the comfortable curve can, while that is short of the cross road's near lane
+  s, = cross_hold_stop(LEFT_TURN, 7.5, 1.5)
+  assert s.d_stop == pytest.approx(1.5 ** 2 / (2. * STOP_DECEL)) and 7.5 - s.d_stop > CROSS_ENTRY_M
+  assert not cross_hold_stop(LEFT_TURN, 7.5, 3.)       # 3 m to stop from 3 m/s: into the lane, so the turn is finished
+  assert cross_hold_stop(LEFT_TURN, 5.5, 0.) and cross_hold_stop(LEFT_TURN, 5.5, 1.8)  # at a crawl it stops where it is
+  assert not cross_hold_stop(LEFT_TURN, ONCOMING_ENTRY_M - 0.1, 0.)  # in the junction: finished
+  assert not cross_hold_stop(LEFT_TURN, 60., 5.)       # far out: not yet
+  # the hold stays CROSS_CLEAR_S after the last closing car, on the curve, then lets go; another maneuver's is its own
+  sp = ScenePolicy()
+  assert cross(sp, [cross_car(19., 30., -9.)], LEFT_TURN, 9., 0.).should_stop
+  gone = [cross(sp, [], LEFT_TURN, 9., 0.) for _ in range(int(CROSS_CLEAR_S / DT_MDL) + 2)]
+  assert all(d.should_stop and d.reason == CROSS_REASON and d.accel_cap == NO_ACCEL_CAP for d in gone[:int(CROSS_CLEAR_S / DT_MDL) - 2])
+  assert not gone[-1].holding
+  sp = ScenePolicy()
+  cross(sp, [cross_car(19., 30., -9.)], LEFT_TURN, 9., 0.)
+  assert not cross(sp, [], LEFT_TURN, 9., 0., mid=6).holding
+  # a new track's hold (a parked car first seen at the corner) ends with its doubt: no window after it
+  sp = ScenePolicy()
+  assert cross(sp, [cross_car(19., 30., 0., age=6)], RIGHT_TURN, 12., 4.).reason == CROSS_REASON
+  assert not cross(sp, [cross_car(19., 30., 0., age=30)], RIGHT_TURN, 12., 4.).holding
+  # the scene gone: the hold in force stays, as any junction hold
+  sp = ScenePolicy()
+  cross(sp, [cross_car(19., 30., -9.)], RIGHT_TURN, 9., 0.)
+  d = sp.update([], False, RIGHT_TURN, 9., 0., maneuver_id=5, cross_yield=True)
+  assert d.should_stop and d.reason == CROSS_REASON

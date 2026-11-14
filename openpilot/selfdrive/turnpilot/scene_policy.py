@@ -35,12 +35,29 @@ line: finishing that turn is entering the crosswalk with her in it (BeamNG R3, p
 tracked 5.1 m off, she was held for from 11.3 m out at 4.7 m/s, the car crossed its line at 2.66 m/s, committed, and the
 hold let go of her for good), so the hold stops the car where it can past the line and stands it there while anyone still
 holds it; once no one does, the turn goes on and commits as any other. Slowing
-later in the junction never brings its junction hold back (pedestrians in the path still stop it). ScenePolicy keeps
+later in the junction never brings a far-side turn's oncoming hold back. A person does hold a committed curb-side turn:
+a walker in its crosswalk zone first tracked, or tracked again, with the car past its line (her track lapses there: she is
+outside the road camera's view at the corner until the wide camera runs) stops it short of her for as long as it still can
+(late_walkers: she is by the lane the turn enters, ahead of the bumper, and the car stops within her range on the
+comfortable curve), a walker-grade track as any crosswalk hold's, braked for on that curve alone; past that the turn is
+finished. Pedestrians in the path stop it as ever. ScenePolicy keeps
 those and the rest of what one frame can't know; scene_policy() is one frame on its own.
 A turnpilotd fault (fault()) loses the route, and with it the maneuver a junction hold is for: the hold in force then
 stays where it was, dead-reckoned like a carried pedestrian stop, until a live scene judges the junction again with the
 route back, the car is committed past it, or the driver takes over at it. A junction the car was committed to or released
 into stays so when the route is back under a new id, the car at it.
+
+Cross traffic at a turn with no mapped control (ScenePolicy.update's cross_yield, turnpilotd's: no stop sign, yield or
+signal mapped at the turn's junction, no light head read there, the stop-sign decider not acting): the turn enters or
+crosses a road nothing stops for it, a T's stem the commonest, so it yields to the vehicles the cameras track closing on its
+path along that road, from either side for a far-side turn and from the side away from the turn for a curb-side one
+(cross_stops). The judgement is the stop-sign go's tracked test (stop_rules.tracked_ok: the vehicle can stop short of our
+path and leaves its gap, T_GAP), on the scene's own tracks and trust: a trusted track by its measured speed toward our path,
+moving across more than along; a new one (VEL_TRUST_HITS) beyond our own road's lanes (CROSS_Y_NEAR_M) taken as closing at
+ONCOMING_ASSUMED_SPEED and held for on the comfortable curve only, as the oncoming hold's. The hold is a hold-line stop like
+the oncoming one, the car to stop short of the cross road's near lane (cross_hold_stop, CROSS_ENTRY_M); it lasts while such
+a vehicle is tracked and CROSS_CLEAR_S after the last one seen closing by its own motion (the go's clear window), so an
+empty road never stands the car and nothing is handed back for it.
 
 Objects are TurnpilotScene.TrackedObject (or anything with the same fields): x m forward, y m LEFT in the
 calibrated frame, vx/vy over-ground velocity in that frame (ego motion removed), cls compared by name, inPath
@@ -119,6 +136,7 @@ import numpy as np
 
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.turnpilot import stop_rules as sr
 from openpilot.selfdrive.turnpilot.hooks import SPEED_CAP_ACCEL_MIN, SPEED_CAP_TAU, plan_accel
 from openpilot.selfdrive.turnpilot.route_follower import LEFT, TURN
 from openpilot.selfdrive.turnpilot.scene.tracker import CLOSE_HOLD_M, CLOSE_HOLD_S, MAX_AGE_S
@@ -198,6 +216,13 @@ CROSSWALK_LEAVING_PAST_M = 3.
 CROSSWALK_LEAVING_RATIO = 0.5
 CROSSWALK_LEAVING_FRAMES = 10  # ScenePolicy: leaving on this many frames in a row (0.5 s), not a frame of velocity noise
 CROSSWALK_REASON = "pedestrian in crosswalk"
+# A committed curb-side turn still stops for a walker in its crosswalk zone while a stop short of her is possible: she is
+# ahead of the front bumper and the car stops within her range (less the bumper) on the comfortable curve (STOP_DECEL: 3 m
+# at a right's 3 m/s). Closer, the car is passing her and finishes its turn; in its path she is pedestrian_stops' as ever.
+# And only a walker by the lane the turn enters: that lane lies short of the maneuver point (the cross road's near half),
+# so this far past it (a lane's width: a wide turn, the position's error) and no further. Someone standing on the far kerb
+# holds a turn at its line (CROSSWALK_X_AFTER_M), never one already in the junction
+LATE_WALKER_X_AFTER_M = 4.
 WALKER_STAND_SPEED = 0.5  # m/s: a walker holding the crosswalk hold stands below this, or with its velocity not yet trusted (SC-02)
 KEEP_EVIDENCE_S = max(MAX_AGE_S, CLOSE_HOLD_S)  # the longest the tracker keeps a track it no longer matches
 RECENT_S = max(CROSSWALK_STEADY_S, CONFIRM_WINDOW_S)  # TrackEvidence.recent keeps the hits of this long
@@ -214,6 +239,21 @@ ONCOMING_ENTRY_M = 4.       # m (of the car's position) before the maneuver poin
 # as coming at ONCOMING_ASSUMED_SPEED, whatever its vx says
 VEL_TRUST_HITS = 25
 ONCOMING_ASSUMED_SPEED = 15.  # m/s, 54 km/h: within 75 m of the junction an untrusted track holds
+
+# cross traffic at a turn with no mapped control (module docstring): cross_stops
+CROSS_REASON = "waiting for cross traffic"
+# the cross road's band along the car's axis around the maneuver point: four lanes either side of the node (2 x LANE_W_MAX 3.7)
+# and a side-on mono track's range error past it (a car 35 m off reading a third long is 6 m further on)
+CROSS_X_BEFORE_M = 10.
+CROSS_X_AFTER_M = 15.
+# a new track nearer our axis than this may be on our own road (a lead, oncoming lanes: two our way and two against, 3.5
+# lane widths from our lane's centre), the oncoming hold's; and a cross car that near is under a second and a half out, too
+# late for the comfortable curve to matter
+CROSS_Y_NEAR_M = 13.
+# m before the maneuver point the car stops by, short of the cross road's near lane: a lane's width from the node (3.7) and
+# the camera's setback from the bumper (1.9). Past where it can, on the comfortable curve, it finishes the turn
+CROSS_ENTRY_M = 6.
+CROSS_CLEAR_S = sr.VISION_CLEAR_S  # s with no vehicle closing before the hold lets go: the stop-sign go's clear window
 
 # the curb-pedestrian speed cap (module docstring): TurnPilotCurbPedCap (turnpilotd main()), ScenePolicy.curb_cap
 CURB_PED_CAP_DEFAULT = True
@@ -518,6 +558,87 @@ def junction_stops(objects, maneuver, distance, v_ego, right_hand_traffic, is_wa
   return holds
 
 
+def cross_hold_stop(maneuver, distance, v_ego, confirmed: bool = True, evidence: dict | None = None) -> list[Stop]:
+  """The cross-traffic hold's stop (module docstring): at the hold line; past it, where the comfortable curve can, as a
+  far-side turn's (hold_line_stop). None once the car is committed: inside ONCOMING_ENTRY_M, or faster than COMMIT_SPEED with
+  no comfortable stop left short of the cross road's near lane (CROSS_ENTRY_M). A car slower than that stops where it is: from
+  a crawl, standing short is better than pulling out ahead of a car seen closing."""
+  if maneuver is None or maneuver.kind != TURN or distance < -TURN_ZONE_PAST_M:
+    return []
+  d_hold, comfortable = distance - HOLD_LINE_M, v_ego ** 2 / (2. * STOP_DECEL)
+  if d_hold < 0.:
+    if distance < ONCOMING_ENTRY_M or (v_ego > COMMIT_SPEED and comfortable > distance - CROSS_ENTRY_M):
+      return []
+    d_hold = comfortable
+  if d_hold > comfortable + HOLD_ENGAGE_MARGIN_M:
+    return []
+  return [stop(v_ego, d_hold, CROSS_REASON, confirmed, evidence=evidence)]
+
+
+def cross_stops(objects, maneuver, distance, v_ego, right_hand_traffic, may_harden=confirmed_track, heading_deg: float = 0.) -> list[Stop]:
+  """The hold for cross traffic at a turn with no mapped control (module docstring): cross_hold_stop while a tracked vehicle on
+  the cross road (CROSS_X_BEFORE_M before the maneuver point to CROSS_X_AFTER_M past it, in the road's frame) closes on our
+  path and fails the stop-sign go's tracked test (stop_rules.tracked_ok) from its distance to our path's edge. From either
+  side for a far-side turn, from the side away from the turn for a curb-side one. A trusted track (velocity_trusted) is judged
+  by its speed toward our path, moving across more than along and faster than ONCOMING_MIN_SPEED; a new one beyond
+  CROSS_Y_NEAR_M is taken as closing at ONCOMING_ASSUMED_SPEED and holds on the comfortable curve only. may_harden,
+  heading_deg: as junction_stops'."""
+  if not cross_hold_stop(maneuver, distance, v_ego):
+    return []
+  far_side = far_side_turn(maneuver, right_hand_traffic)
+  kind = 'left' if far_side else 'right'  # the tracked test's gap: a turn across the near lanes, or into them (stop_rules.t_gap)
+  cue = sr.t_cue(HOLD_LINE_M)
+  holds = []
+  for obj in road_frame(objects, heading_deg, maneuver.side):
+    off = abs(obj.y)
+    if str(obj.cls) not in VEHICLES or not distance - CROSS_X_BEFORE_M < obj.x < distance + CROSS_X_AFTER_M:
+      continue
+    if not far_side and obj.y * maneuver.side > 0.:
+      continue  # from the turn's own side it comes along the lanes a curb-side turn doesn't enter
+    trusted = velocity_trusted(obj)
+    toward = -obj.vy * math.copysign(1., obj.y)
+    if trusted:
+      closing = toward > ONCOMING_MIN_SPEED and abs(obj.vy) >= abs(obj.vx)
+    else:
+      closing, toward = off > CROSS_Y_NEAR_M, max(toward, ONCOMING_ASSUMED_SPEED)
+    if not closing or sr.tracked_ok(sr.TrackFit(max(off - PATH_HALF_WIDTH_M, 0.), toward, trusted), kind, cue, ONCOMING_ASSUMED_SPEED):
+      continue
+    hard = trusted and may_harden(obj)
+    if hard:
+      return cross_hold_stop(maneuver, distance, v_ego, True, track_evidence(obj))
+    if trusted or not holds:  # the hold says which vehicle it is for: one whose motion is the tracker's before a new track
+      holds = cross_hold_stop(maneuver, distance, v_ego, False, track_evidence(obj))
+  return holds
+
+
+def late_walkers(objects, maneuver, distance, v_ego, right_hand_traffic, is_walker=crosswalk_walker, may_leave=confirmed_track,
+                 heading_deg: float = 0.) -> list:
+  """[(m from the camera, the track)] of the walkers a curb-side turn the car is committed to still holds for (module
+  docstring): those junction_stops would hold for (crosswalk_holders, the zone taken in the road's frame: the car may be
+  turning, heading_deg as junction_stops') by the lane the turn enters (no further past the maneuver point than
+  LATE_WALKER_X_AFTER_M) that the car can still stop short of, ahead of its front bumper and further off than its stopping
+  distance on the comfortable curve."""
+  if maneuver is None or maneuver.kind != TURN or distance < -TURN_ZONE_PAST_M or far_side_turn(maneuver, right_hand_traffic):
+    return []
+  reach = v_ego ** 2 / (2. * STOP_DECEL) + PERSON_FRONT_BUMPER_M
+  walkers = []
+  for obj in crosswalk_holders(road_frame(objects, heading_deg, maneuver.side), distance, maneuver.side, is_walker, may_leave):
+    own = obj.obj if isinstance(obj, RoadFrame) else obj
+    rng = math.hypot(own.x, own.y)
+    if obj.x < distance + LATE_WALKER_X_AFTER_M and own.x > PERSON_FRONT_BUMPER_M and rng > reach:
+      walkers.append((rng, own))
+  return walkers
+
+
+def late_walker_stops(walkers: list, v_ego: float) -> list[Stop]:
+  """The crosswalk hold for late_walkers' walkers: a stop PED_STOP_GAP_M short of the nearest, on the comfortable curve alone
+  (soft: the car is in the junction, and only someone in its path, pedestrian_stops', brakes it harder there)."""
+  if not walkers:
+    return []
+  rng, walker = min(walkers, key=lambda w: w[0])
+  return [stop(v_ego, rng - PED_STOP_GAP_M, CROSSWALK_REASON, False, evidence=track_evidence(walker), soft=True)]
+
+
 def decide(stops: list[Stop], v_ego: float) -> SceneDecision:
   if not stops:
     return SceneDecision()
@@ -600,6 +721,11 @@ class ScenePolicy:
     self.carried: list[Stop] = []        # the last available frame's pedestrian stops, moved with the car since
     self.carried_junction: tuple[int | None, Stop] | None = None  # (maneuver id, its junction hold): reason, confirmed, evidence
     self.junction: Stop | None = None    # the junction hold in force on the last frame
+    # (maneuver id, ScenePolicy.t, the track's evidence) of the last frame a cross-traffic hold's vehicle was seen closing
+    self.cross_seen: tuple[int | None, float, dict | None] | None = None
+    self.cross_logged: int | None = None  # the maneuver a cross-traffic hold was logged for
+    self.late_walker: tuple[int, Stop] | None = None  # (maneuver id, a committed turn's crosswalk hold): late_walker_stops
+    self.late_standing: bool | None = None  # ...whether every walker it is for stands, None with none (holders_standing's)
     self.fault_junction: Stop | None = None  # ...kept through a fault, which lost the route it was for
     self.fault_open = False  # a fault lost the route with the car committed to (or released into) its junction
     self.hard = False  # the last frame braked harder than SPEED_CAP_ACCEL_MIN (hard_brake())
@@ -637,14 +763,15 @@ class ScenePolicy:
   def update(self, objects, available: bool, maneuver, distance: float, v_ego: float, right_hand_traffic: bool = True,
              maneuver_id: int | None = None, gas_pressed: bool = False, dt: float = DT_MDL, extra_stops=(),
              heading_deg: float = 0., path=None, extra_objects=(), driver: bool = False,
-             raw_people: bool | None = None) -> SceneDecision:
+             raw_people: bool | None = None, cross_yield: bool = False) -> SceneDecision:
     """As scene_policy(), plus maneuver_id (RouteFollower.maneuver_id), once per frame dt apart. gas_pressed: the driver
     taking over (turnpilotd: carState.gasPressed with openpilot disengaged), never a go. extra_stops: the map's stop signs
     and signals (map_controls.py), composed with the scene's like any other stop. heading_deg: as scene_policy()'s. path:
     the model's path ahead (scene.tracker.predicted_path: x, y left), None straight ahead, for the curb cap. extra_objects:
     tracker B's b_only objects (module docstring), taken after the scene's, and like them only while it is available.
     driver: the driver has the car (openpilot disengaged, or the gas pressed), which ends person_front and sets none;
-    raw_people: a raw person box of the last detector runs is in front of the car (turnpilotd), None not known (person_front)."""
+    raw_people: a raw person box of the last detector runs is in front of the car (turnpilotd), None not known (person_front).
+    cross_yield: the turn's junction has no mapped control, so the turn yields to the cross traffic tracked (cross_stops)."""
     far_side = far_side_turn(maneuver, right_hand_traffic)
     self.t += dt
     self.odo += v_ego * dt
@@ -663,6 +790,8 @@ class ScenePolicy:
       junction = junction_stops(objects, maneuver, distance, v_ego, right_hand_traffic, lambda obj: self.tracks[obj.trackId].walker,
                                 lambda obj: self.tracks[obj.trackId].confirmed and self.tracks[obj.trackId].leaving >= CROSSWALK_LEAVING_FRAMES,
                                 lambda obj: self.tracks[obj.trackId].confirmed, heading_deg, crosswalk_held)
+      if not junction:
+        junction = self._cross_hold(objects, cross_yield, maneuver, distance, v_ego, right_hand_traffic, maneuver_id, heading_deg)
       self.carried = peds
       self.carried_junction = (maneuver_id, junction[0]) if junction else None
     else:
@@ -674,8 +803,11 @@ class ScenePolicy:
       if self.carried_junction is not None and self.carried_junction[0] == maneuver_id:
         # the hold keeps what its evidence earned: an unconfirmed track's hold stays on the comfortable curve
         h = self.carried_junction[1]
-        junction = hold_line_stop(maneuver, distance, v_ego, h.reason, far_side, h.confirmed, h.evidence,
-                                  crosswalk_held and h.reason == CROSSWALK_REASON)
+        if h.reason == CROSS_REASON:
+          junction = cross_hold_stop(maneuver, distance, v_ego, h.confirmed, h.evidence)
+        else:
+          junction = hold_line_stop(maneuver, distance, v_ego, h.reason, far_side, h.confirmed, h.evidence,
+                                    crosswalk_held and h.reason == CROSSWALK_REASON)
 
     if junction and gas_pressed and maneuver_id is not None and distance - HOLD_LINE_M < GAS_RELEASE_M:
       self.released_id = maneuver_id  # the driver took over and goes: stopping again further in would be worse
@@ -693,6 +825,10 @@ class ScenePolicy:
         self.committed_id = maneuver_id
     if maneuver_id is not None and maneuver_id in (self.released_id, self.committed_id):
       junction = []
+      if maneuver_id != self.released_id:
+        junction = self._late_walker(objects, available, maneuver, distance, v_ego, right_hand_traffic, maneuver_id, dt, heading_deg)
+    else:
+      self.late_walker = None
     self.junction = junction[0] if junction else None
     if self.junction is None or self.junction.reason != CROSSWALK_REASON or maneuver_id is None:
       self.crosswalk_id = None
@@ -706,6 +842,8 @@ class ScenePolicy:
       holders = crosswalk_holders(objects, distance, maneuver.side, lambda obj: self.tracks[obj.trackId].walker,
                                   lambda obj: self.tracks[obj.trackId].confirmed and self.tracks[obj.trackId].leaving >= CROSSWALK_LEAVING_FRAMES)
       self.holders_standing = all(walker_standing(obj) for obj in holders) if holders else None
+      if self.late_walker is not None:
+        self.holders_standing = self.late_standing  # a committed turn's hold: its own walkers (late_walkers)
     front = self.front_update(objects if available else None, v_ego, path, driver, raw_people, dt)
     stops = front + peds + junction + self._fault_hold(available, maneuver, distance, v_ego, gas_pressed, dt) + list(extra_stops)
     stops += self.curb_ped(objects if available else [], v_ego, path, dt)
@@ -713,6 +851,52 @@ class ScenePolicy:
     decision.accel_cap = self.ramp(decision.accel_cap, dt)
     self.hard_brake(decision, stops, v_ego)
     return decision
+
+  def _cross_hold(self, objects, cross_yield: bool, maneuver, distance: float, v_ego: float, right_hand_traffic: bool,
+                  maneuver_id: int | None, heading_deg: float) -> list[Stop]:
+    """The cross-traffic hold this live frame (cross_stops), and for CROSS_CLEAR_S after the last vehicle seen closing by its
+    own motion (a trusted track), on the comfortable curve: the stop-sign go's clear window, so a stream's next car, tracked a
+    moment after the last has passed, finds the car still held and never a little further out each time. A new track's hold
+    ends when its velocity is the tracker's and reads no closing (a parked car first seen at the corner)."""
+    if not cross_yield:
+      self.cross_seen = None
+      return []
+    held = cross_stops(objects, maneuver, distance, v_ego, right_hand_traffic, lambda obj: self.tracks[obj.trackId].confirmed, heading_deg)
+    if held:
+      if self.cross_logged != maneuver_id:
+        self.cross_logged = maneuver_id
+        cloudlog.event("turnpilot.cross_traffic_hold", maneuver_id=maneuver_id, distance=round(distance, 1), v_ego=round(v_ego, 2),
+                       confirmed=held[0].confirmed, **(held[0].evidence or {}))
+      if held[0].evidence['hits'] >= VEL_TRUST_HITS:  # seen closing by its own motion: a new track's hold ends with its doubt
+        self.cross_seen = (maneuver_id, self.t, held[0].evidence)
+      return held
+    seen = self.cross_seen
+    if seen is None or seen[0] != maneuver_id or self.t - seen[1] >= CROSS_CLEAR_S - 1e-6:
+      self.cross_seen = None
+      return []
+    return cross_hold_stop(maneuver, distance, v_ego, False, seen[2])
+
+  def _late_walker(self, objects, available: bool, maneuver, distance: float, v_ego: float, right_hand_traffic: bool,
+                   maneuver_id: int, dt: float, heading_deg: float) -> list[Stop]:
+    """A committed curb-side turn's crosswalk hold this frame (late_walkers, late_walker_stops) on the tracks' kept evidence,
+    and whether everyone it is for stands (late_standing: holders_standing's, for turnpilotd's standoff); the scene gone, the
+    one in force stays, moved with the car, as any stop is carried."""
+    if available:
+      walkers = late_walkers(objects, maneuver, distance, v_ego, right_hand_traffic, lambda obj: self.tracks[obj.trackId].walker,
+                             lambda obj: self.tracks[obj.trackId].confirmed and self.tracks[obj.trackId].leaving >= CROSSWALK_LEAVING_FRAMES,
+                             heading_deg)
+      held = late_walker_stops(walkers, v_ego)
+      self.late_standing = all(walker_standing(obj) for _, obj in walkers) if walkers else None
+    elif self.late_walker is not None and self.late_walker[0] == maneuver_id:
+      h = self.late_walker[1]
+      held = [stop(v_ego, h.d_stop - v_ego * dt, h.reason, h.confirmed, evidence=h.evidence, soft=True)]
+    else:
+      held = []
+    if held and self.late_walker is None:
+      cloudlog.event("turnpilot.late_walker_hold", maneuver_id=maneuver_id, distance=round(distance, 1), v_ego=round(v_ego, 2),
+                     d_stop=round(held[0].d_stop, 2), **(held[0].evidence or {}))
+    self.late_walker = (maneuver_id, held[0]) if held else None
+    return held
 
   def stood_for(self, objects, peds: list[Stop], v_ego: float) -> None:
     """TrackEvidence.stood (module docstring): the track's pedestrian stop braked the car while it moved (its speed cap under
