@@ -19,7 +19,7 @@ control's stop point). From it, per track, for SG4a's and SG4b's decider and for
 - Distance and speed at the pessimistic ends of section 1.2 (stop_rules.fit_track): distance at sLaneMin with the bearing
   rotated toward the camera axis by ANGLE_BOUND, less 2 sigma; speed at sLaneMax with it rotated toward the frame edge, plus 2
   sigma; sigma from the fit's residuals over the trust window, the bearing noise floored at one pixel of the coarsest view
-  among its samples (1/904 rad on a side view). Its speed is trusted after VEL_TRUST_S 1.0 s with 5 samples, its
+  among its samples (1/904 rad on a side view). Its speed is trusted after VEL_TRUST_S 1.0 s with 3 of its last 5 samples (stop_rules.vel_window), its
   deceleration after DECEL_TRUST_S 1.5 s (0 before), tau-dot over that window, and the 1/w box expansion cross-checks it.
 - Its nominal distance and speed (the middle of the s band, the bearing as measured), TTA to our conflict point (nominal and
   at the pessimistic ends), the s-free bearing-rate TTA to the camera's perpendicular foot, -sin(2 psi) / (2 dpsi/dt), as a
@@ -59,7 +59,10 @@ PIXEL_RAD_UNKNOWN = 2.1 / 452.  # a view not listed: the coarsest above
 HISTORY_S = 3.0              # s of matches kept per track (DECEL_TRUST_S and the shield's window inside it)
 DROP_S = 2.0                 # s without a match before a track's history goes (its record stays for the log)
 MOVE_TOL_M = 0.3             # m our car may have moved since a sample for the sample to count in a fit
-CYCLE_GAP_S = 0.3            # s: a gap between matches over this missed a cycle of its view (5 Hz a view in a sweep)
+CYCLE_GAP_S = 0.3            # s: a gap between matches over this missed a cycle of its view (5 Hz a view in a sweep)...
+CYCLE_SLACK = 1.5            # ...or over this times its view's own cadence where it runs slower (the stand schedule's 0.4-0.5 s:
+CYCLE_RUNS = 5               # the median gap of its last CYCLE_RUNS runs, observe_run), to CYCLE_GAP_MAX_S (a view slower than
+CYCLE_GAP_MAX_S = 0.9        # that is not arriving: visibility.CADENCE_FRESH_MAX_S)
 CAR_HALF_LEN_M = 2.3         # m from a side-on car's box bottom centre to its front
 DOWNGRADE_V = 5.0            # m/s, through its line at this or more (STOP_SIGNS.md 4.4, SG4b; validation fails the junction)
 DOWNGRADE_WINDOW_M = 20.     # m before its line it must not have dropped under DOWNGRADE_V
@@ -235,6 +238,24 @@ class StopEvidence:
     self.cache: dict[int, tuple] = {}  # trackId: (its last match's camera time, TrackEvidence): nothing changes between matches
     self.newest_t: float | None = None
     self.d_stop = 0.
+    self.runs: dict[str, deque] = {}  # view: its last CYCLE_RUNS run times (observe_run)
+
+  def observe_run(self, view: str, t: float) -> None:
+    """A detector run of view at camera time t: its cadence, for what a missed cycle is (cycle_gap)."""
+    d = self.runs.setdefault(view, deque(maxlen=CYCLE_RUNS))
+    if not d or t > d[-1] + 1e-6:
+      d.append(t)
+
+  def cycle_gap(self, views) -> float:
+    """s between a track's matches over which it missed a cycle of its views: CYCLE_GAP_S, or CYCLE_SLACK times the
+    slowest of their cadences (the median gap of a view's last runs) where they run slower, to CYCLE_GAP_MAX_S."""
+    gap = CYCLE_GAP_S
+    for v in set(views):
+      ts = list(self.runs.get(v, ()))
+      if len(ts) >= 3:
+        gaps = sorted(b - a for a, b in zip(ts, ts[1:], strict=False))
+        gap = max(gap, min(CYCLE_SLACK * gaps[len(gaps) // 2], CYCLE_GAP_MAX_S))
+    return gap
 
   def set_junction(self, lanes: list[sr.Lane], bound_deg: float, lines: dict | None = None, vision_shield: bool = False) -> None:
     """lanes: the held control's conflicting lanes seen from its stop point (junction_lanes); bound_deg: ANGLE_BOUND;
@@ -337,7 +358,7 @@ class StopEvidence:
         if e is not None:
           # the shield's seen-on-every-cycle reads the newest match of any track, which goes on without this one's: re-checked
           # on every evaluate(), never kept from the cached match (skeptic SG3b q8: kept DROP_S, not CYCLE_GAP_S)
-          if e.shield and self.newest_t is not None and self.newest_t - h[-1].t > CYCLE_GAP_S + 1e-9:
+          if e.shield and self.newest_t is not None and self.newest_t - h[-1].t > self.cycle_gap([h[-1].view]) + 1e-9:
             e = replace(e, shield=False)
           out[tid] = e
         continue
@@ -384,7 +405,8 @@ class StopEvidence:
       vel = [s for s in here if s.t >= last.t - sr.VEL_TRUST_S - 1e-9]
       d_nom, slope = _linfit([s.t for s in vel], [s.x - (s_nom + s.d_stop) for s in vel])
       v_nom = -slope
-      trusted = last.t - here[0].t + 1e-9 >= sr.VEL_TRUST_S and len(vel) >= sr.VEL_TRUST_SAMPLES
+      trusted = last.t - here[0].t + 1e-9 >= sr.VEL_TRUST_S and \
+        len(sr.vel_window([(s.t,) for s in here])) >= sr.VEL_TRUST_MIN_SAMPLES
       fit = sr.TrackFit(d_lo=max((1. - OPP_BAND) * last.x - s_min, 0.) - ln.conflict_m, v_hi=max((1. + OPP_BAND) * v_nom, 0.),
                         v_trusted=trusted)
       tta_foot, ttc = None, None
@@ -402,12 +424,13 @@ class StopEvidence:
     moved = abs(d_nom - st.stop_d) if st.stop_since is not None else 0.
     window = [s for s in here if s.t >= last.t - sr.SHIELD_STOP_S - 1e-9]
     gaps = [b.t - a.t for a, b in zip(window, window[1:], strict=False)]
-    seen_every = (self.newest_t is None or self.newest_t - last.t <= CYCLE_GAP_S) and all(g <= CYCLE_GAP_S + 1e-9 for g in gaps)
+    cycle = self.cycle_gap([s.view for s in window])
+    seen_every = (self.newest_t is None or self.newest_t - last.t <= cycle + 1e-9) and all(g <= cycle + 1e-9 for g in gaps)
     # a cross approach of more than one lane: which lane the car is in isn't known (assign's ground x), so it shields none
     # (skeptic SG3b q2b: a lane-1 car read in lane 2 shielded the lane it hides) until SG4b resolves the lane index
     stops = ln.stopping or (self.vision_shield and sr.stop_mapped(ln.approach))
     shield = stops and at_line and sr.shield_lane_ok(ln.approach) and len(self.cross_lanes_of(ln)) == 1 and \
-      sr.shield_ok(last.cls, stopped_s, fit.v_hi, len([s for s in here if s.t >= last.t - sr.VEL_TRUST_S - 1e-9]), front_from_line,
+      sr.shield_ok(last.cls, stopped_s, fit.v_hi, len(sr.vel_window([(s.t,) for s in here])), front_from_line,
                    seen_every, moved)
     through = self._through(st, ln, here, s_nom, line, last.cls, cross)
     return TrackEvidence(tid, last.cls, ln.role, ln.index, last.view, last.t, len(here), fit.d_lo, fit.v_hi, fit.v_trusted, fit.a_lo,
@@ -438,7 +461,7 @@ class StopEvidence:
       # SPEED_SPAN_S, so one braking hard onto its line still read its approach speed as its front reached the line)
       st.crossed = True
       before = [v for f, v in st.speeds if line - sr.SHIELD_PAST_M <= f <= line + DOWNGRADE_WINDOW_M]
-      trusted = here[-1].t - here[0].t >= sr.VEL_TRUST_S - 1e-9 and len(here) >= sr.VEL_TRUST_SAMPLES
+      trusted = here[-1].t - here[0].t >= sr.VEL_TRUST_S - 1e-9 and len(here) >= sr.VEL_TRUST_MIN_SAMPLES
       st.through = trusted and bool(before) and min(before) >= DOWNGRADE_V and st.speeds[-1][1] >= DOWNGRADE_V
       if st.through:
         st.through_v, st.through_min_v = st.speeds[-1][1], min(before)

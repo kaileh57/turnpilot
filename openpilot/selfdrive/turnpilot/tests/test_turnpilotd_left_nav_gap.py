@@ -107,3 +107,81 @@ def test_a_left_on_its_own_hold_after_a_withdrawn_go_rides_a_gap_in_the_route_to
   plans = drive(sim, 4.)
   assert not said(plans), said(plans)
   assert not any(p.desire == Desire.turnLeft or str(p.controlPrompt) == 'leftGo' for p in plans[int(0.5 / DT_MDL):int(2.6 / DT_MDL)])
+
+
+def gap_on_the_approach(at_m: float, gap_s: float, stream: bool):
+  """LEFT_25 driven from far out, navInstruction invalid for gap_s from the frame the car is at_m from the junction, with a car
+  streaming through the left's band until 40 s (stream) or an empty road. Returns (sim, [(t, s, v, plan, nav invalid)])."""
+  cars = (lambda sim: [(JUNCTION + 40. - (sim.t * 12.) % 45., 3.6)] if sim.t < 40. else []) if stream else (lambda sim: ())
+  sim, st = left_sim(cars), {'t0': None}
+
+  def nav(s, instr):
+    if st['t0'] is None and JUNCTION - s.s < at_m:
+      st['t0'] = s.t
+    return instr, st['t0'] is None or not (st['t0'] <= s.t < st['t0'] + gap_s)
+  sim.nav_filter = nav
+  rows = []
+  while sim.s < JUNCTION + 25. and sim.t < 70.:
+    p = drive(sim, DT_MDL)[0]
+    rows.append((sim.t, sim.s, sim.v, p, st['t0'] is not None and st['t0'] <= sim.t < st['t0'] + gap_s))
+  return sim, rows
+
+
+@pytest.mark.parametrize('at_m', [28., 20., 14.])
+def test_a_gap_in_the_route_while_the_left_brakes_to_its_line_keeps_its_stop_and_its_hold(at_m):
+  # until 2026-11-14 a left braking to its line (the latch not yet set) was dropped on the gap's first invalid message, its
+  # stop with it: the car rolled over its line at 4-5 m/s with the band full, the left skipped tooLate, and sped up straight
+  # across the junction (the matrix's left_unsig|crossL cells: into a crossing car)
+  sim, rows = gap_on_the_approach(at_m, 2.5, stream=True)
+  _, alone = gap_on_the_approach(0., 0., stream=True)
+  assert not any(p.tooFastToTurn for *_, p, _ in rows)
+  assert not said([p for *_, p, _ in rows]), said([p for *_, p, _ in rows])
+  assert not any(p.desire == Desire.turnLeft or str(p.controlPrompt) == 'leftGo' for *_, p, gap in rows if gap)
+  past = next(t for t, s, *_ in rows if s > JUNCTION - 5.)
+  assert past > 40., past  # stood at its line while the band was full, as with the route valid
+  assert abs(past - next(t for t, s, *_ in alone if s > JUNCTION - 5.)) < 0.2
+  assert sim.s > JUNCTION + 10. and abs(sim.heading_deg) > 60.  # then turned
+
+
+@pytest.mark.parametrize('at_m', [28., 14.])
+def test_an_empty_roads_left_braking_into_a_gap_goes_only_on_a_window_after_it(at_m):
+  sim, rows = gap_on_the_approach(at_m, 2.5, stream=False)
+  assert not any(p.tooFastToTurn for *_, p, _ in rows) and not said([p for *_, p, _ in rows])
+  end = max(t for t, *_, gap in rows if gap)
+  go = next(t for t, *_, p, _ in rows if p.desire == Desire.turnLeft)
+  assert go > end, (go, end)
+  assert sim.s > JUNCTION + 10. and abs(sim.heading_deg) > 60.
+
+
+@pytest.mark.parametrize('frm', ['left', 'right'])
+def test_a_t_stems_left_through_a_gap_in_the_route_pulses_and_holds_for_cross_traffic_as_with_the_route_valid(frm):
+  # the matrix's +3 R2 against 31581b3dd (left_nocontrol_T|crossL/crossR|navInvalid25): its turn desire's repeat and entry
+  # edges with the cross car tracked are the route-valid run's, 0.6 s later (the first pulse waits for the route back); the
+  # older tree skipped this turn in the gap, so it had none to flag. The cross hold stays in force
+  from openpilot.selfdrive.turnpilot.scene_policy import CROSS_REASON
+  from openpilot.selfdrive.turnpilot.tests import test_turnpilotd_cross_traffic as ct
+  cross_at = ct.meets('left', frm)
+
+  def run(gap: bool):
+    sim, st, rows = ct.turn('left'), {'t0': None}, []
+
+    def nav(s, instr):
+      if st['t0'] is None and ct.JUNCTION - s.s < 60.:
+        st['t0'] = s.t
+      return instr, not gap or st['t0'] is None or not (st['t0'] <= s.t < st['t0'] + 2.5)
+    sim.nav_filter = nav
+    while sim.s < ct.JUNCTION + 20. and sim.t < 60.:
+      plan = sim.step(ct.cross_car(sim, cross_at, frm), engaged=True)
+      rows.append((sim.t, sim.s, sim.v, plan, gap and st['t0'] is not None and st['t0'] <= sim.t < st['t0'] + 2.5))
+    rises = [k for k in range(1, len(rows)) if rows[k][3].desire == Desire.turnLeft and rows[k - 1][3].desire != Desire.turnLeft]
+    return sim, rows, rises
+  _, valid, valid_rises = run(False)
+  sim, rows, rises = run(True)
+  assert not any(rows[k][4] for k in rises)  # nothing pulsed while the route is gone
+  assert len(rises) == len(valid_rises)
+  edge = ct.JUNCTION - 3.6
+  for r in (valid, rows):
+    assert ct.bumper_as_it_crosses([x[:4] for x in r], cross_at) < edge
+    held = [x for x in r if str(x[3].reason) == CROSS_REASON]
+    assert held and held[0][0] < cross_at - 2.5
+  assert sim.s >= ct.JUNCTION + 20. and not said([x[3] for x in rows])

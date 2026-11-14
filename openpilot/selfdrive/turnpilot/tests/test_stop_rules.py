@@ -371,6 +371,20 @@ class TestTracks:
     assert fit.v_trusted
     assert sr.u2_state(fit) == 'notStopping'
 
+  @pytest.mark.parametrize('hz', [5., 2.5, 2.2, 2., 1.67, 1.25])
+  def test_a_track_on_a_view_slower_than_5_hz_has_its_speed_trusted_standing_and_moving(self, hz):
+    # a car only a side view sees at the stand schedule's 2-2.5 a second (a loaded device's 1.25) has under 5 matches in
+    # 1 s: its speed was never trusted, so one standing in a cross lane was taken as coming at v_c and held the stop sign's
+    # go for good ("a car from the left"). Its last 5 matches within 2 s, trusted on 3 of them: standing reads standing...
+    still = sr.fit_track(self.samples(15., 0., dur=3., hz=hz), 10., 10., 0.)
+    assert still.v_trusted and still.v_hi < sr.SHIELD_V
+    # ...and one coming still reads its speed, never less
+    moving = sr.fit_track(self.samples(60., 10., dur=3., hz=hz), 10., 10., 0.)
+    assert moving.v_trusted and moving.v_hi == pytest.approx(10., abs=0.6) and moving.v_hi >= 10. - 0.05
+    assert not sr.tracked_ok(sr.fit_track(self.samples(40., 10., dur=3., hz=hz), 10., 10., 0.), 'straight', sr.t_cue(2.), 13.)
+    # a new track is still untrusted: under 1 s of history, or fewer than 3 matches
+    assert not sr.fit_track(self.samples(80., 10., dur=0.9, hz=hz), 10., 10., 0.).v_trusted
+
   def test_a_new_track_is_untrusted_whatever_its_range(self):
     fit = sr.fit_track(self.samples(80., 10., dur=0.6), 10., 10., 0.)
     assert not fit.v_trusted
@@ -416,10 +430,12 @@ class TestTracks:
   def test_shield(self):
     ok = {'kind': 'car', 'stopped_s': 1.2, 'v_hi': 0.2, 'samples': 6, 'front_from_line_m': -1.0, 'seen_every_cycle': True, 'moved_m': 0.1}
     assert sr.shield_ok(**ok)
-    for k, v in (('kind', 'bicycle'), ('kind', 'motorcycle'), ('stopped_s', 0.8), ('v_hi', 0.6), ('samples', 4),
+    for k, v in (('kind', 'bicycle'), ('kind', 'motorcycle'), ('stopped_s', 0.8), ('v_hi', 0.6), ('samples', 2),
                  ('front_from_line_m', -3.5), ('front_from_line_m', 2.5), ('seen_every_cycle', False), ('moved_m', 0.35)):
       assert not sr.shield_ok(**dict(ok, **{k: v})), (k, v)
     assert sr.shield_ok(**dict(ok, kind='truck')) and sr.shield_ok(**dict(ok, kind='bus'))
+    # its samples are its vel_window's (3 of its last 5 where its view runs slower than 5 Hz: the stand schedule's side views)
+    assert sr.shield_ok(**dict(ok, samples=sr.VEL_TRUST_MIN_SAMPLES))
 
 
 def utc(*a):

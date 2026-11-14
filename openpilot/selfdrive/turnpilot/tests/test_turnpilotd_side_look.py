@@ -371,3 +371,87 @@ def test_a_car_first_boxed_just_after_the_stand_holds_a_right_at_an_unread_light
 def test_an_empty_junction_waits_no_longer_for_the_side_run_count():
   sim, _, rows, _ = right_on_red(lambda s, t: [])
   assert went(sim, rows) == pytest.approx(2.55, abs=0.06)  # RIGHT_RED_UNREAD_S and its reads, as before the count
+
+
+@pytest.mark.parametrize('periods', [(4,), (8,), (9,), (10,), (9, 10), (12,), (16,)],
+                         ids=['0.20', '0.40', '0.45', '0.50', 'everyOther0.50', '0.60', '0.80'])
+def test_a_car_standing_in_a_cross_lane_only_its_side_view_sees_never_holds_a_stop_sign_for_good(tmp_path, periods):
+  # a car standing in the near cross lane 15 m up, boxed only by the left side view: at 5 a second its speed is trusted
+  # standing; at the stand schedule's 2-2.5 a second (or slower) it had under 5 matches a second, was never trusted and was
+  # taken as coming at v_c, so the stop sign held for good saying "a car from the left" (stop_rules.vel_window). It goes,
+  # within the creeps for a view past it and the limited view's look (the car hides the lane behind it), never handed back
+  from openpilot.selfdrive.turnpilot.tests.test_turnpilotd_stop import go_frame, run_to_line
+  from openpilot.selfdrive.turnpilot.tests.test_turnpilotd_stop_night import crossing, handed_back
+  from openpilot.selfdrive.turnpilot.tests.test_turnpilotd_vision import arrived, vsim
+  sim = vsim(tmp_path)
+  sim.cadence = StandCadence(periods)
+  sim.step = stand_step.__get__(sim)
+  run_to_line(sim)
+  sim.tracks, _ = crossing(d0=15., v=0., t_from=0.)
+  sim.run(30.)
+  plans = sim.plans()
+  k, a = go_frame(sim), arrived(plans)
+  # within about 3 s of the junction with no side views: its shield formed at the view's own cadence (stop_evidence
+  # cycle_gap; 14.6-19 s of creeps for a view before), or the earlier arrival's turn taken and the limited look
+  # (at 0.50 s it stood at its line before our arrival: the all-way's earlier arrival, its turn not taken in DEADLOCK_S, as at
+  # 5 Hz's 7.75 s)
+  assert k is not None and (k - a) * DT_MDL < 9.5, ((k - a) * DT_MDL if k else None, sorted({p.reason for p in plans[a:]}))
+  assert not handed_back(plans)
+  assert not any('a car from' in p.reason for p in plans[a:k])
+
+
+def test_a_creep_for_a_view_ends_where_the_car_is_once_the_view_it_was_for_is_back(tmp_path):
+  # a car standing 25 m up the near cross lane (short of its line: no shield) hides it; the creep for a view starts, and the car drives
+  # off a moment later. The step went on to its target and its measure (2.3 s at a stop sign a crossing car had just
+  # left, the side views' L5 cells), narrowing the other side's view as it went: it now ends where the car is the frame
+  # every lane meets its floor, and the window runs from there
+  from openpilot.selfdrive.turnpilot.stop_go import VIEW_CREEP_REASON
+  from openpilot.selfdrive.turnpilot.tests.test_turnpilotd_stop import go_frame, run_to_line
+  from openpilot.selfdrive.turnpilot.tests.test_turnpilotd_stop_night import crossing, handed_back
+  from openpilot.selfdrive.turnpilot.tests.test_turnpilotd_vision import arrived, vsim
+  sim = vsim(tmp_path)
+  sim.cadence = StandCadence((9, 10))
+  sim.step = stand_step.__get__(sim)
+  run_to_line(sim)
+  standing, _ = crossing(d0=25., v=0., t_from=0.)
+  crept = {}
+
+  def tracks(s):
+    plans = s.plans()
+    if plans and plans[-1].reason == VIEW_CREEP_REASON:
+      crept.setdefault('t', s.t)
+      crept.setdefault('s', s.s)
+    return [] if 't' in crept and s.t - crept['t'] >= 0.3 else standing(s)
+  sim.tracks = tracks
+  sim.run(14.)
+  plans = sim.plans()
+  k, a = go_frame(sim), arrived(plans)
+  assert 't' in crept and k is not None and not handed_back(plans)
+  creeping = [i for i in range(a, k) if plans[i].reason == VIEW_CREEP_REASON]
+  # the car gone 0.3 s into the step: the step over within a stand schedule's pass or two of it, never its whole 2.3 s
+  assert len(creeping) * DT_MDL < 1.0, len(creeping) * DT_MDL
+
+
+@pytest.mark.parametrize('periods', [(8,), (9,), (10,)], ids=['0.40', '0.45', '0.50'])
+@pytest.mark.parametrize('parked', [False, True], ids=['empty', 'parked'])
+def test_a_stop_sign_with_a_parked_car_in_view_goes_as_soon_as_an_empty_one_at_the_stand_cadence(tmp_path, periods, parked):
+  # a car parked 25 m past the junction on the far side, boxed still on every full pass (38 m out, 10 deg left): it caps the
+  # opposite lane's walk (the 3.5 deg bound) short of its floor. It stood for good (never steady at 2.3 a second), then took
+  # three 0.5 m creeps for a view that each showed 0.25 m more (12-15 s); now the walk predicts no stand shows enough and
+  # the car goes on the limited look, within 3 s of an empty junction
+  from openpilot.selfdrive.turnpilot.scene.tracker import RawBox
+  from openpilot.selfdrive.turnpilot.tests.test_turnpilotd_stop import go_frame, run_to_line
+  from openpilot.selfdrive.turnpilot.tests.test_turnpilotd_stop_night import handed_back
+  from openpilot.selfdrive.turnpilot.tests.test_turnpilotd_vision import arrived, vsim
+  sim = vsim(tmp_path)
+  sim.cadence = StandCadence(periods)
+  sim.step = stand_step.__get__(sim)
+  b = 10.4
+  box = RawBox('wide', 'car', 0.6, b, (b - 1.3, b + 1.3), (38.3, 7.0), 36.4, (), 'full')
+  sim.boxes = lambda s: {'full': [box]} if parked else {}
+  run_to_line(sim)
+  sim.run(20.)
+  plans = sim.plans()
+  k, a = go_frame(sim), arrived(plans)
+  assert k is not None and not handed_back(plans)
+  assert (k - a) * DT_MDL < (8. if parked else 4.), ((k - a) * DT_MDL, sorted({p.reason for p in plans[a:k]}))

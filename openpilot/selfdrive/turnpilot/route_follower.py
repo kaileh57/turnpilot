@@ -408,9 +408,9 @@ class RouteFollower:
     junction_hold: the current maneuver is a turn in hand, its desire not out yet (turnpilotd.turn_in_hand: a curb-side TURN
     TurnPilot acts on inside turn_speed.TURN_CAP_LEAD_M): held through a gap as a committed one is, but never against a new
     route that doesn't turn there, and with a short outlier's re-baselining kept (module docstring);
-    line_hold: the current maneuver is a turn held standing at its line (turnpilotd: the unprotected left's latch, not gone):
-    an invalid run is a gap (nav_gap while it lasts) up to NAV_STALE_S from its first message, never past it, and anything
-    else as for any turn."""
+    line_hold: the current maneuver is an unprotected turn in hand, not gone (turnpilotd: the left's map control, braking to
+    its line or latched standing at it): an invalid run is a gap (nav_gap while it lasts) up to NAV_STALE_S from its first
+    message, never past it, and anything else as for any turn."""
     self.passed = self.replaced = False
     if right_hand_traffic is not None:
       self.right_hand_traffic = bool(right_hand_traffic)

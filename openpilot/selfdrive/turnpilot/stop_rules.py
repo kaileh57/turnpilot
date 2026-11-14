@@ -47,6 +47,11 @@ VALIDATE_DROPOUT_S = CLEAR_S / 3.  # s, the longest detection gap a validation c
 VALIDATE_CARS = 10        # cross motor vehicles per binding side a validation needs
 DET_FRESH_S = 0.45        # s of camera time a view counts as fresh
 VEL_TRUST_S, VEL_TRUST_SAMPLES = 1.0, 5
+# A track seen on a view slower than 5 a second (a side view or the full pass at a stand, 0.4-0.8 s a run) has under
+# VEL_TRUST_SAMPLES matches in VEL_TRUST_S: its speed is fitted over its last VEL_TRUST_SAMPLES matches within VEL_TRUST_MAX_S
+# instead, and trusted on VEL_TRUST_MIN_SAMPLES of them (vel_window)
+VEL_TRUST_MIN_SAMPLES = 3
+VEL_TRUST_MAX_S = 2.0
 DECEL_TRUST_S = 1.5
 TAU_DOT_MIN = -0.4        # Lee (1976) -0.5 plus margin
 TAU_AGREE = 0.30          # box-expansion time to contact within 30% of the bearing TTA
@@ -756,7 +761,7 @@ class TrackFit:
   """A track's position and speed along its lane at the pessimistic ends (1.2, 1.7)."""
   d_lo: float                 # m to our conflict point: sLaneMin, bearing rotated toward the axis, less 2 sigma
   v_hi: float                 # m/s toward it: sLaneMax, bearing rotated toward the edge, plus 2 sigma (0 or more)
-  v_trusted: bool             # VEL_TRUST_S of history with VEL_TRUST_SAMPLES samples
+  v_trusted: bool             # VEL_TRUST_S of history with VEL_TRUST_MIN_SAMPLES samples in its vel_window
   a_lo: float = 0.            # m/s^2 of braking, lower bound; 0 until DECEL_TRUST_S
   a_trusted: bool = False
   tau_dot: float | None = None
@@ -806,6 +811,18 @@ def _quadfit(ts, ys):
   return coef[2], math.sqrt(max(s2 * cof / dm, 0.))
 
 
+def vel_window(samples) -> list:
+  """The matches (time-sorted, t first) a track's speed is fitted over: those of the last VEL_TRUST_S, or where its views run
+  slower than VEL_TRUST_SAMPLES in that, its last VEL_TRUST_SAMPLES within VEL_TRUST_MAX_S. Trusted (fit_track) once the
+  track is VEL_TRUST_S old with VEL_TRUST_MIN_SAMPLES of them: at 5 a second as before, and a car only a side view sees at
+  the stand schedule's 2-2.5 a second has its speed (untrusted, it was taken as coming at v_c for as long as it stood)."""
+  t_end = samples[-1][0]
+  vel = [s for s in samples if s[0] >= t_end - VEL_TRUST_S - 1e-9]
+  if len(vel) < VEL_TRUST_SAMPLES:
+    vel = [s for s in samples[-VEL_TRUST_SAMPLES:] if s[0] >= t_end - VEL_TRUST_MAX_S - 1e-9]
+  return vel
+
+
 def fit_track(samples, s_min: float, s_max: float, bound_deg: float, conflict_m: float = 0., pixel_rad: float = 1. / 904.) -> TrackFit:
   """A TrackFit from samples [(t camera time s, bearing deg off the axis toward the car's side, box width px or None)] of
   one track on a lane crossing our path at s_min..s_max (1.7). Distance at sLaneMin with the bearing rotated toward the
@@ -826,8 +843,8 @@ def fit_track(samples, s_min: float, s_max: float, bound_deg: float, conflict_m:
   last = samples[-1]
   d_lo_now = d_at(s_min, last[1], -1.) - conflict_m
   sig_floor = floor_sigma(s_max, last[1])
-  vel = [s for s in samples if s[0] >= t_end - VEL_TRUST_S - 1e-9]
-  v_trusted = span + 1e-9 >= VEL_TRUST_S and len(vel) >= VEL_TRUST_SAMPLES
+  vel = vel_window(samples)
+  v_trusted = span + 1e-9 >= VEL_TRUST_S and len(vel) >= VEL_TRUST_MIN_SAMPLES
   if len(vel) >= 2:
     ts = [s[0] for s in vel]
     _, slope, s_last, s_slope = _linfit(ts, [d_at(s_max, s[1], 1.) for s in vel])
@@ -904,10 +921,10 @@ def shield_lane_ok(approach) -> bool:
 
 def shield_ok(kind: str, stopped_s: float, v_hi: float, samples: int, front_from_line_m: float, seen_every_cycle: bool,
               moved_m: float) -> bool:
-  """The shield (2.3): a motor vehicle stopped SHIELD_STOP_S (trusted speed under SHIELD_V, VEL_TRUST_SAMPLES samples) with
+  """The shield (2.3): a motor vehicle stopped SHIELD_STOP_S (trusted speed under SHIELD_V, VEL_TRUST_MIN_SAMPLES samples in its vel_window) with
   its front within its line region (front_from_line_m: + past its stop point), seen on every cycle of its view, not moved
   SHIELD_MOVE_M."""
-  return (kind in SHIELD_KINDS and stopped_s >= SHIELD_STOP_S and v_hi < SHIELD_V and samples >= VEL_TRUST_SAMPLES and
+  return (kind in SHIELD_KINDS and stopped_s >= SHIELD_STOP_S and v_hi < SHIELD_V and samples >= VEL_TRUST_MIN_SAMPLES and
           -SHIELD_BEFORE_M <= front_from_line_m <= SHIELD_PAST_M and seen_every_cycle and moved_m < SHIELD_MOVE_M)
 
 

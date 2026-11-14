@@ -56,6 +56,11 @@ CADENCE_SLACK = 1.5
 CADENCE_FRESH_MAX_S = 0.9
 STEADY_BEARING_DEG, STEADY_WIDTH = 0.3, 0.05
 STEADY_PERIOD_S = 0.25          # s: the steady history must reach back STEADY_S less about one 5 Hz period
+# A view slower than 5 a second (the wide camera's full pass at a stand, 2-2.5 a second, under 1.25 on a loaded device) has
+# under STEADY_SAMPLES runs in STEADY_S: its box is steady on every run over the last STEADY_S or its last STEADY_MIN_RUNS
+# runs, whichever reaches further back, with the span and STEADY_MIN_RUNS of them; the history keeps STEADY_KEEP_S
+STEADY_MIN_RUNS = 3
+STEADY_KEEP_S = STEADY_S + (STEADY_MIN_RUNS - 1) * CADENCE_FRESH_MAX_S
 RAW_BLOCK_CONF = 0.35
 RAW_HORIZON_DEG = 2.
 RAW_LONG_DEG = 50.              # deg: past this a box's ground range reads up to RAW_LONG times long (verify.md finding 3)
@@ -170,7 +175,7 @@ class LiveVisibility:
       self.raw[key] = raw
       h = self.history.setdefault(key, deque())
       h.append((t, list(raw.boxes)))
-      while h and h[0][0] < t - STEADY_S - STEADY_PERIOD_S:
+      while h and h[0][0] < t - STEADY_KEEP_S:
         h.popleft()
     side = {'sideLeft': 'left', 'sideRight': 'right'}.get(key)
     if side is not None:
@@ -233,21 +238,24 @@ class LiveVisibility:
     return next((q for q in CAMERA_BLIND if q in bad), None) or min(bad, default='')
 
   def steady(self, key: str, box) -> bool:
-    """box held still in its view's runs for STEADY_S (module docstring)."""
+    """box held still in its view's runs for STEADY_S (module docstring): on every run of the last STEADY_S, or of its last
+    STEADY_MIN_RUNS runs where the view runs slower (the stand schedule's full pass), its history reaching back STEADY_S less
+    STEADY_PERIOD_S. A run without it, or moved, and it is not."""
     h = self.history.get(key)
     if not h:
       return False
     t_now = h[-1][0]
+    since = min(t_now - STEADY_S, h[max(len(h) - STEADY_MIN_RUNS, 0)][0]) - 1e-9
     width = abs(box.span_deg[1] - box.span_deg[0])
     hits = []
     for t, boxes in h:
-      if t < t_now - STEADY_S - 1e-9:
+      if t < since:
         continue
       if not any(abs(b.bearing_deg - box.bearing_deg) <= STEADY_BEARING_DEG and
                  abs(abs(b.span_deg[1] - b.span_deg[0]) - width) <= STEADY_WIDTH * max(width, 1e-6) for b in boxes):
         return False
       hits.append(t)
-    return len(hits) >= STEADY_SAMPLES and t_now - hits[0] >= STEADY_S - STEADY_PERIOD_S
+    return len(hits) >= min(STEADY_SAMPLES, STEADY_MIN_RUNS) and t_now - hits[0] >= STEADY_S - STEADY_PERIOD_S
 
   # ----------------------------------------------------------------------------------------------------------- lanes
 

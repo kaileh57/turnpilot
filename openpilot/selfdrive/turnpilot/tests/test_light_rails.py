@@ -1,5 +1,6 @@
 """The lights' rail through map_controls and the camera's reader: a governing red that is read always stops the car, and
 nothing that is not this movement's read green lets it go. The camera add-only and no accepted source, as the car ships."""
+import itertools
 import math
 from dataclasses import replace
 
@@ -675,6 +676,35 @@ def test_a_red_read_again_after_a_rights_go_stops_it_again_at_the_cameras_own_si
   assert car.s > JUNCTION + 5. and car.policy.camera_signal is None
 
 
+def test_a_red_read_again_past_the_line_faster_than_a_creep_stops_the_right_where_a_firm_stop_still_fits():
+  # read red again 1.4 m over the line at 2.2 m/s (over COMMIT_SPEED): a stop at RED_DECEL after RED_LAG_S still ends
+  # inside RED_PAST_M, short of the first cross lane, so the right stops there and stands for the red
+  car, lit, past, v = right_gone_on_red(1.4)
+  assert 1. < past < 2. and v > mc.COMMIT_SPEED and mc.red_stop_fits(v, -past)
+  for _ in range(int(10. / DT_MDL)):
+    out, dec, _ = car.step(lights=lit)
+  st = car.policy.tracker.controls[(1, 0)].state
+  assert held(out, dec) and car.v < 0.05 and car.s < LINE + mc.RED_PAST_M and not st.done
+  assert out.stops[0].reason == mc.RED_PAST_REASON
+
+
+def test_a_red_read_again_after_a_second_go_from_a_stand_past_the_line_stops_it_again():
+  # the first red read again stands the car 2 m over its line (past_red); unread again, its right-on-red go from there, and
+  # the red read again more than OVERRUN_PAST_M past the line: still a stop, ending inside RED_PAST_M
+  car, lit, past, v = right_gone_on_red(1.2)
+  car.run(10., lights=lit)
+  st = car.policy.tracker.controls[(1, 0)].state
+  stand = car.s - LINE
+  assert mc.LATCH_PAST_M - 0.2 < stand < mc.RED_PAST_M and car.v < 0.05 and st.past_red and not st.done
+  car.run_until(lambda out, dec: not held(out, dec), max_s=20., lights=cam_heads(('unknown', HEAD)))
+  assert st.cause == 'rightOnRed'
+  car.run_until(lambda out, dec: car.s - LINE > mc.OVERRUN_PAST_M + 0.1, max_s=5., lights=cam_heads(('unknown', HEAD)))
+  assert car.s - LINE > mc.OVERRUN_PAST_M and mc.red_stop_fits(car.v, LINE - car.s)
+  for _ in range(int(10. / DT_MDL)):
+    out, dec, _ = car.step(lights=lit)
+  assert held(out, dec) and car.v < 0.05 and car.s < LINE + mc.RED_PAST_M and not st.done
+
+
 def test_a_red_read_again_once_the_right_is_past_stopping_short_finishes_the_turn():
   car, lit, past, v = right_gone_on_red(3.)
   assert v > mc.COMMIT_SPEED and not mc.red_stop_fits(v, -past)
@@ -702,6 +732,86 @@ def test_three_greens_in_one_burst_are_no_steady_green():
   assert g.steady
   g.update(False, False, 3, 0.1)  # the last read no longer one in hand
   assert not g.steady
+
+
+RUNS = itertools.count(1)  # the reader's run numbers
+
+
+def bursts(g, plan, dt=0.1, bridge=True):
+  """Feed GreenReads g a 10 Hz reader at a stand (bridge): plan [(seconds, read)], read None (no colour read), ('green',
+  [(reader id, m, bearing)]), ('red',): a red for it, or ('contra',): a red or yellow at another range. Returns steady after
+  each frame."""
+  out = []
+  for seconds, read in plan:
+    for _ in range(int(round(seconds / dt))):
+      run = next(RUNS)
+      if read is None:
+        g.update(False, False, run, dt, heads=[], bridge=bridge)
+      elif read[0] == 'green':
+        g.update(True, False, run, dt, heads=read[1], bridge=bridge)
+      elif read[0] == 'red':
+        g.update(False, True, run, dt, heads=[], bridge=bridge)
+      else:
+        g.update(False, False, run, dt, heads=[], contra=True, bridge=bridge)
+      out.append(g.steady)
+  return out
+
+
+HEAD4 = [(4, 30., 0.)]          # one head, the reader's id 4, 30 m on, dead ahead
+HEAD4_AGAIN = [(9, 30.4, 0.2)]  # the same head boxed again after a gap: a new id (HEAD_DROP_S), the same place
+OTHER = [(7, 45., 0.)]          # another head: the next junction's
+
+
+def test_a_green_read_in_short_bursts_at_a_stand_is_steady_once_its_bursts_have_spanned_a_second():
+  # bursts of 0.6 s (a night lamp just over the floor) 3.2 s apart: the gap counts for nothing, so the second burst
+  # releases once its own span and the first's sum to CAMERA_GREEN_STEADY_S, never on its first read
+  for again in (HEAD4, HEAD4_AGAIN):
+    g = GreenReads()
+    assert not any(bursts(g, [(0.6, ('green', HEAD4)), (3.2, None)]))
+    st = bursts(g, [(1.0, ('green', again))])
+    k = st.index(True)
+    assert k >= 1 and abs(0.5 + k * 0.1 - mc.CAMERA_GREEN_STEADY_S) < 1e-6 and g.k >= mc.CAMERA_GREEN_BURST
+
+
+@pytest.mark.parametrize("between", [('red',), ('contra',)])
+def test_any_red_read_in_a_bursts_gap_starts_its_green_over(between):
+  # one red read anywhere in the gap (this signal's, or a head at another range): the next burst counts from nothing, and
+  # a 0.6 s burst alone is no steady green, as before
+  g = GreenReads()
+  bursts(g, [(0.6, ('green', HEAD4)), (1.6, None), (0.1, between), (1.5, None)])
+  assert not any(bursts(g, [(0.6, ('green', HEAD4))]))
+
+
+def test_a_green_on_another_head_after_a_gap_is_no_carried_green():
+  # a head read green in a burst, gone; another head (the next junction's) read green after the gap: counted from
+  # nothing, so a burst of it under CAMERA_GREEN_STEADY_S releases nothing, as before
+  g = GreenReads()
+  bursts(g, [(0.6, ('green', HEAD4)), (3.2, None)])
+  assert not any(bursts(g, [(0.6, ('green', OTHER))]))
+  # ...and a red head dropping out, then a green head appearing: no release until the green alone is steady
+  g = GreenReads()
+  bursts(g, [(1.0, ('red',)), (2.0, None)])
+  st = bursts(g, [(1.5, ('green', OTHER))])
+  assert st.index(True) * 0.1 >= mc.CAMERA_GREEN_STEADY_S - 1e-6
+
+
+def test_one_read_bursts_long_gaps_a_moving_car_and_reads_with_no_heads_carry_nothing_across_a_gap():
+  g = GreenReads()
+  for _ in range(5):  # one read every 2 s: a single flicker is never a burst
+    assert not any(bursts(g, [(0.1, ('green', HEAD4)), (1.9, None)]))
+  g = GreenReads()
+  bursts(g, [(0.6, ('green', HEAD4)), (mc.CAMERA_GREEN_BRIDGE_S + 0.2, None)])  # a gap past the bridge's reach
+  assert not any(bursts(g, [(0.6, ('green', HEAD4))]))
+  g = GreenReads()
+  for _ in range(4):  # moving (no stand): as before, a gap starts it over
+    assert not any(bursts(g, [(0.6, ('green', HEAD4)), (3.2, None)], bridge=False))
+  g = GreenReads()
+  run = 0
+  for _ in range(5):  # a source that says nothing of its heads (the left's latch, the rolling left): as before
+    for k in range(40):
+      run += 1
+      g.update(k < 6, False, run, 0.1)
+      assert not g.steady
 
 
 def test_a_camera_signal_a_red_raised_outlives_the_route():

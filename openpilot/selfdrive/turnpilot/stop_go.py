@@ -1259,6 +1259,8 @@ class StopGo:
 
   def _feed(self, f: Frame, pos: float) -> None:
     """The tracks into the decider's evidence (once a frame), the runs into the views' ages and the signal-head check."""
+    for key, t_run, _raw, _sectors in f.runs or ():
+      self.evidence.observe_run(key, t_run)  # each view's cadence: a missed cycle of a slower view (StopEvidence.cycle_gap)
     self.evidence.observe(f.tracks or (), d_stop=-pos)
     # only the tracks the tracker publishes now (it coasts a missed one SWEEP_COAST_S): StopEvidence ages a history against
     # its newest sample, so with no tracks left nothing would age out. An earlier arrival that vanishes stays waiting
@@ -3077,6 +3079,10 @@ class StopGo:
         continue
       if not e.v_trusted or (tid in self.standing and self.t - self.standing[tid] < SETTLE_S - 1e-6):
         return True
+      # standing at its line, its shield in the making again (our own creep restarted its evidence): not judged yet
+      if tid in self.standing and tid not in self.parked and e.stopped_at_line and not e.shield and \
+         e.stopped_s < sr.SHIELD_STOP_S + 1e-6:
+        return True
     return False
 
   def _step_shows_more(self, f: Frame, pos: float) -> bool:
@@ -3090,7 +3096,13 @@ class StopGo:
     b = self._binding()
     if b is None:
       return False
-    if b.binding == 'occluder':
+    # an occluder whose ground range the walk trusts (under OCCLUDER_RANGE_TRUST_DEG) is re-seen from each stand
+    # (visibility.occluders), so it is judged as any binding: a step only where the furthest stand looks far enough past it
+    # (a car parked beyond the junction took three 0.5 m steps that each showed 0.25 m more, 12-15 s at a stop sign, then
+    # the same limited go). One the walk can't place (bearing-only: a car at the corner) may be looked past by a step
+    live = f.live
+    if b.binding == 'occluder' and (live is None or not hasattr(live, 'occluders') or
+                                    any(o.range_m is None for o in live.occluders(f.tracks or ()))):
       return True
     lanes = self.junction_lanes(f)
 
@@ -3150,7 +3162,11 @@ class StopGo:
         d.go_cause = 'creep'
       moved = float(getattr(ctl.state, 'moved_m', 0.))
       vc['moved'] = vc['moved'] or f.v_ego > STAND_V
-      there = moved >= vc['target'] - CREEP_AT_M - 1e-6
+      # under vision a step for a view whose every lane now meets its floor (the car that hid it gone) is over where the car
+      # is: on, it gains nothing and only narrows the other side's view, and the window waits for it (2.3 s at a stop sign
+      # a crossing car had just left)
+      there = moved >= vc['target'] - CREEP_AT_M - 1e-6 or \
+        (self.vision and vc.get('view') and not any(h.key.startswith('reach:') for h in holds))
       if (standing and (there or (vc['moved'] and self.t - vc['t'] > STOP_DWELL_S))) or self.t - vc['t'] >= DEADLOCK_CREEP_MAX_S - 1e-6:
         self.view_steps += 1
         vc.update(phase='measure', t_measure=self.t)

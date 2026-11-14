@@ -16,7 +16,7 @@ from openpilot.selfdrive.turnpilot import visibility_table as vt
 from openpilot.selfdrive.turnpilot.scene.tracker import RawBox, RawFrame
 from openpilot.selfdrive.turnpilot.stop_evidence import junction_lanes
 from openpilot.selfdrive.turnpilot.tests.test_stop_evidence import junction
-from openpilot.selfdrive.turnpilot.visibility import CAMERA_BLIND, VISION_ACCEPT, LiveVisibility, ray_lane_d
+from openpilot.selfdrive.turnpilot.visibility import CAMERA_BLIND, STEADY_PERIOD_S, STEADY_S, VISION_ACCEPT, LiveVisibility, ray_lane_d
 
 SETBACK, HEIGHT = 1.9, 1.3
 ROT = sr.angle_bound(False)  # 3.5 deg: section 2.8's unsurveyed geometry
@@ -369,6 +369,31 @@ def test_a_steady_raw_box_becomes_an_occluder_and_stops_blocking():
   lv.observe_run('sideLeft', t, raw=RawFrame([raw_box(b - 1.5, conf=0.36)], 'wide', t, 'sideLeft'), sectors=sectors('sideLeft'))
   x = lane_of(report(lv), 'left')
   assert x.blockers and x.why != 'occluder'
+
+
+def _steady_after(period_s: float, rate_deg_s: float = 0., runs_s: float = 3.) -> list:
+  """The full pass at period_s a run (the stand schedule's 0.4-0.5 s, a loaded device's 0.8), a parked car 38 m out at 10
+  deg left on every run, its bearing drifting rate_deg_s: whether it reads steady after each run."""
+  lv, out = LiveVisibility(), []
+  for k in range(int(runs_s / period_s) + 1):
+    t = T + k * period_s
+    b = raw_box(10.4 + rate_deg_s * k * period_s, xy=(38.3, 7.0), width_deg=2.6, view='full')
+    lv.observe_run('full', t, raw=RawFrame([b], 'wide', t, 'full'))
+    out.append((k * period_s, lv.steady('full', b)))
+  return out
+
+
+@pytest.mark.parametrize('period_s', [0.2, 0.4, 0.43, 0.45, 0.5, 0.6, 0.8])
+def test_a_parked_cars_box_reads_steady_at_every_cadence_of_its_view_and_a_moving_ones_never(period_s):
+  # the stand schedule runs the full pass 2.2-2.4 times a second: five runs in 1 s never came, so a parked car beyond the
+  # junction stayed a blocker of the cross lane its ray meets and the car stood for good ("Waiting: something from the left")
+  seq = _steady_after(period_s)
+  first = next(t for t, s in seq if s)
+  assert first <= max(1.0, 2 * period_s) + 1e-6, f"{period_s} s a run: steady only {first:.2f} s in"
+  assert all(s for t, s in seq if t >= first), "a still box stays steady"
+  assert not any(s for t, s in seq if t < STEADY_S - STEADY_PERIOD_S - 1e-6), "never steady on less history than at 5 Hz"
+  # a car creeping across at 0.45 deg/s (0.3 m/s at 38 m) never reads still at any cadence: it stays a blocker
+  assert not any(s for _, s in _steady_after(period_s, rate_deg_s=0.45))
 
 
 def test_a_raw_box_near_the_horizon_outside_every_band_still_blocks():

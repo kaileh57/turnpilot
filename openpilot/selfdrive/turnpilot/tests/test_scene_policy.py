@@ -460,6 +460,24 @@ def test_crosswalk_hold_lets_a_walker_leaving_it_go():
   assert scene_policy(sc.objects, True, left_line['maneuver'], HOLD_LINE_M, 0., right_hand_traffic=False).holding
 
 
+def test_a_walker_leaving_the_crosswalk_seen_at_the_stand_cadence_keeps_the_hold_let_go_until_she_stops_leaving():
+  # under the side look the wide pass sees her 2-4 times a second: her confirmation (CONFIRM_RECENT_HITS in a second) comes
+  # and goes between hits, and every frame without it brought the crosswalk hold back, 0.15 s after its go (the go and the
+  # turn's desire flickering: the matrix's right at an uncontrolled junction with a late walker). Let go once she is
+  # trusted leaving, it stays let go while she keeps leaving; she stops, and it holds again at once
+  def walker(sp, k, vy, every=7):  # a new hit every `every` frames (0.35 s), x 10 m, 9 m right, walking away at vy
+    sc = scene([ped(10., -9., vy=vy, age=10 + k // every)])
+    return sp.update(sc.objects, True, RIGHT_TURN, HOLD_LINE_M, 0., maneuver_id=0)
+  sp = ScenePolicy()
+  for k in range(int(1. / DT_MDL)):
+    walker(sp, k, 0., every=2)  # confirmed at 10 Hz first
+  holds = [walker(sp, 20 + k, -1.3, every=2 if k < CROSSWALK_LEAVING_FRAMES else 7).holding for k in range(int(3. / DT_MDL))]
+  first = holds.index(False)
+  assert first <= CROSSWALK_LEAVING_FRAMES and not any(holds[first:]), holds
+  # she stops: held again on the frame
+  assert walker(sp, 100, 0.).should_stop
+
+
 def test_crosswalk_hold_needs_a_walker_steadily_leaving():
   # a Kalman velocity on a person standing at the corner can read a walking pace away for a frame or two: the hold stays.
   # Walking away for CROSSWALK_LEAVING_FRAMES in a row lets it go

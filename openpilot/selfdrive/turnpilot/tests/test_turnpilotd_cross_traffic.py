@@ -186,3 +186,78 @@ def test_a_junction_with_a_mapped_control_or_a_light_head_read_is_not_this_rules
   for _ in range(40):
     sim.step(engaged=True)
   assert not sim.tp.uncontrolled_turn(sim.tp.follower.upcoming, sim.tp.follower.distance)
+
+
+# ------------------------------------------------------------------------- a stop sign's line the driver crossed
+
+NODE_M = 13.   # test_turnpilotd_stop's vinfo stopPointDistance: the junction's node past the line
+V_CREEP_X = 7.
+
+
+def creep_and_reengage(tmp_path, tta: float, creep_m: float = 5., y_new: float | None = None, age: int = 30, trusted: bool = True,
+                       seconds: float = 4.):
+  """A stop sign under the shipped vision decider (test_turnpilotd_vision.vsim), held at its line 2 s: the driver's gas, openpilot
+  off, creeps the car creep_m on at up to 1.5 m/s (map_controls: the latch let go as his, his crossing never said), and he
+  engages again with a car crossing from the left tracked on the near lane 1.8 m short of the node, tta s from our path when
+  the creep starts (moving at V_CREEP_X; y_new: first published only once it is that near, a new track). Returns (the
+  plans of the seconds after the re-engage, the crossing car's (x, y) then, where the car met it or None)."""
+  from openpilot.selfdrive.turnpilot.tests.test_turnpilotd_stop import S_LINE, run_to_line
+  from openpilot.selfdrive.turnpilot.tests.test_turnpilotd_vision import vsim
+  sim = vsim(tmp_path)
+  run_to_line(sim)
+  for _ in range(int(2. / DT_MDL)):
+    sim.step()
+  t0, s0 = sim.t, sim.s
+  first = {}
+
+  def crossing():
+    y = V_CREEP_X * (tta - (sim.t - t0))
+    x = S_LINE + NODE_M - 1.8 - sim.s
+    if y_new is not None and y > y_new and 'k' not in first:
+      return [], (x, y)
+    k = first.setdefault('k', sim.k)
+    obj = {'trackId': 7, 'cls': 'car', 'x': float(x), 'y': float(y), 'vx': float(-sim.v), 'vy': -V_CREEP_X,
+           'age': (age if trusted else 0) + (sim.k - k) // 2, 'inPath': bool(abs(y) < 1.5 and 0. < x < 50.), 'camera': 'wide'}
+    return ([obj] if y > -30. else []), (x, y)
+  sim.accel = lambda s, plan: 0.8 if s.v < 1.5 else 0.
+  while sim.s < s0 + creep_m:
+    sim.step(crossing()[0], engaged=False, gas=True)
+  sim.accel = sim.planner
+  at = crossing()[1]
+  plans, contact = [], None
+  for _ in range(int(seconds / DT_MDL)):
+    objs, (x, y) = crossing()
+    plans.append(sim.step(objs, engaged=True))
+    if contact is None and -3.6 < x < 3.0 and abs(y) < 1.9 and sim.v > 0.5:
+      contact = (round(x, 1), round(y, 1), round(sim.v, 1))
+  return plans, at, contact
+
+
+def test_re_engaged_past_a_stop_line_the_driver_crossed_the_car_holds_for_the_crossing_car_it_tracks(tmp_path):
+  # the 4c matrix case: re-engaged 5 m past the line with a car from the left tracked 21 m up the cross road (3.0 s out).
+  # The driver's crossing is silent by decision and the decider is done (stop_go._driver), so before 2026-11-14 nothing
+  # held: the scene's cross hold was only an uncontrolled junction's (a route turn's), and the car pulled out in front of it
+  # at 4 m/s. The junction is now, for its cross traffic, an uncontrolled one (turnpilotd.driven_stop_cross): held short
+  # of the lanes, silent about the crossing itself, "waiting for cross traffic" while it holds
+  plans, at, contact = creep_and_reengage(tmp_path, tta=7.3, seconds=12.)
+  held = [p for p in plans[:40] if p.shouldStop or p.speedCap < 1.]
+  assert held and contact is None, (at, contact)
+  assert all(p.reason == CROSS_REASON for p in held)
+  assert not any(str(p.controlPrompt) in TAKE_CONTROL_PROMPTS for p in plans)
+  # and it goes once the car has passed (gone 30 m by, then the clear window): never a stand for good
+  assert any(p.speedCap > 5. and not p.shouldStop for p in plans[-40:]), [(p.reason, round(p.speedCap, 1)) for p in plans[-40::10]]
+
+
+def test_re_engaged_past_a_driven_stop_line_a_car_first_tracked_inside_the_near_band_still_holds(tmp_path):
+  # with no side view running the wide pass first boxes a car crossing from the side about 12 m out: a new track the route
+  # turn's hold takes for something on our own road (CROSS_Y_NEAR_M). In the junction the car is in, for DRIVEN_DOUBT_S, it
+  # holds on the comfortable curve; contact at 3.5 m/s before (the matrix's noroom creep cells)
+  plans, at, contact = creep_and_reengage(tmp_path, tta=6.4, y_new=12.5, trusted=False)
+  assert any(p.shouldStop or p.speedCap < 1. for p in plans[:40]) and contact is None, (at, contact)
+
+
+def test_re_engaged_already_at_the_cross_lanes_the_car_carries_on_never_stopping_in_them(tmp_path):
+  # creeping 9 m past the line (2 m short of the near lane) at 1.5 m/s: it can no longer stand short of the lanes on the
+  # comfortable curve, so it carries on (never a stop in the cross lanes); what gets through, said plainly in the report
+  plans, _at, _contact = creep_and_reengage(tmp_path, tta=9., creep_m=9.5)
+  assert not any(p.shouldStop for p in plans[:40])

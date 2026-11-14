@@ -170,6 +170,24 @@ def test_a_red_read_again_just_after_the_right_on_red_go_stops_the_car_short_of_
   assert sim.s >= junction
 
 
+@pytest.mark.parametrize('past_m', [0.5, 1.0, 1.5])
+def test_a_red_read_again_just_past_the_line_after_the_right_on_red_go_stops_the_car(past_m):
+  # read red again past the line at about 2 m/s (1.5 m: 2.1 m/s, over COMMIT_SPEED): a firm stop still ends inside
+  # RED_PAST_M, short of the first cross lane, so the right stops (the matrix: 1.0-1.7 m past at 2.1-2.2 m/s went on)
+  signal, junction = 191., 200.
+  sim, read, t_go = right_on_red_go(signal, junction, 215.)
+  while sim.s < signal + past_m:
+    sim.step(engaged=True)
+    assert sim.t - t_go < 10.
+  read['state'] = 'red'
+  s_r, v_r = sim.s, sim.v
+  assert mc.red_stop_fits(v_r, signal - s_r), (s_r - signal, v_r)
+  for _ in range(int(15. / DT_MDL)):
+    plan = sim.step(engaged=True)
+  assert sim.s <= signal + mc.RED_PAST_M and sim.v < 0.1 and plan.shouldStop, \
+    f"read red again at {s_r - signal:+.1f} m of the line at {v_r:.1f} m/s, the car went on to {sim.s - signal:+.1f} m"
+
+
 def test_a_red_read_again_once_the_right_is_into_its_turn_changes_nothing():
   signal, junction = 191., 200.
   sim, read, t_go = right_on_red_go(signal, junction, 215.)
@@ -180,3 +198,136 @@ def test_a_red_read_again_once_the_right_is_into_its_turn_changes_nothing():
     plan = sim.step(engaged=True)
     assert not plan.shouldStop
   assert sim.s > junction
+
+
+# --- a green read only in bursts (a night lamp scoring just over the reader's floor) ---
+
+def boxed_in_bursts(boxed_s: float, every_s: float, gap_red_s: float | None = None):
+  """A mapped signal 9 m before a right 2.3 km on; the reader boxes its one head (reader id 0) in bursts of boxed_s every
+  every_s, its vote published 0.2 s into each: red on the approach and the car's first 5 s at the line, green after. A red
+  read gap_red_s into each gap, if given. Returns (sim, the state: 'green' once the light is)."""
+  line, head = 291., 315.
+  sim = shipped(Sim([(2600., "turn", "right", junction_of("right"))], controls=[(line, 'signal')]))
+  st = {'stood': 0., 'green': False}
+
+  def lights(s):
+    if s.v < 0.1 and line - s.s < 30.:
+      st['stood'] += DT_MDL
+    st['green'] = st['stood'] >= 5.
+    if int(round(s.t / DT_MDL)) % 2 == 0:
+      phase = s.t % every_s
+      heads = []
+      if 2. < head - s.s < 140.:
+        if 0.2 <= phase < boxed_s:
+          heads = [('green' if st['green'] else 'red', head)]
+        elif gap_red_s is not None and abs(phase - boxed_s - gap_red_s) < 0.06:
+          heads = [('red', head)]
+      s.sm.put('turnpilotDetections', with_ids(heads, s.s))
+    return NONE
+  sim.lights = lights
+  return sim, st
+
+
+def with_ids(heads, s_car: float):
+  """detections, each head carrying the reader's id 0 and a bearing."""
+  msg = messaging.new_message('turnpilotDetections')
+  td = msg.turnpilotDetections
+  td.camera, td.lightStatus = 'road', 'read'
+  td.lights.source, td.lights.shadow = 'camera', False
+  td.lights.lights = [{'state': st, 'read': st, 'distance': s - s_car, 'governs': True, 'votes': 4, 'conf': 0.7, 'bearing': 0.,
+                       'headIdPlusOne': 1} for st, s in heads]
+  return msg.as_reader().turnpilotDetections
+
+
+def went_after_green(sim, st, seconds: float = 60.):
+  t_green = None
+  for _ in range(int(seconds / DT_MDL)):
+    sim.step(engaged=True)
+    if st['green'] and t_green is None:
+      t_green = sim.t
+    if t_green is not None and sim.v > 0.5:
+      return sim.t - t_green
+  return None
+
+
+@pytest.mark.parametrize("boxed_s, every_s", [(1.0, 4.), (1.2, 4.), (1.0, 2.5)])
+def test_a_green_boxed_only_in_short_bursts_releases_the_stand_within_a_few_seconds(boxed_s, every_s):
+  # a head boxed in bursts shorter than CAMERA_GREEN_STEADY_S with gaps over CAMERA_GREEN_GAP_S: stood for good before.
+  # Released once the bursts' own read spans sum to CAMERA_GREEN_STEADY_S (each publishes about 0.7 s of its boxed_s):
+  # the second burst's or the third's
+  sim, st = boxed_in_bursts(boxed_s, every_s)
+  went = went_after_green(sim, st)
+  assert went is not None and went < 2. * every_s + 1., f"stood {sim.t:.0f} s in, reason {sim.trace[-1][2].reason!r}"
+
+
+def test_a_green_in_bursts_with_a_red_read_in_every_gap_never_releases_the_stand():
+  sim, st = boxed_in_bursts(1.0, 4., gap_red_s=1.5)
+  assert went_after_green(sim, st) is None and sim.trace[-1][2].shouldStop
+
+
+# --- a red read by a near-side head, then only far-side greens past the match window (CAMERA_ASSOC_PAST_M) ---
+
+def far_greens_only(far_heads=((334., -1.5), (338., 1.5)), clear_m: float | None = None, monkeypatch=None):
+  """A mapped signal (line 291 m) whose stop a near-side pole's red raised (the head out of the road camera's top inside
+  14 m), the far-side heads read only once the light is green (5 s into the stand), 43 and 47 m past the line. clear_m: the
+  signal's signalClearM (the map's gate), None for none (closed)."""
+  from openpilot.selfdrive.turnpilot import control_tracker
+  line = 291.
+  if clear_m is not None:
+    real = control_tracker.from_msg
+
+    def from_msg(route_count, c):
+      t = real(route_count, c)
+      if t.kind == 'signal':
+        t.clear_m = clear_m
+      return t
+    monkeypatch.setattr(control_tracker, 'from_msg', from_msg)
+  sim = shipped(Sim([(2600., "turn", "right", junction_of("right"))], controls=[(line, 'signal')]))
+  st = {'stood': 0., 'green': False}
+
+  def lights(s):
+    if s.v < 0.1 and line - s.s < 30.:
+      st['stood'] += DT_MDL
+    st['green'] = st['stood'] >= 5.
+    if int(round(s.t / DT_MDL)) % 2 == 0:
+      heads = []
+      if 14. < line + 1. - s.s < 140.:
+        heads.append((0, 'green' if st['green'] else 'red', line + 1. - s.s, -4.))
+      for k, (hs, b) in enumerate(far_heads):
+        if st['green'] and 2. < hs - s.s < 140.:
+          heads.append((k + 1, 'green', hs - s.s, b))
+      msg = messaging.new_message('turnpilotDetections')
+      td = msg.turnpilotDetections
+      td.camera, td.lightStatus = 'road', 'read'
+      td.lights.source, td.lights.shadow = 'camera', False
+      td.lights.lights = [{'state': c, 'read': c, 'distance': d, 'governs': True, 'votes': 4, 'conf': 0.7, 'bearing': b,
+                           'headIdPlusOne': hid + 1} for hid, c, d, b in heads]
+      s.sm.put('turnpilotDetections', msg.as_reader().turnpilotDetections)
+    return NONE
+  sim.lights = lights
+  rows = []
+  for _ in range(int(60. / DT_MDL)):
+    p = sim.step(engaged=True)
+    rows.append((sim.t, sim.v, st['green'], p))
+  return rows
+
+
+def test_far_side_greens_past_the_window_release_the_stand_where_the_map_clears_the_road(monkeypatch):
+  rows = far_greens_only(clear_m=150., monkeypatch=monkeypatch)
+  t_green = next(t for t, v, g, p in rows if g)
+  assert any(v > 0.5 for t, v, g, p in rows if t_green <= t <= t_green + 5.)
+
+
+def test_far_side_greens_the_map_cant_tie_to_the_light_hold_it_and_say_so_for_good():
+  # the map's gate closed (no signalClearM): no release, but the line says a green is read that it can't tie to this
+  # light and that the gas goes, for as long as it is read; one chime (the unseen line's onset), never a take-control
+  from openpilot.selfdrive.turnpilot.hooks import TAKE_CONTROL_PROMPTS
+  rows = far_greens_only()
+  t_green = next(t for t, v, g, p in rows if g)
+  after = [(t, v, p) for t, v, g, p in rows if t >= t_green + 1.]
+  assert all(v < 0.05 and p.shouldStop for t, v, p in after)
+  assert all(p.reason == mc.FAR_GREEN_UNMATCHED_REASON for t, v, p in after), sorted({p.reason for t, v, p in after})
+  assert not any(str(p.controlPrompt) in TAKE_CONTROL_PROMPTS for t, v, g, p in rows)
+  alerts = [str(p.controlAlert) for t, v, g, p in rows if t >= t_green]
+  onsets = [a for k, a in enumerate(alerts) if a != 'none' and (k == 0 or alerts[k - 1] != a)]
+  assert onsets in ([], ['signalUnseen']), onsets
