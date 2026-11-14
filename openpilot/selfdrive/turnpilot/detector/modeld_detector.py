@@ -382,6 +382,32 @@ SIDE_VIEW_V_MAX = 2.0      # m/s (STOP_GO_V_MAX): side views only at or under th
 SIDE_BUDGET_S = 0.015      # a median side-view run over this (the odd step's room beside the driving model): off for the drive
 SIDE_OVERRUNS = 3          # of the last TIME_WINDOW side runs pushing the debt past DEBT_CAP_S: off for the drive
 SIDE_STATUS_S = 0.5        # sideViewStatus noRoom: the gate open this long with no side run
+# turnpilotPlan.detectorView sideLook (a right on a red or unread light, a turn at an uncontrolled junction: the planner's
+# ask): the stop sweep's views at or under SIDE_VIEW_V_MAX without its suspensions (the lights read as always, the far slot's
+# frames the side views'), and auto above it
+SIDE_LOOK = 'sideLook'
+# The stand schedule (stand_pick): in a sweep or a look at or under SIDE_VIEW_V_MAX whose side views had no frame for
+# STAND_STARVED_S (on the car none ever did: a side run's step, 11.3 ms and its sectors 4-7 ms beside the 38.5 ms model, left
+# more than DEBT_CAP_S however paid back the step it ran on, and the held cycle's full pass on every other frame left its odd
+# step 2-4 ms of debt; route 26's only sweep ran one side view in 9.6 s, noRoom the rest), each frame goes to the stream due
+# first: the road camera's full pass STAND_ROAD_DUE_S after its last (5 a second: the lights, the oncoming band), the wide
+# camera's and each side view's STAND_VIEW_DUE_S after theirs (inside stop_rules.DET_FRESH_S, past which a view's reach is
+# gone), the crossing cycle's wide pass STAND_GO_WIDE_DUE_S; a stream not yet due takes no frame (the frame pays the debt
+# back), and one due that doesn't fit leaves the frame to the debt. A side run may leave SIDE_STAND_CAP_S of debt (a third
+# of a frame, FORCE_SKIP_LATE_S: no frame dropped; the frame after pays it back) where the road camera's next due run still
+# has its room. For the rest of that stand: the car standing or creeping frees the steps the road and far passes gave
+STAND_ROAD_DUE_S = 0.2
+STAND_VIEW_DUE_S = 0.4
+STAND_GO_WIDE_DUE_S = 0.2
+STAND_STARVED_S = 0.3
+SIDE_STAND_CAP_S = FORCE_SKIP_LATE_S
+# ...and a stand's side run counts against SIDE_OVERRUNS only past half a frame of lateness: admitted on its estimate within
+# SIDE_STAND_CAP_S, a run's spread and the model's tail put a few ms past it (11-06's timings replayed: 17-19 ms, three in
+# five at a seed's worst), which turned the side views off for the drive; the car dropped no frame at 47.9 ms (1e)
+SIDE_STAND_OVERRUN_S = CYCLE_S / 2
+# what a side run's step costs past its run and its sectors (the boxes back through the lens, the message, the send), the stand
+# schedule's estimate: the far crop's measured 2.5 ms (FAR_STEP_OVERHEAD_S), a run of the same model and a message like it
+SIDE_STEP_OVERHEAD_S = FAR_STEP_OVERHEAD_S
 # a signal mapped within this (plan_inputs' signal_near): during a sweep the light reader reads colour only
 # then; out of one, with the reader reading (lights_near), it alternates the cameras at a crawl and in a turn (choose_camera)
 # and skips the paint standing
@@ -621,7 +647,8 @@ class CameraLightReader:
     if not (sm.seen['extrinsicsCalibration'] and cal.calStatus == log.ExtrinsicsCalibration.Status.calibrated):
       return [], LightStatus.noCalibration
     model = sm['modelV2']
-    path = predicted_path(model) if sm.seen['modelV2'] and model.frameId == meta.frame_id % 2**32 else None
+    # the lane's path only where a box is read against it (no box: nothing to place)
+    path = predicted_path(model) if len(boxes) and sm.seen['modelV2'] and model.frameId == meta.frame_id % 2**32 else None
     heads = self.reader.read(meta.timestamp_eof * 1e-9, frame, self.stride, self.y_height, list(cal.rpyCalib), camera_height(cal),
                              boxes, path)
     return heads, LightStatus.read
@@ -866,6 +893,7 @@ class SideViews:
     self.why = SideViewStatus.noCalibration  # why the maps aren't ready
     self.next = 0                   # the side the next odd step runs (SIDE_VIEWS index)
     self.last_run_t: float | None = None  # time.monotonic() of the last side run
+    self.view_t: dict[str, float] = {}    # ...and of each view's (the stand schedule's due times)
     self.started_t: float | None = None   # when the speed gate last opened
     self.quality: SectorQuality | None = SectorQuality()  # None: failed, off for the drive (no sectors: none ok)
 
@@ -929,9 +957,10 @@ class SideViews:
     return est
 
   def gate(self, open_: bool, now: float) -> None:
-    """The speed gate this step: when it opens, noRoom's clock starts."""
+    """The speed gate this step: when it opens, noRoom's clock starts (and the stand schedule's, its views' due times)."""
     if not open_:
       self.started_t = None
+      self.view_t = {}
     elif self.started_t is None:
       self.started_t = now
 
@@ -954,7 +983,7 @@ class SideViews:
 
   def ran(self, name: str, now: float, dt: float, overran: bool) -> None:
     """A run of view name, dt s at now; overran: with its sectors, the step's debt after it past DEBT_CAP_S."""
-    self.last_run_t = now
+    self.last_run_t = self.view_t[name] = now
     self.times[name].append(dt)
     self.recent.append(dt)
     self.overruns.append(overran)
@@ -977,10 +1006,14 @@ def fill_lights(tl, heads: list[LightHead], shadow: bool) -> None:
 def fill_heads(out, heads: list[LightHead]) -> None:
   """A list of TurnpilotLights.Light from heads (fill_lights' lights, and the reader's unpublished boxes: lightRejects). The
   instance is the head's id, its nearer range where it has one ('near<m>': light_state.head_near; map_controls reads both
-  back, camera_light_input) and the read's detail."""
+  back, camera_light_input) and the read's detail; the id and the nearer range ride on their own fields too (headIdPlusOne:
+  the id plus one, 0 for none; nearDistance, 0 for none), which logs before 2026-11-13 lack."""
   for o, h in zip(out, heads, strict=True):
-    near = f" near{h.near:.1f}" if getattr(h, 'near', None) is not None else ''
-    o.state, o.distance, o.instance = h.state, float(h.distance), f"head{h.id}{near} {h.detail}".rstrip()
+    near = getattr(h, 'near', None)
+    o.state, o.distance = h.state, float(h.distance)
+    o.instance = f"head{h.id}{f' near{near:.1f}' if near is not None else ''} {h.detail}".rstrip()
+    o.nearDistance = float(near) if near is not None and near > 0. else 0.
+    o.headIdPlusOne = int(h.id) + 1 if h.id >= 0 else 0
     o.conf, o.box, o.bearing, o.votes, o.governs = float(h.conf), [float(b) for b in h.box], float(h.bearing), int(h.votes), h.governs
     o.read, o.reason = h.read, str(h.reason)
 
@@ -1010,6 +1043,9 @@ class ModeldDetector:
   side: SideViews | None = None   # the side views (None: no wide camera, no side pkl, or it failed to load)
   signs_mode = STOP_SIGNS_DEFAULT  # TurnPilotCameraStopSigns, set by DetectorHost
   sweep: str | None = None        # the stop sweep running (SWEEPS), or None
+  look = False                    # turnpilotPlan.detectorView sideLook, this step
+  stand_look = False              # ...at or under SIDE_VIEW_V_MAX: the side views run, the far slot and the paint give way
+  stand = False                   # the stand schedule (stand_pick) runs, for this spell of the side views' gate
   # why the native's slot isn't its own to miss now (native_hold: sweep, farOff, noCalibration), and since when (None: free)
   native_holds: frozenset = frozenset()
   hold_t0: float | None = None
@@ -1225,6 +1261,8 @@ class ModeldDetector:
     latter's only."""
     if cam == 'wide' or self.sweep is not None or self.lane_paint is None or time.monotonic() < self.paint_retry_at:
       return None
+    if self.stand_look:
+      return LanePaintStatus.noRoom  # a look at or under SIDE_VIEW_V_MAX (PAINT_SKIP_V): the step's time the side views'
     if v_ego is not None and v_ego < PAINT_SKIP_V and (self.lights_near or self.far_first):
       return LanePaintStatus.noRoom
     if self.fits(model_execution_time, cam) or not self.fits(model_execution_time, cam, paint=False):
@@ -1272,29 +1310,43 @@ class ModeldDetector:
     now = time.monotonic()
     self.steps += 1
     sweep = view if view in SWEEPS else None
-    if sweep != self.sweep:
-      self.sweep, self.sweep_runs = sweep, 0
+    look = view == SIDE_LOOK
+    if sweep != self.sweep or look != self.look:
+      self.sweep, self.look, self.sweep_runs = sweep, look, 0
       if self.side is not None:
         self.side.next = 0
-    self.native_hold('sweep', sweep is not None, now)  # its odd steps are the side views'
+    gated = (sweep is not None or look) and v_ego is not None and v_ego <= SIDE_VIEW_V_MAX
+    # a look at or under SIDE_VIEW_V_MAX runs the held cycle's cameras (stopSweep's), above it auto's
+    self.stand_look = look and gated
+    cam_view = 'stopSweep' if self.stand_look else 'auto' if look else view
+    self.native_hold('sweep', sweep is not None or self.stand_look, now)  # its odd steps are the side views'
     self.native_hold('farOff', not self.far_on, now)    # TurnPilotFarCrop off turns the slot off
     # far first standing or slow only (FAR_FIRST_V; v_ego unknown is moving): moving, the full pass's cadence as auto's
     self.far_first = far_first and sweep is None and v_ego is not None and v_ego < FAR_FIRST_V
     self.v_ego = v_ego
     self.native_hold('farFirst', self.far_first and self.far is not None and self.left_far() is self.far, now)  # the far crop's slot
-    gated = sweep is not None and v_ego is not None and v_ego <= SIDE_VIEW_V_MAX
     if self.side is not None:
       self.side.gate(gated, now)
+    self.stand_update(gated, now, model_execution_time)
     # before the peek: this step's, which its pick and the paint's skip take
     self.signal_near = signal_near
     self.lights_near = signal_near and self.light_reading(now)
-    self.next_cam = self.choose_camera(desired_curvature, desire, now, view, v_ego, peek=True)
     self.since_run += 1
-    full_due = self.since_run >= RUN_EVERY
+    stand_cam = None
+    if self.stand:  # the stand schedule (stand_pick): this frame's stream, or none
+      pick = self.stand_pick(view, now, model_execution_time)
+      if pick is None:
+        return  # nothing due: the frame pays the debt back
+      if pick in SIDE_VIEWS:
+        self.side_step(pm, model_state, model_execution_time, metas, gated, pick)
+        return
+      stand_cam = pick
+    self.next_cam = stand_cam or self.choose_camera(desired_curvature, desire, now, cam_view, v_ego, peek=True)
+    full_due = self.since_run >= RUN_EVERY or stand_cam is not None
     if self.far_first and self.left_pick(pm, model_state, model_execution_time, metas, far_bearing, full_due):
       return  # the far crop's frame
     if not full_due:  # a frame between the full runs: the sweep's side views, else the far crop (far first: left_pick's)
-      if sweep is not None:
+      if sweep is not None or self.stand_look:
         self.side_step(pm, model_state, model_execution_time, metas, gated)
       elif not self.far_first:
         self.far_step(pm, model_state, model_execution_time, metas, far_bearing)
@@ -1308,7 +1360,7 @@ class ModeldDetector:
     if not self.room(model_execution_time, self.next_cam, paint_skip is None):
       return
     try:
-      cam = self.choose_camera(desired_curvature, desire, now, view, v_ego)
+      cam = stand_cam or self.choose_camera(desired_curvature, desire, now, cam_view, v_ego)
       t0 = time.perf_counter()
       raw = self.run(input_frame=self.frames[cam]).numpy()
       dt = time.perf_counter() - t0
@@ -1407,7 +1459,7 @@ class ModeldDetector:
       return self.native_far_status()
     if self.far is None or (not self.far_on and not self.far.disabled):
       return FarStatus.off
-    if self.sweep is not None and not (self.far.disabled or self.far.failing()):
+    if (self.sweep is not None or self.stand_look) and not (self.far.disabled or self.far.failing()):
       return FarStatus.sweep  # a failing far crop's disabled outlasts a sweep, as a dead slot's (native_far_status)
     return self.far.status(time.monotonic())
 
@@ -1428,7 +1480,7 @@ class ModeldDetector:
     far_off = far is None or far.disabled or far.failing()
     if far_off and self.native_idle_s(native, now) > NATIVE_NO_RUN_S:
       return FarStatus.disabled  # NATIVE_NO_RUN_S > FAR_STATUS_S: nor did it read lately
-    if self.sweep is not None:
+    if self.sweep is not None or self.stand_look:
       return FarStatus.sweep
     status = native.status(now)
     if status != FarStatus.read and far is not None and not far.disabled and far.status(now) == FarStatus.read:
@@ -1485,7 +1537,7 @@ class ModeldDetector:
     """sideViewStatus for every message: off with no side views, else theirs (SideViews.status)."""
     if self.side is None:
       return SideViewStatus.off
-    return self.side.status(time.monotonic(), self.sweep is not None, gated)
+    return self.side.status(time.monotonic(), self.sweep is not None or self.look, gated)
 
   def side_ready(self, upload: bool) -> bool:
     """SideViews.prepare, its failures the side views' (off for the drive, loudly), never the full pass's."""
@@ -1498,15 +1550,98 @@ class ModeldDetector:
       side.disable("failed (maps)")
       return False
 
-  def side_step(self, pm, model_state, model_execution_time: float, metas: list, gated: bool) -> None:
+  def stand_update(self, gated: bool, now: float, model_execution_time: float) -> None:
+    """The stand schedule (module constants) starts once the side views' gate has been open STAND_STARVED_S with no side run
+    (their maps ready: a view waiting for its maps has no use for frames), where it can give them frames (stand_room), and
+    holds until the gate closes (said once a spell)."""
+    side = self.side
+    if not gated or side is None or side.disabled or side.geometry is None:
+      self.stand = False  # a view waiting for its maps (a new calibration's) runs nothing: the held cycle has the frames
+      return
+    if self.stand or side.started_t is None:
+      return
+    last = max(t for t in (side.last_run_t, side.started_t) if t is not None)
+    if now - last >= STAND_STARVED_S - 1e-9 and self.stand_room(model_execution_time):
+      self.stand = True
+      side.overruns.clear()  # the held cycle's were judged on its own cap: the stand's runs on the stand's
+      said = f"turnpilot side views: no room in {now - last:.2f} s of the held cycle beside a {1e3 * self.model_time:.0f} ms model"
+      cloudlog.info(said + "; the stand schedule for this stand")
+
+  def stand_room(self, model_execution_time: float) -> bool:
+    """Whether the stand schedule has room for a side run at this model time: from a paid-back step within
+    SIDE_STAND_CAP_S, and the road camera's run STAND_ROAD_DUE_S after the last still its room (stand_fits' rule, the
+    side run a frame after the road's). A host where it has none keeps the held cycle, which gives its frames to the full
+    passes (a side view's noRoom is said either way)."""
+    side = self.side
+    assert side is not None
+    after = max(0., model_execution_time + max(side.estimate(n) for n in SIDE_VIEWS) + SIDE_STEP_OVERHEAD_S - STEP_BUDGET_S)
+    frames = round(STAND_ROAD_DUE_S / CYCLE_S) - 1
+    slack = max(0., STEP_BUDGET_S - model_execution_time)
+    road = max(0., model_execution_time + self.estimate('road', paint=False) + self.full_extra_s() - STEP_BUDGET_S) \
+      if 'road' in self.frames else 0.
+    return after <= SIDE_STAND_CAP_S and max(0., after - (frames - 1) * slack) + road <= DEBT_CAP_S
+
+  def stand_streams(self, view: str) -> list[tuple[str, float]]:
+    """The stand schedule's streams and how long each may go between runs: the crossing cycle's (stopSweepGo) the wide
+    camera's full pass and the side views, else the road camera's and the wide camera's and the side views."""
+    out = [('wide', STAND_GO_WIDE_DUE_S)] if view == 'stopSweepGo' else [('road', STAND_ROAD_DUE_S), ('wide', STAND_VIEW_DUE_S)]
+    out = [(cam, due) for cam, due in out if cam in self.frames]
+    return out + [(name, STAND_VIEW_DUE_S) for name in SIDE_VIEWS]
+
+  def stand_due(self, name: str, period: float) -> float:
+    """When the stream is due next: period after its last run (a side view's own, else the gate's opening), -inf before a
+    full pass's first."""
+    if name in SIDE_VIEWS:
+      side = self.side
+      assert side is not None
+      last = side.view_t.get(name)
+      return (last if last is not None else side.started_t if side.started_t is not None else -math.inf) + period
+    return (self.run_t or {}).get(name, -math.inf) + period
+
+  def stand_pick(self, view: str, now: float, model_execution_time: float) -> str | None:
+    """The stand schedule's frame (module constants): of the streams due (within half a frame: each step's model time is
+    its own), the one due first ('road', 'wide' or a side view's name; ties in stand_streams' order) that may run on it: a
+    side view where it fits (stand_fits), a full pass always (room() then decides, its forced runs as before); None while
+    none is due or none of them fits: the frame pays the debt back."""
+    due = sorted(((self.stand_due(name, period), k, name) for k, (name, period) in enumerate(self.stand_streams(view))))
+    side = self.side
+    assert side is not None
+    for t, _, name in due:
+      if t > now + CYCLE_S / 2:
+        break
+      if name not in SIDE_VIEWS or self.stand_fits(model_execution_time, side.estimate(name) + SIDE_STEP_OVERHEAD_S):
+        return name
+    return None
+
+  def stand_fits(self, model_execution_time: float, estimate: float) -> bool:
+    """Whether a side run of estimate s fits the stand schedule's frame: the debt it leaves within SIDE_STAND_CAP_S, and the
+    road camera's next due run (stand_due) still its room: the frames to it before then pay the debt back by the step's
+    slack each (the model's time past STEP_BUDGET_S), its run and lights past STEP_BUDGET_S on top within DEBT_CAP_S (with
+    its step's extra too, the side views lost a fifth of their runs at a right on a red and the road camera gained none:
+    there its own run with the lights needs the step paid back, whatever the side runs before it)."""
+    after = self.debt_after(model_execution_time, estimate)
+    if after > SIDE_STAND_CAP_S:
+      return False
+    if 'road' not in self.frames or self.sweep == 'stopSweepGo':
+      return True
+    now = time.monotonic()
+    frames = max(1, math.ceil((self.stand_due('road', STAND_ROAD_DUE_S) - now - CYCLE_S / 2) / CYCLE_S))
+    slack = max(0., STEP_BUDGET_S - model_execution_time)
+    road = max(0., model_execution_time + self.estimate('road', paint=False) - STEP_BUDGET_S)
+    return max(0., after - (frames - 1) * slack) + road <= DEBT_CAP_S
+
+  def side_step(self, pm, model_state, model_execution_time: float, metas: list, gated: bool, name: str | None = None) -> None:
     """A sweep's odd step: the next side view, while the speed gate is open, its maps are ready and it has room (module
-    docstring). Its failures turn the side views off for the drive and touch nothing of the full pass's."""
+    docstring); name: the stand schedule's pick (stand_pick, which judged its room: stand_fits). Its failures turn the side
+    views off for the drive and touch nothing of the full pass's."""
     side = self.side
     if side is None or side.disabled or not gated or not self.side_ready(upload=True):
       return
-    name = SIDE_VIEWS[side.next]
-    if not self.odd_room(model_execution_time, side.estimate(name)):
-      return  # stale, said once it outlasts SIDE_STATUS_S (noRoom)
+    stand = name is not None
+    name = name if stand else SIDE_VIEWS[side.next]
+    cap = SIDE_STAND_OVERRUN_S if stand else DEBT_CAP_S
+    if not stand and not self.odd_room(model_execution_time, side.estimate(name)):
+      return  # stale, said once it outlasts SIDE_STATUS_S (noRoom); the stand schedule's pick fits (stand_pick)
     try:
       geom = side.geometry
       assert geom is not None
@@ -1514,7 +1649,7 @@ class ModeldDetector:
       t0 = time.perf_counter()
       raw = side.run(input_frame=side.frame, luma_idx=luma, chroma_idx=chroma, weights=weights).numpy()
       dt = time.perf_counter() - t0
-      side.next = (side.next + 1) % len(SIDE_VIEWS)
+      side.next = (SIDE_VIEWS.index(name) + 1) % len(SIDE_VIEWS)
       i = self.cameras['wide']
       meta = metas[i]
       msg = messaging.new_message('turnpilotDetections', valid=bool(np.isfinite(raw).all()))
@@ -1527,7 +1662,7 @@ class ModeldDetector:
       td.farStatus, td.sideViewStatus = self.far_status(), SideViewStatus.running
       td.nativeStatus = self.native_status()
       pm.send('turnpilotDetections', msg)
-      side.ran(name, time.monotonic(), dt, self.debt_after(model_execution_time) > DEBT_CAP_S)
+      side.ran(name, time.monotonic(), dt, self.debt_after(model_execution_time) > cap)
     except Exception:
       cloudlog.exception("turnpilot side views failed")
       side.disable("failed")

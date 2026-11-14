@@ -66,11 +66,12 @@ def sweep_wanted(control, v_ego: float, sweeping: bool) -> bool:
   return control is not None and v_ego <= (SWEEP_V_OFF if sweeping else SWEEP_V_MAX)
 
 
-def detector_view(left_view: str, sweep: bool) -> str:
-  """turnpilotPlan.detectorView: the unprotected left's own view, else the sweep, else modeld's choice."""
+def detector_view(left_view: str, sweep: bool, look: bool = False) -> str:
+  """turnpilotPlan.detectorView: the unprotected left's own view, else the sweep, else the side look (look: turnpilotd's
+  side_look), else modeld's choice."""
   if left_view in LEFT_VIEWS:
     return left_view
-  return 'stopSweep' if sweep else 'auto'
+  return 'stopSweep' if sweep else 'sideLook' if look else 'auto'
 
 
 class _Attr:

@@ -81,10 +81,18 @@ def coasting(coast_s: float | None, gap: float) -> bool:
 
 
 def test_a_sweep_coasts_a_track_through_two_missed_passes_of_a_5_hz_view():
-  assert MAX_COAST_S == 0.5 and SWEEP_COAST_S == 0.65
+  assert MAX_COAST_S == 0.5 and SWEEP_COAST_S == 0.9
   # 0.6 s between hits of one side view: two of its passes missed
   assert not coasting(None, 0.6) and coasting(None, 0.45)
-  assert coasting(SWEEP_COAST_S, 0.6) and not coasting(SWEEP_COAST_S, 0.7)
+  assert coasting(SWEEP_COAST_S, 0.6)
+
+
+def test_a_sweep_coasts_a_track_through_one_missed_pass_of_the_stand_schedule():
+  # modeld's stand schedule runs the wide pass and each side view every STAND_VIEW_DUE_S (0.4 s, 0.4-0.45 s on the car's
+  # budget): one missed box is 0.8-0.85 s between hits, which a 0.65 s coast dropped; two missed are gone
+  from openpilot.selfdrive.turnpilot.detector.modeld_detector import STAND_VIEW_DUE_S
+  assert coasting(SWEEP_COAST_S, 2 * STAND_VIEW_DUE_S + 0.05) and not coasting(0.65, 2 * STAND_VIEW_DUE_S + 0.05)
+  assert not coasting(SWEEP_COAST_S, 3 * STAND_VIEW_DUE_S)
 
 
 def test_runs_drained_together_go_in_camera_time_order():

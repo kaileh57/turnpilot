@@ -315,6 +315,10 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
     # views (only at or under SIDE_VIEW_V_MAX); lane paint and the far crop are off, lights read only near a mapped signal
     stopSweep @3;    # held at a stop or yield: full wide, side left, road, side right
     stopSweepGo @4;  # crossing, from the commit point: full wide, side left, full wide, side right
+    # A right on a red or unread light, a turn waiting at an uncontrolled junction (modeld_detector SIDE_LOOK): at or under
+    # SIDE_VIEW_V_MAX the stop sweep's views without its suspensions (the lights read as always; the far slot and the lane
+    # paint give way to the side views), auto above it
+    sideLook @5;
   }
   detectorView @30 :DetectorView;
   # The autonomous unprotected left's decision (unprotected_left.py), for the logs and the sim's scorer
@@ -347,6 +351,8 @@ struct TurnpilotPlan @0x81c2f05a394cf4af {
     farBlockers @13 :UInt8;    # raw boxes in the band on the last far crop run
     chime @14 :Bool;           # a long wait's chime is due (with waitingForGap or creepingForView): once a wait as its old
                                # bound passes (unprotected_left._said; review 2026-11-07, SF-4)
+    goRepeat @15 :Bool;        # with leftGo: a go within PROMPT_REPEAT_S of this left's last shown go withdrawn, shown
+                               # without its chime (unprotected_left.LeftDecision.repeat_go)
   }
   unprotectedLeft @31 :UnprotectedLeftStatus;
   # TurnPilot's certified go (selfdrive/turnpilot/go_override.py; DESIGN phase 4 decision 1, G5): asserted on every frame of
@@ -684,6 +690,8 @@ struct TurnpilotScene @0xf35cc4560bbf6ec2 {
     # skeptic G1 (residual): forward runs of its camera since its last match (0 matched on the latest), so a hard stop rests on
     # a detection the detector still makes, not on a coast (scene_policy: HARD_MISSED_RUNS); a stalled detector counts none
     missedRuns @14 :UInt8;
+    # a track the side views feed whose velocity is trusted by hits over time (scene/tracker.py side_trusted), not by count
+    sideTrusted @15 :Bool;
   }
   available @0 :Bool;          # false when detections are stale; never read as "nothing there"
   objects @1 :List(TrackedObject);
@@ -721,6 +729,9 @@ struct TurnpilotLights @0xda96579883444c35 {
                            # belowHorizon, overCap) are never published: lightBoxes has them, and modeld's turnpilot.light_gates
                            # log counts
     read @9 :State;        # this frame's state (state is the vote over the last VOTE_M reads)
+    # source camera, since 2026-11-13 (both 0 in older logs, whose instance alone carries them: 'head<id> near<m>')
+    nearDistance @10 :Float32;  # m to the head by its box's height where nearer than distance (light_state.head_near); 0: none
+    headIdPlusOne @11 :UInt32;  # the reader's own id of the head (light_state.HeadVoter) plus one; 0: none (a reject)
   }
   source @0 :Source;
   lights @1 :List(Light);

@@ -94,6 +94,7 @@ import numpy as np
 from openpilot.common.params import UnknownKeyName
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.turnpilot.detector.decoder import LIGHT_READ_CONF, MIN_CONF
+from openpilot.selfdrive.turnpilot.detector.exact_stats import percentile
 from openpilot.selfdrive.turnpilot.scene.ranging import Lens, calib_from_view
 
 HEAD_MIN_H_PX = 24          # full-frame px
@@ -217,35 +218,58 @@ class HeadRead:
 
 def lamp_pixels(nv12: np.ndarray, stride: int, y_height: int, x0: int, y0: int, x1: int, y1: int):
   """(lamp mask, saturated hue or nan, HSV value 0-255) per pixel of the box, from NV12 (BT.601 full range)."""
-  rows = np.arange(y0, y1)
-  cols = np.arange(x0, x1)
-  y = nv12.reshape(-1, stride)[rows[:, None], cols[None, :]].astype(np.float32)
-  uv = nv12.reshape(-1, stride)[y_height + rows[:, None] // 2, (cols[None, :] // 2) * 2 + np.array([[0], [1]])[:, :, None]]
-  u, v = uv[0].astype(np.float32) - 128., uv[1].astype(np.float32) - 128.
-  r, g, b = y + 1.402 * v, y - 0.344136 * u - 0.714136 * v, y + 1.772 * u
-  rgb = np.clip(np.stack([r, g, b], axis=-1), 0., 255.)
-  mx, mn = rgb.max(axis=-1), rgb.min(axis=-1)
+  return lamp_pixels_many(nv12, stride, y_height, [(x0, y0, x1, y1)])[0]
+
+
+def lamp_pixels_many(nv12: np.ndarray, stride: int, y_height: int, rects) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+  """lamp_pixels of each box (x0, y0, x1, y1), worked out together: each box's own rows and columns are cropped before any
+  colour is converted (each chroma pair repeated over its 2x2), the boxes' pixels converted as one array, and the hue
+  worked out only on the saturated, bright pixels, the only ones it is kept for. The same values, pixel for pixel, as
+  converting each whole box on its own (tests/light_reference.py); a frame's boxes cost about what one did
+  (test_light_cost.py, light_replay.py)."""
+  img = nv12.reshape(-1, stride)
+  ys, uvs, shapes = [], [], []
+  for x0, y0, x1, y1 in rects:
+    h, w = y1 - y0, x1 - x0
+    ys.append(img[y0:y1, x0:x1].reshape(-1))
+    uv = img[y_height + y0 // 2:y_height + (y1 - 1) // 2 + 1, x0 // 2 * 2:(x1 - 1) // 2 * 2 + 2]
+    uvs.append(uv.reshape(uv.shape[0], -1, 2).repeat(2, axis=0)[y0 % 2:y0 % 2 + h].repeat(2, axis=1)[:, x0 % 2:x0 % 2 + w].reshape(-1, 2))
+    shapes.append((h, w))
+  y = (np.concatenate(ys) if len(ys) > 1 else ys[0]).astype(np.float32)
+  uv = (np.concatenate(uvs) if len(uvs) > 1 else uvs[0]).astype(np.float32) - 128.
+  u, v = uv[:, 0], uv[:, 1]
+  r = np.clip(y + 1.402 * v, 0., 255.)
+  g = np.clip(y - 0.344136 * u - 0.714136 * v, 0., 255.)
+  b = np.clip(y + 1.772 * u, 0., 255.)
+  mx = np.maximum(np.maximum(r, g), b)
+  mn = np.minimum(np.minimum(r, g), b)
   s = np.where(mx > 0, (mx - mn) / np.maximum(mx, 1e-6), 0.)
-  hue = np.full(mx.shape, np.nan)
-  d = np.maximum(mx - mn, 1e-6)
-  rr, gg, bb = rgb[..., 0], rgb[..., 1], rgb[..., 2]
-  h = np.where(mx == rr, ((gg - bb) / d) % 6., np.where(mx == gg, (bb - rr) / d + 2., (rr - gg) / d + 4.)) * 60.
   colored = (s >= LIT_S) & (mx >= LIT_V)
-  hue[colored] = h[colored]
-  in_lamp_hue = np.zeros(mx.shape, bool)
-  for ranges in HUES.values():
-    for lo, hi in ranges:
-      in_lamp_hue |= (h >= lo) & (h < hi)
-  lamp = (colored & in_lamp_hue) | (mx >= BLOWN_V)
-  return lamp, hue, mx
+  hue = np.full(mx.shape, np.nan)
+  lamp = mx >= BLOWN_V
+  if colored.any():
+    rr, gg, bb, top = r[colored], g[colored], b[colored], mx[colored]
+    d = np.maximum(top - mn[colored], 1e-6)
+    hc = np.where(top == rr, ((gg - bb) / d) % 6., np.where(top == gg, (bb - rr) / d + 2., (rr - gg) / d + 4.)) * 60.
+    hue[colored] = hc
+    in_lamp_hue = np.zeros(hc.shape, bool)
+    for ranges in HUES.values():
+      for lo, hi in ranges:
+        in_lamp_hue |= (hc >= lo) & (hc < hi)
+    lamp[colored] |= in_lamp_hue
+  out, at = [], 0
+  for h, w in shapes:
+    out.append((lamp[at:at + h * w].reshape(h, w), hue[at:at + h * w].reshape(h, w), mx[at:at + h * w].reshape(h, w)))
+    at += h * w
+  return out
 
 
-def lamp_runs(lamp: np.ndarray, value: np.ndarray) -> list[tuple[int, int, int, float, int]]:
+def lamp_runs(lamp: np.ndarray, value: np.ndarray, prof: np.ndarray | None = None) -> list[tuple[int, int, int, float, int]]:
   """The box's lit lamps, top to bottom (module docstring): (first row, last row, lamp pixels, centre row, core rows) of
   each run of lit rows, its centre the mean row of its core and its core rows the core's first to last row. lamp, value:
   the box's inner columns (lamp_pixels). A lamp's glow joins its run, so a lamp is one run wherever the thirds' edges fall;
-  two lit lamps are two runs, the dark housing between them."""
-  prof = lamp.sum(axis=1)
+  two lit lamps are two runs, the dark housing between them. prof: lamp's row sums, if the caller has them."""
+  prof = lamp.sum(axis=1) if prof is None else prof
   lit = np.nonzero(prof >= max(1., ROW_REL * float(prof.max())))[0]
   if not len(lit):
     return []
@@ -258,9 +282,10 @@ def lamp_runs(lamp: np.ndarray, value: np.ndarray) -> list[tuple[int, int, int, 
   bounds.append((start, int(lit[-1])))
   out = []
   for r0, r1 in bounds:
-    v = np.where(lamp[r0:r1 + 1], value[r0:r1 + 1], 0.)
+    lit_rows, values = lamp[r0:r1 + 1], value[r0:r1 + 1]
+    v = values[lit_rows]
     # its brightest: the 90th percentile of its lamp pixels, not one pixel (a blown glint on a visor by day would be the core)
-    core = (v >= CORE_REL * float(np.percentile(v[v > 0], 90))).sum(axis=1)
+    core = ((values >= CORE_REL * percentile(v[v > 0], 90)) & lit_rows).sum(axis=1)
     centre = float((np.arange(r0, r1 + 1) + 0.5) @ core / max(int(core.sum()), 1))
     cr = np.nonzero(core)[0]
     out.append((r0, r1, int(prof[r0:r1 + 1].sum()), centre, int(cr[-1] - cr[0] + 1) if len(cr) else r1 - r0 + 1))
@@ -273,14 +298,18 @@ def hue_counts(hues: np.ndarray) -> dict[str, int]:
   return {name: sum(int(((hues >= lo) & (hues < hi)).sum()) for lo, hi in ranges) for name, ranges in HUES.items()}
 
 
-def hue_color(hues: np.ndarray) -> str | None:
-  n = int(np.isfinite(hues).sum())
+def color_of(counts: dict[str, int], n: int) -> str | None:
+  """The lamp colour of n saturated pixels with these hue_counts: COLOR_SHARE of them in one colour, MIN_COLOR_PX at least."""
   if n < MIN_COLOR_PX:
     return None
-  for name, k in hue_counts(hues).items():
+  for name, k in counts.items():
     if k >= COLOR_SHARE * n:
       return name
   return None
+
+
+def hue_color(hues: np.ndarray) -> str | None:
+  return color_of(hue_counts(hues), int(np.isfinite(hues).sum()))
 
 
 def symmetric(mask: np.ndarray) -> bool:
@@ -296,11 +325,12 @@ def symmetric(mask: np.ndarray) -> bool:
   return union > 0 and inter / union >= SYMMETRY_MIN
 
 
-def head_place(lens: Lens, rpy_calib, cam_height: float, box) -> tuple[float, float, float]:
+def head_place(lens: Lens, rpy_calib, cam_height: float, box, rot: np.ndarray | None = None) -> tuple[float, float, float]:
   """(deg its bottom edge lies above the calibrated horizon, bearing deg left of the forward axis, m to the head from its
-  centre's elevation and ASSUMED_HEAD_M) of a class-9 box: no pixel is read."""
+  centre's elevation and ASSUMED_HEAD_M) of a class-9 box: no pixel is read. rot: calib_from_view(rpy_calib), if the caller
+  has it (one a frame for all its boxes)."""
   x0, y0, x1, y1 = (float(b) for b in box[:4])
-  rot = calib_from_view(rpy_calib)
+  rot = calib_from_view(rpy_calib) if rot is None else rot
   def angles(u, v):
     ray = rot @ lens.ray(u, v)  # calib frame: x forward, y right, z down
     return math.degrees(math.atan2(-ray[2], math.hypot(ray[0], ray[1]))), math.degrees(math.atan2(-ray[1], ray[0]))
@@ -322,10 +352,26 @@ def head_near(lens: Lens, cam_height: float, box, distance: float) -> float:
   return min(distance, max(by_size, floor))
 
 
-def read_head(nv12: np.ndarray, stride: int, y_height: int, lens: Lens, rpy_calib, cam_height: float, box) -> HeadRead:
-  """One class-9 box's read (module docstring). box: a decode() row, x0 y0 x1 y1 in full-frame pixels."""
+def pixel_rect(lens: Lens, box) -> tuple[int, int, int, int]:
+  """The full-frame pixels (x0, y0, x1, y1) a box's read takes: its edges out to whole pixels, inside the frame."""
   x0, y0, x1, y1 = (float(b) for b in box[:4])
-  bottom_elev, bearing, distance = head_place(lens, rpy_calib, cam_height, box)
+  return int(math.floor(x0)), int(math.floor(y0)), min(int(math.ceil(x1)), lens.width), min(int(math.ceil(y1)), lens.height)
+
+
+def reads_pixels(box, place: tuple[float, float, float]) -> bool:
+  """Whether read_head reads a box's pixels: past its size, horizon and aspect gates (place: head_place's)."""
+  bw, bh = float(box[2]) - float(box[0]), float(box[3]) - float(box[1])
+  return max(bh, bw) >= HEAD_MIN_H_PX and place[0] >= MIN_ELEVATION_DEG and MIN_ASPECT <= bh / max(bw, 1e-6) <= MAX_ASPECT
+
+
+def read_head(nv12: np.ndarray, stride: int, y_height: int, lens: Lens, rpy_calib, cam_height: float, box,
+              rot: np.ndarray | None = None, place: tuple[float, float, float] | None = None, pixels=None) -> HeadRead:
+  """One class-9 box's read (module docstring). box: a decode() row, x0 y0 x1 y1 in full-frame pixels. rot: head_place's,
+  place: its result for this box, pixels: lamp_pixels of its pixel_rect, if the caller has them. Each quantity is worked
+  out once, on the box's inner columns where that is all it reads: the same read, field for field, as
+  tests/light_reference.py's plain one (test_light_cost.py)."""
+  x0, y0, x1, y1 = (float(b) for b in box[:4])
+  bottom_elev, bearing, distance = place if place is not None else head_place(lens, rpy_calib, cam_height, box, rot)
   out = HeadRead('unknown', 'read', bearing=bearing, distance=distance, near=head_near(lens, cam_height, box, distance))
   bw, bh = x1 - x0, y1 - y0
   if max(bh, bw) < HEAD_MIN_H_PX:
@@ -337,22 +383,24 @@ def read_head(nv12: np.ndarray, stride: int, y_height: int, lens: Lens, rpy_cali
   if not (MIN_ASPECT <= bh / max(bw, 1e-6) <= MAX_ASPECT):
     out.reason = 'aspect'
     return out
-  ix0, iy0 = int(math.floor(x0)), int(math.floor(y0))
-  ix1, iy1 = min(int(math.ceil(x1)), lens.width), min(int(math.ceil(y1)), lens.height)
-  lamp, hue, value = lamp_pixels(nv12, stride, y_height, ix0, iy0, ix1, iy1)
+  lamp, hue, value = pixels if pixels is not None else lamp_pixels(nv12, stride, y_height, *pixel_rect(lens, box))
   h, w = lamp.shape
-  edges = np.rint(np.linspace(0, h, 4)).astype(int)
+  third = h / 3  # np.rint(np.linspace(0, h, 4)): 0, h/3, h/3 * 2, h, each rounded half to even
+  edges = (0, int(round(third)), int(round(third * 2)), h)
   inner = slice(int(round(w * INNER_X)), max(int(round(w * (1 - INNER_X))), int(round(w * INNER_X)) + 1))
-  fracs = np.array([lamp[edges[k]:edges[k + 1], inner].mean() if edges[k + 1] > edges[k] else 0. for k in range(3)])
+  lamp_in, value_in = lamp[:, inner], value[:, inner]
+  prof = lamp_in.sum(axis=1)
+  cols = lamp_in.shape[1]
+  fracs = [int(prof[edges[k]:edges[k + 1]].sum()) / ((edges[k + 1] - edges[k]) * cols) if edges[k + 1] > edges[k] else 0.
+           for k in range(3)]
   out.detail = f"h{h} fr{fracs[0]:.2f}/{fracs[1]:.2f}/{fracs[2]:.2f}"
-  if fracs.max() < LIT_FRAC_MIN:
+  if max(fracs) < LIT_FRAC_MIN:
     out.reason = 'dark'
     return out
-  runs = lamp_runs(lamp[:, inner], value[:, inner])
+  runs = lamp_runs(lamp_in, value_in, prof)
   r0, r1, n, centre, core_rows = max(runs, key=lambda r: r[2])
   # the lamp's colour and shape are read on its run grown through the rows next to it that hold any lamp pixel, never into
   # another run: an arrow's thin head and its glow's thin edge are under ROW_REL, and are the lamp's
-  prof = lamp[:, inner].sum(axis=1)
   e0, e1 = r0, r1
   lo, hi = max((r[1] + 1 for r in runs if r[1] < r0), default=0), min((r[0] - 1 for r in runs if r[0] > r1), default=h - 1)
   while e0 > lo and prof[e0 - 1] > 0:
@@ -360,18 +408,20 @@ def read_head(nv12: np.ndarray, stride: int, y_height: int, lens: Lens, rpy_cali
   while e1 < hi and prof[e1 + 1] > 0:
     e1 += 1
   rows = slice(e0, e1 + 1)
-  peak = int(value[rows, inner][lamp[rows, inner]].max())
+  peak = int(value_in[rows][lamp_in[rows]].max())
   widest = int(lamp[r0:r1 + 1].sum(axis=1).max())  # across the whole box: a narrow box's inner columns clip a glow
   out.detail += f" run{r0}-{r1} lamp{e0}-{e1} c{centre / h:.2f} cr{core_rows} n{n} wd{widest} runs{len(runs)} pk{peak}"
-  third_px = h / 3 * lamp[:, inner].shape[1]
+  third_px = h / 3 * cols
   if any(r[2] >= max(LIT_FRAC_MIN * third_px, SECOND_LIT_REL * n) for r in runs if r[0] != r0):
     out.reason = 'twoLit'
     return out
   # the whole run against the box (a glow's tail is the lamp's, and never past RUN_MAX_REL of a head, unless it is a round
   # red or green glow: ROUND_MAX), its core against its widest row (a lamp's face is round however far its glow trails; a
   # lit pole is its core end to end): STREAK_MAX, above
-  out.detail += " hue " + " ".join(f"{k[0]}{v}" for k, v in hue_counts(hue[rows, inner]).items())
-  color = hue_color(hue[rows, inner])
+  hues = hue[rows, inner]
+  counts = hue_counts(hues)
+  out.detail += " hue " + " ".join(f"{k[0]}{v}" for k, v in counts.items())
+  color = color_of(counts, int(np.isfinite(hues).sum()))
   round_glow = color in ('red', 'green') and r1 - r0 + 1 <= ROUND_MAX * widest  # the box drawn round the glow alone
   if core_rows > STREAK_MAX * widest or (r1 - r0 + 1 > RUN_MAX_REL * h and not round_glow):
     out.reason = 'streak'
@@ -532,26 +582,45 @@ class LightReader:
     def lane_bearing(distance: float) -> float:
       return math.degrees(math.atan2(float(np.interp(distance, path[0], path[1])), distance)) if path is not None else 0.
     self.frames += 1
-    for box in boxes:
+    # once a frame: head_place's rotation, each box's place and, for the boxes past the gates this loop may read, their
+    # pixels (lamp_pixels_many: worked out together, a frame's boxes cost about what one did): of the boxes the loop takes
+    # up (under LIGHT_READ_CONF only within the governing bearing and GREEN_LOW_MAX of them), the first MAX_READ_HEADS,
+    # which it always reads; one after them is read only under MAX_READ_HEADS heads, and then converts its own
+    rot = calib_from_view(rpy_calib) if len(boxes) else None
+    places = [head_place(self.lens, rpy_calib, cam_height, box, rot) for box in boxes]
+    governs_low = [float(box[4]) >= LIGHT_READ_CONF or abs(place[1] - lane_bearing(place[2])) <= GOVERN_BEARING_DEG
+                   for box, place in zip(boxes, places, strict=True)]
+    want, taken, n_low = [], 0, 0
+    for i, box in enumerate(boxes):
+      low = float(box[4]) < LIGHT_READ_CONF
+      if not governs_low[i] or (low and n_low >= GREEN_LOW_MAX):
+        continue
+      n_low += low
+      if taken < MAX_READ_HEADS and reads_pixels(box, places[i]):
+        want.append(i)
+      taken += 1
+    pixels = self.pixels(nv12, stride, y_height, boxes, want)
+    for i, box in enumerate(boxes):
       norm = (float(box[0]) / self.lens.width, float(box[1]) / self.lens.height, float(box[2]) / self.lens.width,
               float(box[3]) / self.lens.height)
       low = float(box[4]) < LIGHT_READ_CONF
+      place = places[i]
       if low:
         # under LIGHT_READ_CONF (down to decoder.LIGHT_GREEN_CONF) a box counts only if it reads green: read only within
         # the governing bearing and at most GREEN_LOW_MAX a frame, the rest left unread (lowConf)
-        _, bearing, distance = head_place(self.lens, rpy_calib, cam_height, box)
-        if abs(bearing - lane_bearing(distance)) > GOVERN_BEARING_DEG:
+        _, bearing, distance = place
+        if not governs_low[i]:
           rejects.append(LightHead(-1, norm, float(box[4]), 'unknown', 0, 'unknown', 'lowConf', bearing, distance, False))
           continue
         if low_read >= GREEN_LOW_MAX:
-          low_left.append((box, norm, bearing, distance))
+          low_left.append((box, norm, place))
           continue
         low_read += 1
       if len(reads) >= MAX_READ_HEADS:
         self.gate_counts['overCap'] += 1
         rejects.append(LightHead(-1, norm, float(box[4]), 'unknown', 0, 'unknown', 'overCap', 0., 0., False))
         continue
-      r = read_head(nv12, stride, y_height, self.lens, rpy_calib, cam_height, box)
+      r = read_head(nv12, stride, y_height, self.lens, rpy_calib, cam_height, box, rot, place, pixels.get(i))
       if r.gated:
         self.gate_counts[r.reason] += 1
         rejects.append(LightHead(-1, norm, float(box[4]), 'unknown', 0, 'unknown', r.reason, r.bearing, r.distance, False))
@@ -571,12 +640,15 @@ class LightReader:
     # there is left unpublished too); else left unread
     green = any(r.state == 'green' for _, _, r in reads) or any(hd.state == 'green' for hd in heads)
     more = len(reads)
-    for box, norm, bearing, distance in low_left:
+    if green:  # the ones this loop reads, worked out together
+      pixels = self.pixels(nv12, stride, y_height, [box for box, _, _ in low_left],
+                           [k for k, (box, _, place) in enumerate(low_left[:max(MAX_READ_HEADS - more, 0)]) if reads_pixels(box, place)])
+    for k, (box, norm, place) in enumerate(low_left):
       if not green or more >= MAX_READ_HEADS:
-        rejects.append(LightHead(-1, norm, float(box[4]), 'unknown', 0, 'unknown', 'lowConf', bearing, distance, False))
+        rejects.append(LightHead(-1, norm, float(box[4]), 'unknown', 0, 'unknown', 'lowConf', place[1], place[2], False))
         continue
       more += 1
-      r = read_head(nv12, stride, y_height, self.lens, rpy_calib, cam_height, box)
+      r = read_head(nv12, stride, y_height, self.lens, rpy_calib, cam_height, box, rot, place, pixels.get(k))
       self.gate_counts[r.reason] += r.gated
       reason = r.reason if r.gated or r.state == 'unknown' else 'lowConf'
       rejects.append(LightHead(-1, norm, float(box[4]), 'unknown', 0, r.state, reason, r.bearing, r.distance, False, r.detail, r.near))
@@ -593,6 +665,12 @@ class LightReader:
     published = [h for h in out if h.conf >= MIN_CONF or h.read != 'unknown' or h.state != 'unknown']
     self.rejects = rejects + [h for h in out if not (h.conf >= MIN_CONF or h.read != 'unknown' or h.state != 'unknown')]
     return published
+
+  def pixels(self, nv12: np.ndarray, stride: int, y_height: int, boxes, want: list[int]) -> dict:
+    """{index: lamp_pixels} of boxes[i] for each i in want, worked out together (lamp_pixels_many)."""
+    if not want:
+      return {}
+    return dict(zip(want, lamp_pixels_many(nv12, stride, y_height, [pixel_rect(self.lens, boxes[i]) for i in want]), strict=True))
 
   def sample(self, t: float, nv12: np.ndarray, stride: int, y_height: int, heads: list[LightHead]) -> None:
     """Log up to SAMPLE_HEADS of this frame's heads, the governing first, then the unread, then the tallest: each one's read,

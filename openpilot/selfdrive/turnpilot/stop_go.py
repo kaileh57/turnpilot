@@ -1681,8 +1681,11 @@ class StopGo:
 
   def _need_s(self) -> float:
     """s every go condition must hold for the go: VISION_LONG_CLEAR_S for the long look, VISION_CLEAR_S under vision, else
-    CLEAR_S."""
-    self.need_s = (sr.VISION_LONG_CLEAR_S if self.long_look or self._limited_now() else sr.VISION_CLEAR_S) if self.vision else sr.CLEAR_S
+    CLEAR_S; longer by the age past DET_FRESH_S its slower views are judged fresh at (visibility.extra_age_s: a car crossing
+    in that age is still inside the window)."""
+    base = (sr.VISION_LONG_CLEAR_S if self.long_look or self._limited_now() else sr.VISION_CLEAR_S) if self.vision else sr.CLEAR_S
+    extra = getattr(getattr(self, '_live', None), 'extra_age_s', None)  # a live view source without cadences (the sim's oracle): 0
+    self.need_s = base + (extra() if callable(extra) else 0.)
     return self.need_s
 
   def _limited_now(self) -> bool:
@@ -2017,7 +2020,7 @@ class StopGo:
     for k in needed - self.needed:
       self.view_age[k] = min(self.view_age[k], 0.)  # needed from now: its grace starts now
     self.needed = needed
-    live = f.live
+    live = self._live = f.live
     dead = sorted(k for k in needed if self.view_age[k] >= DET_FAULT_S - 1e-6)
     if self.vision:
       # a side view late or gone is the walk's to read (nothing at its bearings: the lane's reach), never a hold of its own

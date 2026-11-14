@@ -321,7 +321,7 @@ def track_evidence(obj) -> dict:
   """What a stop for this track rests on, for the log of a hard brake."""
   return {'track_id': int(obj.trackId), 'cls': str(obj.cls), 'camera': str(obj.camera), 'hits': int(obj.age),
           'conf': round(float(obj.conf), 3), 'x': round(float(obj.x), 2), 'y': round(float(obj.y), 2),
-          'vx': round(float(obj.vx), 2), 'vy': round(float(obj.vy), 2), 'in_path': bool(obj.inPath)}
+          'vx': round(float(obj.vx), 2), 'vy': round(float(obj.vy), 2), 'in_path': bool(obj.inPath), 'trusted': velocity_trusted(obj)}
 
 
 def stop(v_ego: float, d_stop: float, reason: str, confirmed: bool = True, v_lead: float = 0., evidence: dict | None = None,
@@ -342,8 +342,9 @@ def b_only(obj) -> bool:
 
 
 def velocity_trusted(obj) -> bool:
-  """Its velocity is the tracker's, not range noise: VEL_TRUST_HITS hits."""
-  return obj.age >= VEL_TRUST_HITS
+  """Its velocity is the tracker's, not range noise: VEL_TRUST_HITS hits, or for a track the side views feed at their
+  stand cadence its hits over a span (TrackedObject.sideTrusted: scene/tracker.py side_trusted)."""
+  return obj.age >= VEL_TRUST_HITS or bool(getattr(obj, 'sideTrusted', False))
 
 
 def confirmed_track(obj) -> bool:
@@ -715,6 +716,10 @@ class ScenePolicy:
     self.accel_cap = NO_ACCEL_CAP
     self.released_id: int | None = None  # the maneuver whose junction hold a gas press released
     self.committed_id: int | None = None  # the maneuver the car passed the hold line for faster than COMMIT_SPEED
+    # the far-side turn whose autonomous left carries its go through this frame (turnpilotd: UnprotectedLeft.carrying, its
+    # withdrawal no longer standing the car short of the oncoming lanes): its junction holds yield to it as to a committed
+    # turn's, on that frame only (a read red's firm stop may yet stand the car, and its next go is judged afresh)
+    self.carry_id: int | None = None
     # the maneuver whose crosswalk hold was confirmed (braking harder than the curve may for its walker) and has been in force on
     # every frame since: crossing its line under it commits nothing (committed_past_line) while anyone still holds it
     self.crosswalk_id: int | None = None
@@ -823,7 +828,7 @@ class ScenePolicy:
       self.fault_open = False
       if distance < HOLD_LINE_M + GAS_RELEASE_M:  # the same junction, the car at it
         self.committed_id = maneuver_id
-    if maneuver_id is not None and maneuver_id in (self.released_id, self.committed_id):
+    if maneuver_id is not None and maneuver_id in (self.released_id, self.committed_id, self.carry_id):
       junction = []
       if maneuver_id != self.released_id:
         junction = self._late_walker(objects, available, maneuver, distance, v_ego, right_hand_traffic, maneuver_id, dt, heading_deg)
@@ -867,7 +872,7 @@ class ScenePolicy:
         self.cross_logged = maneuver_id
         cloudlog.event("turnpilot.cross_traffic_hold", maneuver_id=maneuver_id, distance=round(distance, 1), v_ego=round(v_ego, 2),
                        confirmed=held[0].confirmed, **(held[0].evidence or {}))
-      if held[0].evidence['hits'] >= VEL_TRUST_HITS:  # seen closing by its own motion: a new track's hold ends with its doubt
+      if held[0].evidence.get('trusted', held[0].evidence['hits'] >= VEL_TRUST_HITS):  # seen closing by its own motion: a new track's hold ends with its doubt
         self.cross_seen = (maneuver_id, self.t, held[0].evidence)
       return held
     seen = self.cross_seen

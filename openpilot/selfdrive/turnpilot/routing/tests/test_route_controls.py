@@ -12,8 +12,8 @@ import pytest
 
 from openpilot.selfdrive.turnpilot.maps.corridor import level2_index
 from openpilot.selfdrive.turnpilot.routing import controls as controls_module
-from openpilot.selfdrive.turnpilot.routing.controls import (CONTROL_LINE_M, MAP_MARGIN_M, MARKER, SIDECAR, actor_call, controls_ahead,
-                                                            haversine, http_call, route_controls)
+from openpilot.selfdrive.turnpilot.routing.controls import (CONTROL_LINE_M, MAP_MARGIN_M, MARKER, SIDECAR, SIGNAL_NODE_LINE_M,
+                                                            actor_call, controls_ahead, haversine, http_call, route_controls)
 
 M_PER_DEG = 111195.
 LAT0, LON0 = 39.77, -86.16
@@ -208,6 +208,20 @@ def test_cross_suspect_and_junction():
                     (200., 300., {'stop': True, 'crossing': []}), (300., 400., {})])
   controls, _ = route_controls(v, steps())
   assert [(c.kind, c.junction, c.cross_suspect) for c in controls] == [('stop', True, True), ('yield', True, False), ('stop', False, False)]
+
+
+def test_a_signal_on_a_node_no_road_meets_has_its_line_at_that_node():
+  """A signal on its approach's own node (no other road meets there: OSM's signal at its stop line) has its line
+  SIGNAL_NODE_LINE_M before the node, not CONTROL_LINE_M: route 29's stands at the red of three such signals stood 0.3-4.8 m
+  short of the node, 6.2-10.7 m past a line at CONTROL_LINE_M. A signal at a junction node and a stop sign anywhere keep
+  CONTROL_LINE_M."""
+  v = StubValhalla([(0., 100., {'node_signal': True, 'crossing': []}), (100., 200., {'node_signal': True}),
+                    (200., 300., {'stop': True, 'crossing': []}), (300., 400., {})])
+  controls, _ = route_controls(v, steps())
+  assert [(c.kind, round(c.route_m, 1), c.junction) for c in controls] == [
+    ('signal', 100. - SIGNAL_NODE_LINE_M - MAP_MARGIN_M, False), ('signal', 200. - CONTROL_LINE_M - MAP_MARGIN_M, True),
+    ('stop', 300. - CONTROL_LINE_M - MAP_MARGIN_M, False)]
+  assert 3. < SIGNAL_NODE_LINE_M < CONTROL_LINE_M
 
 
 def test_walk_or_snap_and_partial_said():

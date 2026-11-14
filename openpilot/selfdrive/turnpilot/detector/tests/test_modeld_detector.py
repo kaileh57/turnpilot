@@ -760,8 +760,8 @@ class TestCameraLights(OpenpilotTestCase):
     assert [c.args[0] for c in said.call_args_list] == ["turnpilot light rejects failed"]
 
   def test_a_heads_nearer_range_rides_on_its_instance_and_is_read_back(self):
-    # the reader's second range (light_state.head_near) has no field of its own in the message: it rides after the head's id,
-    # on the heads and on the unpublished boxes, and map_controls reads it back (a red's span, a low-confidence red's veto)
+    # the reader's second range (light_state.head_near) rides after the head's id, on the heads and on the unpublished boxes,
+    # and on Light.nearDistance, which map_controls reads back exact (a red's span, a low-confidence red's veto)
     from openpilot.cereal import messaging
     from openpilot.selfdrive.turnpilot.detector.modeld_detector import fill_heads, fill_lights
     from openpilot.selfdrive.turnpilot.map_controls import camera_light_input
@@ -773,8 +773,8 @@ class TestCameraLights(OpenpilotTestCase):
       LightHead(-1, (0.7, 0.1, 0.71, 0.16), 0.13, 'unknown', 0, 'unknown', 'lowConf', -2., 60., False)])
     assert [x.instance for x in td.lights.lights] == ['head6 near29.4 h43 fr0.47/0.25/0.00', 'head7 near40.0']
     cam = camera_light_input(td.lights.as_reader(), 'read', 0., 'addOnly', td.lightRejects)
-    assert cam.heads == [('red', pytest.approx(70.7)), ('green', 40.)] and cam.nears == [29.4, 40.] and cam.ids == [6, 7]
-    assert cam.vetoes == [('red', 60., 31.2, -2.)]  # the low-confidence red alone, its bearing with it: the unread box is nothing
+    assert cam.heads == [('red', pytest.approx(70.7)), ('green', 40.)] and cam.nears == pytest.approx([29.36, 40.]) and cam.ids == [6, 7]
+    assert cam.vetoes == [('red', 60., pytest.approx(31.2), -2.)]  # the low-confidence red alone, its bearing with it: the unread box is nothing
 
   def test_add_only_mode_is_not_shadow(self):
     det, pm = with_lights(make_detector(), 'addOnly'), PM()

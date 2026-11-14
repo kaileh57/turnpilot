@@ -596,6 +596,27 @@ def test_after_the_go_an_oncoming_car_still_holds_short_of_the_oncoming_lanes():
   assert d.should_stop and d.speed_cap == 0.
 
 
+def test_a_left_carrying_its_go_through_is_never_stopped_by_the_oncoming_hold_and_it_comes_back_once_it_doesnt():
+  """The autonomous left past where its withdrawal stands the car short of the oncoming lanes (unprotected_left.go_can_stop,
+  the actuator's lag in it) carries its go through: the scene's junction hold for a car it tracks there yields to it
+  (carry_id, turnpilotd's each frame), as to a committed turn's, where the comfortable curve alone still reads a stop short
+  of the lanes (7 m out at 2.4 m/s: 1.9 m of it). Never latched: on a frame it isn't carried (a red's firm stop stood the
+  car, its own hold), the hold is back."""
+  oncoming = scene([car(40., 5., vx=-10., age=VEL_TRUST_HITS)])
+  sp = ScenePolicy()
+  sp.update([], True, LEFT_TURN, HOLD_LINE_M + 0.5, 0., maneuver_id=3)
+  assert sp.update(oncoming.objects, True, LEFT_TURN, 7., 2.4, maneuver_id=3).holding  # the comfortable curve's stop
+  sp.carry_id = 3
+  d = sp.update(oncoming.objects, True, LEFT_TURN, 7., 2.4, maneuver_id=3)
+  assert not d.holding and not d.should_stop and sp.junction is None and sp.committed_id is None
+  sp.carry_id = None
+  d = sp.update(oncoming.objects, True, LEFT_TURN, 6.9, 0., maneuver_id=3)
+  assert d.holding and d.reason == "waiting for oncoming" and sp.committed_id is None
+  # another maneuver's carry yields nothing here
+  sp.carry_id = 9
+  assert sp.update(oncoming.objects, True, LEFT_TURN, 6.9, 0., maneuver_id=3).holding
+
+
 def test_an_untrusted_track_in_the_oncoming_lanes_never_brakes_harder_than_the_curve():
   # a parked or waiting car (vx 0), or a ghost a few frames old, in the oncoming lanes 20 m past the junction as the car
   # nears its hold line: taken as coming until its velocity is trusted, so it holds, but only on the comfortable curve,

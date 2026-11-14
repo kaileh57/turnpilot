@@ -104,7 +104,9 @@ def test_a_coast_on_the_lifts_speed_is_carried_across_the_oncoming_lanes_in_abou
 
   v0, lanes = entry_v(sim, n0), in_lanes_s(sim, n0)
   crawl_v = committed[0]['v']  # what the coasting model keeps from the lift (0.78 m/s at 0.3 s of lag, more at 1 s)
-  assert crawl_v < 1.2 and v0 < crawl_v + 0.1, (crawl_v, v0)
+  # committed about 2 m short of the lanes' entry (go_committed: the last point its withdrawal fits, the actuator's lag in
+  # it), the carry lifts it before it enters them
+  assert crawl_v < 1.2 and v0 > crawl_v, (crawl_v, v0)
   assert lanes <= profile_s(v0, LANES_M) + 0.6 + lag_s, (lanes, profile_s(v0, LANES_M))  # the planner's 1 s cap and the lag
   assert lanes < 0.4 * LANES_M / crawl_v, lanes  # HEAD's crawl at it: 15.4 s at 0.78 m/s, 10.7 at 1.12
   # the rest of the crossing from the commit, as R_req has it (SPEED_MARGIN x the limit over it and PET_S, from the conflict
@@ -170,24 +172,38 @@ def from_rest(a):
 
 
 @pytest.mark.parametrize('lag_s', [0.3, 1.0])
-@pytest.mark.parametrize('model,judged', [('launching', False), ('ramp1.0', True), ('rest0.8', True), ('rest1.3', False)])
-def test_a_normal_launch_is_unchanged_by_the_carry(model, judged, lag_s):
+@pytest.mark.parametrize('model', ['launching', 'ramp1.0', 'rest0.8', 'rest1.3'])
+def test_a_normal_launch_is_unchanged_by_the_carry(model, lag_s):
   """This car's own launches from a stand (11-06, 1d and 1e: four engaged, no gas; 0.36-0.55 s from first motion to 0.3 m/s,
-  0.92-1.6 s from the plan's go) commit from LINE_D at 2.6-3.0 m/s and are never carried; one of them (1d, 1.1 m/s^2 to
-  2.0 m/s in 1.85 m) is judged by L3 from LINE_D at 1.94 m/s. In the Sim, a launch at the left's own 1.5 m/s^2 is never
-  judged; one at 0.8-1.0 m/s^2 is judged on and commits past LEFT_LAUNCH_SPEED. At the lag of this car's launches too, each
-  drives exactly as with no carry at all, nothing certified, never a handback."""
+  0.92-1.6 s from the plan's go) commit from LINE_D at 2.6-3.0 m/s on the old commit (no lag in the stop); one of them (1d,
+  1.1 m/s^2 to 2.0 m/s in 1.85 m) is judged by L3. L3 judges every launch from LINE_D now, where its withdrawal still fits
+  (go_stop_m, the actuator's lag in it: about 1.2-1.5 m/s there), each judged on with nothing in the band, and the commit is
+  the last point a withdrawal fits (go_committed: 2.0-2.3 m/s from LINE_D). In the Sim a launch at the left's own 1.5 m/s^2
+  and one at 1.3 commit past LEFT_LAUNCH_SPEED and drive exactly as with no carry at all; one at 0.8 m/s^2 (and 1.0 at a
+  second of lag) now commits just short of it and is carried from there (CARRIED), never faster through the oncoming lanes
+  than the left's own launch. Nothing certified but the carry, never a handback."""
   fn = {'launching': launching, 'ramp1.0': ramp(1.0), 'rest0.8': from_rest(0.8), 'rest1.3': from_rest(1.3)}[model]
   sim, plans, n0, said = run_left(fn, seconds=15., lag_s=lag_s)
-  base, _, b0, _ = run_left(fn, seconds=15., lag_s=lag_s, carry=False)
-  assert [(round(s, 6), round(v, 6)) for s, v, _ in sim.trace[n0:]] == [(round(s, 6), round(v, 6)) for s, v, _ in base.trace[b0:]]
-  assert not named(said, 'turnpilot.left_carry') and not any(kw['carry'] for kw in named(said, 'turnpilot.go_lift'))
   slow = named(said, 'turnpilot.left_not_launched')
-  assert bool(slow) == judged and all(kw['on'] for kw in slow), slow
+  assert len(slow) == 1 and slow[0]['on'], slow
   committed = named(said, 'turnpilot.left_committed')
-  assert len(committed) == 1 and not committed[0]['carry'] and committed[0]['v'] >= LEFT_LAUNCH_SPEED, committed
+  carried = (model, lag_s) in CARRIED
+  assert len(committed) == 1 and committed[0]['carry'] == carried, committed
+  # the log rounds to 0.01: 1.995 reads 2.0
+  assert (committed[0]['v'] < LEFT_LAUNCH_SPEED + 0.005) if carried else (committed[0]['v'] >= LEFT_LAUNCH_SPEED - 0.005), committed
+  if carried:  # the carry's lift, never more accel than its cap (test_a_coast_on_the_lifts_speed_... has the rest)
+    lifted = [a for a, _, on in sim.planned if on]
+    assert len(named(said, 'turnpilot.left_carry')) == 1 and lifted and max(lifted) <= CARRY_ACCEL + 1e-6
+  else:
+    base, _, b0, _ = run_left(fn, seconds=15., lag_s=lag_s, carry=False)
+    assert [(round(s, 6), round(v, 6)) for s, v, _ in sim.trace[n0:]] == [(round(s, 6), round(v, 6)) for s, v, _ in base.trace[b0:]]
+    assert not named(said, 'turnpilot.left_carry') and not any(kw['carry'] for kw in named(said, 'turnpilot.go_lift'))
   assert not any(str(p.controlPrompt) in TAKE_CONTROL_PROMPTS for p in plans)
   assert sim.s > JUNCTION + CLEAR_PATH_PAST_M
+
+
+# the launches above that commit short of LEFT_LAUNCH_SPEED from LINE_D at the Sim's lags (go_committed), carried from there
+CARRIED = {('rest0.8', 0.3), ('rest0.8', 1.0), ('ramp1.0', 1.0)}
 
 
 def test_a_slow_launch_from_rest_is_carried_too_and_crosses_at_the_profiles_pace():

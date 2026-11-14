@@ -209,14 +209,15 @@ def test_driven_off_in_the_full_stop_under_the_gas_is_the_drivers():
 
 # --- gas before the stop ---
 
-def test_gas_before_the_stop_then_lift_past_the_line_is_an_overrun():
+def test_gas_before_the_stop_then_lift_past_the_line_is_the_drivers_overrun():
+  # the driver's gas over the line: the stop is dropped (an overrun, logged), his own maneuver, never a chime (_crossed)
   car = Car([(150., 'stop')])
   car.run_until(lambda out, dec: out.stops)
   car.run_until(lambda out, dec: car.s > 151., gas=True, accel=0.5)
   out, dec, _ = car.step()
-  assert not out.stops and out.alert == 'stopOverrun'
+  assert not out.stops and out.alert != 'stopOverrun' and car.policy.driven.driver and car.policy.driven.cause == 'overrun'
   out, dec, _ = car.run(1.)
-  assert out.alert == 'stopOverrun' and not dec.should_stop
+  assert out.alert != 'stopOverrun' and not dec.should_stop and out.prompt == 'none'
 
 
 def test_gas_before_the_stop_then_lift_short_resumes_at_the_floor():
@@ -628,13 +629,11 @@ def test_unprotected_left_stops_before_the_hold_line_and_hands_back():
   out, dec, _ = car.run(5.)
   assert not dec.should_stop and out.prompt == 'none' and out.shown.kind == 'none'
   assert car.s > 250.
-  # never a second stop; the crossing the driver made with no go is said until the car is through (DRIVEN_THROUGH_M past
-  # the line, owner decision (b)), then nothing
+  # never a second stop; the crossing the driver made on his own gas is his maneuver: kept (Driven, driver) and never said
   line = 250. - HOLD_LINE_M - 1.
   after = car.rows[n:]
   assert not any(r[4].should_stop for r in after if r[1] > line + 3.)
-  assert all(r[5].prompt == 'unprotectedTurnTakeControl' for r in after if line + 3. < r[1] < line + DRIVEN_THROUGH_M - 1.)
-  assert all(r[5].prompt == 'none' for r in after if r[1] > line + DRIVEN_THROUGH_M + 1.)
+  assert all(r[5].prompt == 'none' and not r[5].driven for r in after if r[1] > line + 3.)
 
 
 def test_unprotected_left_approach_reason_and_engage():
@@ -797,8 +796,8 @@ def test_hold_text_for_a_yield_that_became_a_stop():
 @pytest.mark.parametrize("v_creep,past", [(1.5, 3.), (1.9, 6.), (1.0, 12.)])
 def test_creeping_over_the_line_under_the_drivers_foot_is_never_stopped_in_the_junction(v_creep, past):
   # the driver's foot takes the car over the stop sign's line slower than COMMIT_SPEED and lifts past it: the car isn't
-  # held there, so it is an overrun, said out loud, and the stop is dropped. Never a speed cap of 0 in the junction with no
-  # hold, no prompt and no way out
+  # held there, so it is an overrun and the stop is dropped, the driver's own maneuver (never a chime: _crossed). Never a
+  # speed cap of 0 in the junction with no hold, no prompt and no way out
   car = Car([(200., 'stop')], v=v_creep, cruise=v_creep)
   car.s = 180.
   car.run_until(lambda out, dec: out.stops)
@@ -807,7 +806,7 @@ def test_creeping_over_the_line_under_the_drivers_foot_is_never_stopped_in_the_j
   for _ in range(int(10. / DT_MDL)):
     out, dec, _ = car.step()
     alerts.append(out.alert)
-  assert 'stopOverrun' in alerts
+  assert 'stopOverrun' not in alerts and car.policy.driven.driver
   assert not out.stops and dec.speed_cap > 5. and car.v > v_creep - 0.05
 
 
@@ -1205,12 +1204,13 @@ def test_a_gas_nudge_short_of_the_line_never_lets_the_latch_go():
   assert held(out, dec) and car.policy.driven is None and car.s - line < 4.3
 
 
-def test_a_line_crossed_under_the_drivers_gas_is_said_until_the_car_is_through():
-  """Owner decision (b), 2026-10-30 (skeptic SG-residual-main): the driver's gas taking the car past a stop line, or a left's
-  hold line, with no go of TurnPilot's let the latch go and left the crossing silent: re-engaged, the car drove through the
-  junction with no check and no prompt. Now its take-control (stopSignTakeControl, unprotectedTurnTakeControl) and its
-  reason stay up, engaged or not, until the car is DRIVEN_THROUGH_M past the stop point, a re-engage inside the junction
-  hearing it again; nothing holds or brakes the car for it. The same for a stop sign overrun on the approach."""
+def test_a_line_crossed_under_the_drivers_gas_is_his_and_never_said():
+  """The driver's gas taking the car past a stop line, or a left's hold line, with no go of TurnPilot's lets the latch go:
+  the driver's maneuver (Driven, driver), logged, and never a prompt or a chime, re-engaged inside the junction or not (the
+  matrix, 2026-11-12: "Stop sign passed unchecked: take control" chimed 2 s after the driver drove the sign on the gas and
+  engaged again; owner decision (b)'s prompt is for TurnPilot's own crossing alone,
+  test_a_line_turnpilot_took_the_car_over_is_said_until_the_car_is_through). Nothing holds or brakes the car for it. The
+  same for a stop sign overrun on the approach under the gas."""
   for kind in ('stop', 'left'):
     if kind == 'left':
       car = left_car()
@@ -1229,9 +1229,9 @@ def test_a_line_crossed_under_the_drivers_gas_is_said_until_the_car_is_through()
     while car.s < line + DRIVEN_THROUGH_M + 5.:  # re-engaged rolling: the model drives on through the junction
       rows.append((car.s,) + car.step(accel=0.5, **cmd))
     inside = [(out, dec) for s, out, dec, _ in rows if s < line + DRIVEN_THROUGH_M - 0.5]
-    assert inside and all(out.prompt == prompt and out.driven == reason for out, _ in inside), kind
-    assert not any(dec.should_stop or dec.speed_cap < car.v - 1. for _, dec in inside), kind  # said, never held
-    assert all(out.prompt == 'none' and not out.driven for s, out, _, _ in rows if s > line + DRIVEN_THROUGH_M + 0.5), kind
+    assert inside and all(out.prompt == 'none' and not out.driven for out, _ in inside), (kind, prompt, reason)
+    assert not any(dec.should_stop or dec.speed_cap < car.v - 1. for _, dec in inside), kind  # never held
+    assert all(out.prompt == 'none' and not out.driven for s, out, _, _ in rows), kind
   # a gas nudge, then the car rolling on past the latch's reach (no gas: a coast, a creep mode): the driver's gas moved it,
   # so it is theirs, never a hold in the crossing lanes on a re-engage; said the same
   car = Car([(150., 'stop')])
@@ -1242,17 +1242,52 @@ def test_a_line_crossed_under_the_drivers_gas_is_said_until_the_car_is_through()
   while car.s < 150. + 3.5:
     car.step(accel=0. if car.v > 0.3 else 0.2, stop=StopCommand('wait'))  # disengaged: the plan isn't applied
   out, dec, _ = car.step(stop=StopCommand('wait'))
-  assert car.policy.held is None and not dec.should_stop and out.prompt == 'stopSignTakeControl'
+  assert car.policy.held is None and not dec.should_stop and out.prompt == 'none' and car.policy.driven.driver
   # overrun on the approach: the driver's gas over the line, lifting past the latch's reach
   car = Car([(200., 'stop')], v=1.5, cruise=1.5)
   car.s = 180.
   car.run_until(lambda out, dec: out.stops)
   car.run_until(lambda out, dec: car.s > 203., gas=True, accel=0.)
   out, dec, _ = car.step()
-  assert out.prompt == 'stopSignTakeControl' and out.driven == "Stop sign passed unchecked: take control" and not dec.should_stop
+  assert out.prompt == 'none' and not out.driven and not dec.should_stop and car.policy.driven.driver
   car.run_until(lambda out, dec: car.s > 200. + DRIVEN_THROUGH_M + 1., accel=0.5)
   assert car.step()[0].prompt == 'none'
 
+
+def test_a_line_turnpilot_took_the_car_over_is_said_until_the_car_is_through():
+  """Owner decision (b), 2026-10-30: a stop line the car is taken over with openpilot engaged and no gas (the plan failed to
+  stop it) is TurnPilot's overrun, never silent: stopOverrun, and its take-control and reason up until the car is
+  DRIVEN_THROUGH_M past the line. The same overrun with openpilot disengaged is the driver's: nothing said."""
+  for engaged in (True, False):
+    car = Car([(200., 'stop')], v=5., cruise=5.)
+    car.s = 170.
+    rows = []
+    while car.s < 200. + DRIVEN_THROUGH_M + 5.:  # the car keeps its speed through the line, the plan not obeyed
+      rows.append((car.s,) + car.step(accel=0., engaged=engaged))
+    said = [out for s, out, _, _ in rows if 200. + OVERRUN_PAST_M + 1. < s < 200. + DRIVEN_THROUGH_M - 1.]
+    if engaged:
+      assert said and all(out.prompt == 'stopSignTakeControl' and out.driven == "Stop sign passed unchecked: take control"
+                          for out in said)
+      assert any(out.alert == 'stopOverrun' for _, out, _, _ in rows)
+    else:
+      assert said and not any(out.driven or out.prompt == 'stopSignTakeControl' or out.alert == 'stopOverrun'
+                              for _, out, _, _ in rows)
+    assert all(out.prompt == 'none' for s, out, _, _ in rows if s > 200. + DRIVEN_THROUGH_M + 0.5)
+
+
+
+def test_a_line_crossed_on_the_drivers_gas_with_openpilot_engaged_is_his_too():
+  # the gas override keeps openpilot engaged (carControl.enabled) with the driver's foot down: his crossing, never said
+  car = Car([(150., 'stop')])
+  car.run_until(held, stop=StopCommand('wait'))
+  car.run(1.5, stop=StopCommand('wait'))
+  rows = []
+  while car.s < 150. + 4.:
+    rows.append(car.step(gas=True, accel=0.4 if car.v < 1. else 0., engaged=True, stop=StopCommand('wait')))
+  while car.s < 150. + DRIVEN_THROUGH_M + 5.:
+    rows.append(car.step(accel=0.5 if car.v < 3. else 0., engaged=True, stop=StopCommand('wait')))
+  assert car.policy.held is None
+  assert not any(out.driven or out.prompt == 'stopSignTakeControl' or out.alert == 'stopOverrun' for out, _, _ in rows[20:])
 
 def test_a_gas_nudge_past_a_red_and_a_re_engage_still_stops_for_the_red():
   # skeptic residual-check-1 (058df13, d): a red held at its line, the driver nudges 2.5 m at 0.8 m/s under the gas and
@@ -1678,7 +1713,7 @@ def test_G14_the_latch_holds_the_car_only_within_its_reach_past_the_line_and_bey
   def accel(c):
     return 0. if c.s < 30. else -2. ** 2 / (2. * past) if c.v > 0. else 0.
   for _ in range(int(20. / DT_MDL)):
-    car.step(accel=accel(car))
+    car.step(accel=accel(car), engaged=True)  # openpilot engaged: the model's late braking, not the driver's
   held_rows = [r for r in car.rows if r[4].should_stop and r[5].shown is not None and r[5].shown.action == 'held']
   if past <= LATCH_PAST_M:
     assert held_rows and abs(car.s - 30. - past) < 0.3 and car.policy.held_control() is not None
@@ -1739,11 +1774,10 @@ def test_C11_a_mapped_stop_the_camera_never_saw_still_stops_gently_and_is_logged
     assert not [1 for name, _ in events if name in ('turnpilot.map_stop_unseen',)]
 
 
-def test_the_drivers_crossing_past_the_lefts_own_hold_is_said_until_the_car_is_through():
-  """Skeptic SIMFIX round 2 (owner decision (b)): after its go let the latch go (cause gap), the left's own hold
-  (unprotected_left: hold_here) let go as the driver's says so (LeftCommand.crossed, once): the left's crossing is the
-  latch's (Driven), its take-control and reason up, engaged or not, until the car is DRIVEN_THROUGH_M past the line, then
-  nothing; never a hold or a cap for it."""
+def test_the_drivers_crossing_past_the_lefts_own_hold_is_his_and_never_said():
+  """Skeptic SIMFIX round 2: after its go let the latch go (cause gap), the left's own hold (unprotected_left: hold_here) let
+  go as the driver's says so (LeftCommand.crossed, once): the left's crossing is the latch's (Driven), the driver's own
+  maneuver (his gas: drivenOff), logged and never a prompt or a chime (_crossed); never a hold or a cap for it."""
   car = left_car()
   held_left(car, left_cmd(reason="Waiting for a gap"))
   line = 250. - HOLD_LINE_M - 1.
@@ -1754,15 +1788,15 @@ def test_the_drivers_crossing_past_the_lefts_own_hold_is_said_until_the_car_is_t
   assert out.prompt == 'none' and car.policy.driven is None
   out, dec, _ = car.policy_step(left_cmd(take_control=True, crossed='drivenOff'))  # the driver's: said once
   dr = car.policy.driven
-  assert dr is not None and dr.kind == UNPROTECTED and dr.maneuver_id == 7 and dr.cause == 'drivenOff'
-  assert out.prompt == 'unprotectedTurnTakeControl' and out.driven == "Unprotected left not checked: take control"
+  assert dr is not None and dr.kind == UNPROTECTED and dr.maneuver_id == 7 and dr.cause == 'drivenOff' and dr.driver
+  assert out.prompt != 'unprotectedTurnTakeControl' or not out.driven
   rows = []
   while car.s < line + DRIVEN_THROUGH_M + 5.:
     rows.append((car.s,) + car.policy_step(left_cmd(take_control=True)))
   inside = [(out, dec) for s, out, dec, _ in rows if s < line + DRIVEN_THROUGH_M - 0.5]
-  assert inside and all(out.prompt == 'unprotectedTurnTakeControl' and out.driven for out, _ in inside)
+  assert inside and not any(out.driven for out, _ in inside)
   assert not any(dec.should_stop or dec.speed_cap < car.v - 1. for _, dec in inside)
-  assert all(out.prompt == 'none' and not out.driven for s, out, _, _ in rows if s > line + DRIVEN_THROUGH_M + 0.5)
+  assert all(not out.driven for s, out, _, _ in rows)
 
 
 @pytest.mark.parametrize("nudge,theirs", [(1.5, True), (1.0, True), (0.4, False)])
@@ -1789,7 +1823,7 @@ def test_a_nudge_on_from_the_lefts_full_creep_is_never_held_in_the_oncoming_lane
   assert not in_lanes, f"held standing {in_lanes[0]} m from the junction, in the oncoming lanes"
   if theirs:
     assert car.policy.held is None and car.policy.driven is not None and not any(dec.should_stop for _, dec, _ in rows)
-    assert all(out.prompt == 'unprotectedTurnTakeControl' for out, _, _ in rows)
+    assert car.policy.driven.driver and not any(out.driven for out, _, _ in rows)  # his gas: never said (_crossed)
   else:
     assert car.policy.held is not None and car.policy.driven is None and car.v < 0.05 and junction - car.s > ONCOMING_ENTRY_M
 
@@ -1817,7 +1851,7 @@ def test_an_idle_creep_past_a_held_line_with_no_gas_is_the_drivers_never_held_in
   sign's line or a left's hold line, in the crossing or the oncoming lanes. Any movement past the stop point and what
   TurnPilot asked of the latch is the driver's for (a) and (b): let go past the latch's reach (or, at an unprotected turn,
   where a hold could no longer stand the car short of the oncoming lanes), driverWent handed back, else movedOff, never
-  held in the junction on the re-engage, its crossing said until the car is DRIVEN_THROUGH_M past the line."""
+  held in the junction on the re-engage. Made with openpilot disengaged, the crossing is the driver's: never said (_crossed)."""
   from openpilot.selfdrive.turnpilot.scene_policy import ONCOMING_ENTRY_M
   cases = [('stop shadow', lambda: Car([(150., 'stop')]), 150., {}, 'stopSignTakeControl', 'driverWent'),
            ('stop waiting', lambda: Car([(150., 'stop')]), 150., {'stop': StopCommand('wait')}, 'stopSignTakeControl', 'movedOff')]
@@ -1837,11 +1871,8 @@ def test_an_idle_creep_past_a_held_line_with_no_gas_is_the_drivers_never_held_in
     assert not any(r[4].should_stop for r in rows), name
     if 'left' in name:
       assert not any(r[2] < 0.05 and 250. - r[1] < ONCOMING_ENTRY_M for r in rows), name
-    dr = [r[5] for r in car.rows if r[5].driven]
-    assert dr and car.policy.driven is None and car.s > at + DRIVEN_THROUGH_M + 1., name  # said, and done once through
-    inside = [r[5] for r in rows if r[1] < at + DRIVEN_THROUGH_M - 0.5]
-    assert inside and all(out.prompt == prompt and out.driven for out in inside), (name, sorted({out.prompt for out in inside}))
-    assert all(r[5].prompt == 'none' for r in rows if r[1] > at + DRIVEN_THROUGH_M + 0.5), name
+    assert not any(r[5].driven for r in car.rows) and car.s > at + DRIVEN_THROUGH_M + 1., name  # never said
+    assert all(r[5].prompt != prompt for r in rows), name
 
 
 def test_an_idle_creep_short_of_the_latchs_reach_stays_held_for_the_full_check():
@@ -1959,7 +1990,7 @@ def test_the_latch_reengaged_too_fast_inside_its_creep_is_let_go_at_the_re_engag
   TurnPilot's metres: the driver's gas inside the creep to about 3.5 m/s, from where the latch taken up by a re-engage stands
   the car inside the lanes. The lanes test was reached only past the creep, so the latch was let go engaged, on its own
   braking. Let go at the re-engage itself, judged from its frame's speed before the latch brakes the car (skeptic round 2:
-  never for good on a driver's frame), its decision no stop, its crossing said (Driven)."""
+  never for good on a driver's frame), its decision no stop, its crossing the driver's (Driven, driver: his gas), never said."""
   car, s_held, rows = creep_then_gas(4.5)
   first = next(k for k, (_, latched, _) in enumerate(rows) if not latched)
   reengage = next(k for k, (engaged, _, _) in enumerate(rows) if engaged)
@@ -1967,9 +1998,9 @@ def test_the_latch_reengaged_too_fast_inside_its_creep_is_let_go_at_the_re_engag
   # the re-engage, lifted about where the creep ends, far short of the reach: only the lanes test lets it go
   assert first == reengage and rows[first - 1][2][1] - s_held < 2.2, (first, reengage)
   assert not any(r[4].should_stop or r[4].speed_cap < r[2] - 0.5 for _, _, r in rows[first:])  # never braked by the latch
-  assert row[5].driven and row[5].prompt == 'unprotectedTurnTakeControl'
+  assert not any(r[5].driven or r[5].prompt == 'unprotectedTurnTakeControl' for _, _, r in rows[first:])
   inside = [r for e, _, r in rows[first:] if e and r[1] < 250. - HOLD_LINE_M - 1. + DRIVEN_THROUGH_M - 1.]
-  assert inside and all(r[5].prompt == 'unprotectedTurnTakeControl' and not r[4].should_stop for r in inside)
+  assert inside and all(not r[5].driven and not r[4].should_stop for r in inside)
 
 
 def test_metres_the_driver_moved_past_the_latch_that_a_later_creep_takes_in_are_turnpilots_again():
@@ -2024,11 +2055,11 @@ def test_a_nudge_from_the_lefts_full_creep_braked_short_of_the_lanes_is_held_on_
   assert all(dec.should_stop and out.prompt == 'none' for out, dec, _ in rows) and junction - car.s == at
 
 
-def test_a_nudge_from_the_lefts_full_creep_into_the_lanes_is_said_as_it_enters_them_short_of_the_reach():
+def test_a_nudge_from_the_lefts_full_creep_into_the_lanes_is_the_drivers_as_it_enters_them_short_of_the_reach():
   """The latch's lanes on the driver's own frame: after the left's full creep (5 m from the centre, 1 m short of the
   oncoming entry, the reach 1 m inside them), the driver's gas (disengaged) crawls the car on into the oncoming lanes. A hold
-  there could only stand the car in them and it never comes back short of them: theirs as it enters them (drivenOff, the
-  crossing said), before the reach and before any re-engage, never 'waiting for a gap' inside them."""
+  there could only stand the car in them and it never comes back short of them: theirs as it enters them (drivenOff, his
+  crossing, never said), before the reach and before any re-engage, never 'waiting for a gap' inside them."""
   from openpilot.selfdrive.turnpilot.map_controls import LATCH_PAST_M
   from openpilot.selfdrive.turnpilot.scene_policy import ONCOMING_ENTRY_M
   junction = 250.
@@ -2042,7 +2073,7 @@ def test_a_nudge_from_the_lefts_full_creep_into_the_lanes_is_said_as_it_enters_t
     out, _, _ = car.step(gas=True, accel=0.4 if car.v < 0.6 else 0., left=creep)
     if let_go is None and car.policy.held is None:
       let_go = junction - car.s
-      assert out.prompt == 'unprotectedTurnTakeControl' and car.policy.driven.cause == 'drivenOff'
+      assert not out.driven and car.policy.driven.cause == 'drivenOff' and car.policy.driven.driver
   assert let_go is not None and ONCOMING_ENTRY_M - 0.1 < let_go < ONCOMING_ENTRY_M, let_go  # a frame or so inside them
   assert junction - let_go - stood < LATCH_PAST_M - 0.5  # well short of the reach
 
@@ -2110,7 +2141,7 @@ def test_a_stop_driven_past_at_speed_under_the_drivers_foot_is_gone_while_the_fo
   """Route 29 (2026-11-08): the driver drove three held lefts under the gas, and the turn's stop stayed in the plan (speed
   cap 0, accel cap -2.0, "Unprotected left ahead") for 6-8 s, 52-78 m past the junction, until navd's maneuver moved on: it
   was dropped only when the gas lifted. Past its line by OVERRUN_PAST_M faster than COMMIT_SPEED the driver went: the stop
-  is gone on that frame, its crossing said as any line crossed with no go."""
+  is gone on that frame, its crossing the driver's (Driven, driver), never said."""
   car = Car([(250., 'stop')] if kind == 'stop' else [], v=9., cruise=9.)
   kw = {}
   if kind == 'left':
@@ -2124,6 +2155,7 @@ def test_a_stop_driven_past_at_speed_under_the_drivers_foot_is_gone_while_the_fo
   assert car.v > 9.
   assert all(not o.stops for s, o in seen if s > 250. + OVERRUN_PAST_M + 1.), [round(s, 1) for s, o in seen if o.stops][-1]
   assert any(o.stops for s, o in seen if s < 250.)  # under the gas short of the line it is still a stop ahead
-  assert any(o.prompt in DRIVEN_PROMPT.values() for s, o in seen)  # crossed with no go: said
+  assert car.policy.driven is None or car.policy.driven.driver
+  assert not any(o.prompt in DRIVEN_PROMPT.values() or o.driven for s, o in seen)  # his foot: never said
   out, dec, _ = car.run(1.0, **kw)  # the gas lifted, openpilot engaged: nothing brakes the car
   assert not out.stops and car.v > 8.5 and out.alert != 'stopOverrun'

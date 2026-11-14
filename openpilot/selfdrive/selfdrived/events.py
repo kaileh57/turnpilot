@@ -416,7 +416,9 @@ def turnpilot_control_prompt_alert(CP: car.CarParams, CS: car.CarState, sm: mess
                  AlertStatus.critical, AlertSize.mid, Priority.MID, VisualAlert.steerRequired, AudibleAlert.tpHandback, .1)
   # a stop sign's wait is silent but for its info chime, once a WAIT_INFO_S (stop_go.py: stopGo.chime); the left's long waits
   # likewise once a wait, as each one's old handback bound passes (unprotectedLeft.chime: SF-4, review 2026-11-07)
-  chime = prompt not in SILENT_PROMPTS or (prompt == 'waitingForCross' and plan.stopGo.chime) or \
+  # the left's go again soon after a withdrawn one of the same left (unprotectedLeft.goRepeat): its banner, not its chime
+  repeat = prompt == 'leftGo' and plan.unprotectedLeft.goRepeat
+  chime = (prompt not in SILENT_PROMPTS and not repeat) or (prompt == 'waitingForCross' and plan.stopGo.chime) or \
     (prompt in ('waitingForGap', 'creepingForView') and plan.unprotectedLeft.chime)
   return Alert(plan.reason if plan is not None and plan.reason else CONTROL_PROMPT_TITLE.get(prompt, "TurnPilot"),
                CONTROL_PROMPT_TEXT.get(prompt, ''), AlertStatus.userPrompt, AlertSize.mid, Priority.LOW, VisualAlert.none,

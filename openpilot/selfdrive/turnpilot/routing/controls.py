@@ -39,7 +39,8 @@ crossing there, so the sign is likely the cross road's.
 The stop line: a sim sidecar (tiles_dir/controls.json, {"controls": {"<way_id>:<f|b>": {kind, line: [lat, lon], ...}}} from
 tools/sim/bridge/beamng/mapsignals.py) gives the sim's real lines, projected onto the route within the edge (lineMapped,
 line source sim). Otherwise the edge's end less CONTROL_LINE_M (line source default), for Valhalla's controls and the
-sidecar's alike. Either way less MAP_MARGIN_M. The OSM stop node never sets it: it marks a sign, not a line, 20-40 m back
+sidecar's alike, or less SIGNAL_NODE_LINE_M for a signal on a node no other road meets (its stop line's own node). Either way
+less MAP_MARGIN_M. The OSM stop node never sets it: it marks a sign, not a line, 20-40 m back
 on some approaches, and a yield moved back to its sign would end map_controls' YIELD_SPEED cap well short of the merge.
 It is carried as data only (osm_sign_m: the sign nearest the junction on the control's own edge, for route_audit). A stop or
 yield's stop point (never a signal's) then moves back to junctions.stop_offset's rule where the cross road's lanes are known
@@ -91,6 +92,11 @@ from openpilot.selfdrive.turnpilot.routing import osm_sidecar
 from openpilot.selfdrive.turnpilot.routing.guidance import approach_line, opposing_leg
 
 CONTROL_LINE_M = 10.    # m before the junction node a stop line is taken to be, without a mapped one
+# ...but a signal on a node where no other road meets (junction False) is on its approach, where OSM puts a signal at its
+# stop line: its line is this far before that node. Route 29's stands at the red of three such signals stood 0.3-4.8 m short
+# of the node (6.2-10.7 m past the line at CONTROL_LINE_M); a mid-block crossing's node is the crosswalk's centre, so the
+# line stays short of it by a crosswalk's half-width and a metre
+SIGNAL_NODE_LINE_M = 4.
 MAP_MARGIN_M = 1.       # m short of the line the car stops
 ORPHAN_NEAR_M = CONTROL_LINE_M + 5.  # m: a sidecar stop or yield tied to no junction (junction_node 0, an orphan) whose sign
                                      # is further than this before its anchor edge's end is left out (SG1a): that end less
@@ -1098,7 +1104,8 @@ def _route_controls(call, steps, tiles_dir, sidecar_dir=None, ahead: bool = Fals
     junction = bool(crossing)
     ours = ROAD_CLASS_RANK.get(edges[a].get('road_class'), 8)
     cross_suspect = junction and all(ours < c for c in crossing) and kind in ('stop', 'yield')
-    line_m, mapped, instance, source = end_m - CONTROL_LINE_M, False, '', 'default'
+    line_m = end_m - (SIGNAL_NODE_LINE_M if kind == 'signal' and not junction else CONTROL_LINE_M)
+    mapped, instance, source = False, '', 'default'
     own = sorted(((m, entry) for i, entry, m in signs.get(a, []) if i == a and entry.get('kind') == kind and entry.get('line')),
                  key=lambda x: x[0])
     osm_node = next((int(entry.get('junction_node') or 0) for _, entry, _ in kinds[kind] if entry is not None), 0)

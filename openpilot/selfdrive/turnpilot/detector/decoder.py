@@ -94,10 +94,11 @@ def _decode(raw: np.ndarray, lb: Letterbox | Crop, min_conf: float, classes: tup
   """bounds: x0, y0, x1, y1 the boxes are clipped to (default the frame)."""
   bx0, by0, bx1, by1 = bounds if bounds is not None else (0, 0, lb.cam_w, lb.cam_h)
   out = np.asarray(raw, dtype=np.float32).reshape(-1, 6)
-  out = out[np.isfinite(out).all(axis=1)]
+  # the class and confidence first (a row with either non-finite fails them), then the rest of a kept row finite: the
+  # rows, and their order, of dropping the non-finite rows first, without a pass over all 300
   cls = np.rint(out[:, 5])
-  keep = (out[:, 4] >= min_conf) & np.isin(cls, classes)
-  out = out[keep]
+  out = out[(out[:, 4] >= min_conf) & (cls == classes[0] if len(classes) == 1 else np.isin(cls, classes))]
+  out = out[np.isfinite(out).all(axis=1)]
   out = out[np.argsort(-out[:, 4], kind='stable')][:limit]
   x0, y0 = lb.to_frame(out[:, 0], out[:, 1])
   x1, y1 = lb.to_frame(out[:, 2], out[:, 3])

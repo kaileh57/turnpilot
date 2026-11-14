@@ -15,7 +15,9 @@ from openpilot.cereal import log
 TIME_FIELDS = ('executionTime', 'lanePaintTime', 'lightTime', 'sectorTime', 'logMonoTime')
 
 
-NEW_FIELDS = ('reason', 'read')  # TurnpilotLights.Light, 2026-11-06: each head's read and reason this frame, not 263065a's
+# TurnpilotLights.Light fields not 263065a's: each head's read and reason this frame (2026-11-06), its nearer range and the
+# reader's id on fields of their own (2026-11-13; the instance text carries both as before)
+NEW_FIELDS = ('reason', 'read', 'nearDistance', 'headIdPlusOne')
 
 
 def canonical(obj):

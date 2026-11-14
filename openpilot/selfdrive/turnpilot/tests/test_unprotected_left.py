@@ -1124,6 +1124,10 @@ def roll(j, seconds, v, enabled=True, boxes=lambda: [raw(100., 3.6)]):
   return out
 
 
+# m out a go at 2.38 m/s is withdrawn from as near as that still fits (go_can_stop: 8.58 m), its first frame's travel on
+WITHDRAW_238_D = 8.75
+
+
 def withdrawn(j, v):
   """The go certified, then withdrawn at its first motion at v by a car in the band: the left's own hold (hold_here)."""
   go(j)
@@ -1164,6 +1168,28 @@ def test_a_stand_yawed_into_the_turn_is_judged_at_its_heading_never_handed_back(
   assert not any(name == 'turnpilot.left_undecided' for name, _ in log_events)
   assert 30. < ROAD_HALF_FOV_DEG < 31. and abs(YAW_VIEW_DEG - (ROAD_HALF_FOV_DEG - ul.BAND_TOL_DEG)) < 1e-9
   assert yaw_view_m(30.) == math.inf and 50. < yaw_view_m(32.) < 60. and yaw_view_m(40.) < 10.
+
+
+def test_a_stale_road_view_at_the_line_hands_back_and_is_judged_again_once_the_road_camera_is_back(log_events):
+  """No road run STALE_UNDECIDED_S at its line: the 'stale' handback, the car held. It was the camera's loss, never a verdict
+  on the junction: the first fresh run with the car still standing takes the left back to its wait on a fresh window, and it
+  goes on its gap, by itself (the matrix's detector stop at a hold was handed back for good). On its own hold after a
+  withdrawn go too."""
+  j = Junction()
+  d = j.wait(STALE_UNDECIDED_S + 0.5, raw_new=False)
+  assert d.state == 'undecided' and d.why == 'stale' and d.prompt == 'leftUndecidedTakeControl' and j.left.state == 'undecided'
+  ds = [j.step() for _ in range(round((CLEAR_WINDOW_S + 0.5) / DT_MDL))]
+  assert ds[0].state == 'waitGap' and not ds[0].go and ds[0].prompt not in TAKE_CONTROL_PROMPTS
+  go_k = next(k for k, x in enumerate(ds) if x.go)
+  assert go_k * DT_MDL >= CLEAR_WINDOW_S - 0.1  # a fresh window from the camera's return
+  assert [name for name, _ in log_events if name == 'turnpilot.left_stale_cleared'] == ['turnpilot.left_stale_cleared']
+  j = Junction()
+  withdrawn(j, 1.)
+  roll(j, 1.5, lambda k: max(1. - 0.67 * k * DT_MDL, 0.))
+  d = j.wait(STALE_UNDECIDED_S + 0.5, raw_new=False, v=0.)
+  assert d.state == 'undecided' and d.why == 'stale' and j.left.hold_here
+  ds = [j.step(v=0.) for _ in range(round((CLEAR_WINDOW_S + 0.5) / DT_MDL))]
+  assert ds[0].state == 'waitGap' and ds[0].stops and any(x.go for x in ds) and not any(x.state == 'undecided' for x in ds)
 
 
 def test_a_fault_on_the_lefts_own_hold_says_the_faults_words_on_its_stop():
@@ -1212,7 +1238,9 @@ def test_the_lefts_own_hold_is_let_go_only_past_it_by_the_drivers_own_metres():
 
 def test_the_lefts_own_hold_short_of_the_oncoming_lanes_is_never_held_in_them_on_a_re_engage():
   """The invariant: never a TurnPilot hold that stands the car in the oncoming lanes on a re-engage. A go from a creep
-  (ONCOMING_ENTRY_M + CREEP_SHORT_M out) withdrawn at first motion holds the car 1.3 m short of the lanes, under LATCH_PAST_M.
+  (ONCOMING_ENTRY_M + CREEP_SHORT_M out) withdrawn as the car starts to move (short of its first motion: from there on its
+  withdrawal no longer stands the car where its next go is judged, go_can_stop, and the go carries through) holds the car
+  1.3 m short of the lanes, under LATCH_PAST_M.
   The driver's nudge on (disengaged) into the lanes is theirs as the car enters them; re-engaged short of them too fast for
   the hold to stand it short (from the re-engage's speed as its own braking takes it: hold_caps, map_controls.reengage_stop_m),
   theirs at the re-engage, never held inside; braked to a stand short of them first, held there (c). Standing, a reading that
@@ -1222,9 +1250,9 @@ def test_the_lefts_own_hold_short_of_the_oncoming_lanes_is_never_held_in_them_on
 
   def nudged(nudge_m):
     j = Junction()
-    j.distance = ONCOMING_ENTRY_M + CREEP_SHORT_M + 0.6
-    withdrawn(j, 0.5)
-    roll(j, 1., lambda k: max(0.5 - k * DT_MDL, 0.))
+    j.distance = ONCOMING_ENTRY_M + CREEP_SHORT_M + 0.5
+    withdrawn(j, 0.25)
+    roll(j, 1., lambda k: max(0.25 - k * DT_MDL, 0.))
     roll(j, 1., 0.)
     assert j.left.hold_here and j.distance - ONCOMING_ENTRY_M > 1.2
     return j, roll(j, nudge_m / 0.8, 0.8, enabled=False)
@@ -1354,19 +1382,20 @@ def test_the_lefts_own_hold_never_counts_turnpilots_stop_past_its_ask_as_the_dri
 
 
 def test_the_lefts_own_hold_is_let_go_for_the_lanes_at_the_re_engage_never_on_turnpilots_own_metres():
-  """Skeptic round 1 (tp/left-hold): the go withdrawn later in its launch (2.38 m/s, 7.03 m from the junction: TurnPilot's
-  stop asks 1.89 m), the driver keeps the speed disengaged inside the ask and re-engages: the lanes test was reached only once
+  """Skeptic round 1 (tp/left-hold): the go withdrawn later in its launch (2.38 m/s, 7.03 m from the junction then; 8.63 m
+  now, as near as its withdrawal still fits, go_can_stop: TurnPilot's stop asks 1.89 m), the driver keeps the speed
+  disengaged about the ask and re-engages: the lanes test was reached only once
   TurnPilot's own braking had carried the car past the ask, so the hold was let go a frame or two into the re-engage,
   engaged, on TurnPilot's metres (and so too where those metres would have stood the car short of the lanes). Judged at the
   re-engage itself, from its frame's speed and where the car is, before TurnPilot's hold has braked it (skeptic round 2):
   let go there where a hold could no longer stand the car short of the oncoming lanes (the invariant), its decision asking
   no stop; a re-engage short of that is held, never let go engaged later."""
-  for keep_m, theirs in ((1.1, True), (1.7, True), (0.3, False)):
+  for keep_m, theirs in ((2.1, True), (2.6, True), (1.4, False)):
     j = Junction()
-    j.distance = 7.6
+    j.distance = WITHDRAW_238_D
     withdrawn(j, 2.38)
     entry = j.left.hold_entry
-    assert j.left.hold_asked > 1.8 and abs(entry - 3.5) < 0.1
+    assert j.left.hold_asked > 1.8 and abs(entry - 4.63) < 0.1
     ds = roll(j, keep_m / 2.38, 2.38, enabled=False)
     n = len(ds)
     ds += under_the_hold(j, 6.)
@@ -1380,11 +1409,12 @@ def test_the_lefts_own_hold_is_let_go_for_the_lanes_at_the_re_engage_never_on_tu
 
 
 @pytest.mark.parametrize("then_v", [0., 0.6])
-@pytest.mark.parametrize("keep_m", [1.3, 1.7])
+@pytest.mark.parametrize("keep_m", [2.0, 2.4])
 def test_the_lefts_own_hold_is_judged_for_the_lanes_at_the_re_engage_so_a_car_braked_short_of_them_is_held(keep_m, then_v):
   """Skeptic round 2 (tp/left-hold): the lanes test (a hold taken up by a re-engage could no longer stand the car short of the
   oncoming lanes) was judged on the driver's own frames from that frame's speed, and its let-go was for good. The go withdrawn
-  later in its launch (2.38 m/s, 7.6 m out), the driver keeps the speed 1.3-1.7 m disengaged (let go there), then brakes,
+  later in its launch (2.38 m/s, 8.75 m out: as near as its withdrawal still fits, go_can_stop), the driver keeps the speed
+  2.0-2.4 m disengaged (let go there), then brakes,
   short of the lanes, and re-engages, standing or at 0.6 m/s: no hold, and openpilot drove the car on across the lanes the
   go was withdrawn for, uncertified (e93750b held it). Owner decision (c), the invariant: judged at the re-engage, from that
   frame's speed and where the car is. A hold there stands the car short of the lanes: held for the full check (waitGap, its
@@ -1392,7 +1422,7 @@ def test_the_lefts_own_hold_is_judged_for_the_lanes_at_the_re_engage_so_a_car_br
   from openpilot.selfdrive.turnpilot.map_controls import reengage_stop_m
   from openpilot.selfdrive.turnpilot.unprotected_left import hold_caps
   j = Junction()
-  j.distance = 7.6
+  j.distance = WITHDRAW_238_D
   withdrawn(j, 2.38)
   entry = j.left.hold_entry
   ds = roll(j, keep_m / 2.38, 2.38, enabled=False)  # the driver keeps the speed, disengaged
@@ -1418,7 +1448,7 @@ def test_a_re_engage_the_lefts_own_hold_takes_up_is_never_let_go_on_a_later_fram
   for k in range(int(round(1.5 / 0.05)) + 1):
     keep_m = 0.05 * k
     j = Junction()
-    j.distance = 7.6
+    j.distance = 7.6 if v < 2. else WITHDRAW_238_D  # its withdrawal fits (go_can_stop)
     withdrawn(j, v)
     entry = j.left.hold_entry
     ds = roll(j, keep_m / v, v, enabled=False)
@@ -1538,21 +1568,23 @@ def launch_from_the_line(j, a, v_max=math.inf, boxes=lambda d: [], seconds=15.):
 
 
 @pytest.mark.parametrize('a,v_max,carried', [(0.5, 0.78, True), (0.3, math.inf, True), (0.5, math.inf, True),
-                                             (1.08, math.inf, False), (1.3, math.inf, False), (1.5, math.inf, False),
+                                             (1.08, math.inf, True), (1.3, math.inf, False), (1.5, math.inf, False),
                                              (1.9, math.inf, False)])
 def test_a_slow_launch_judged_on_is_carried_only_where_it_commits_short_of_a_launch(log_events, a, v_max, carried):
   """Review 2026-11-08 (round 2's trade, 'G5's coast'): a slow launch judged on (L3: the band it needs clear) crossed the
   oncoming lanes at the car's own pace, a coast on the lift's 0.78 m/s for about 15 s. Committing short of LEFT_LAUNCH_SPEED
-  after that judgement it is now carried (LeftDecision.carry: turnpilotd's left_carry, go_override's carry). This car's own
-  launches never are: 1d's gentlest (1.08 m/s^2 equivalent, 2.0 m/s in 1.85 m) is judged on from LINE_D at 1.94 m/s and
-  commits at about 2.5; the others (1.3-1.9) are never judged; the left's own A_GO never is."""
+  after that judgement it is now carried (LeftDecision.carry: turnpilotd's left_carry, go_override's carry). Every launch
+  from LINE_D is judged, where its withdrawal still fits (go_stop_m, the actuator's lag in it: an even launch is still short
+  of LEFT_LAUNCH_SPEED there, A_GO's at 1.5 m/s), each judged on with nothing in the band. 1d's gentlest (1.08 m/s^2
+  equivalent, 2.0 m/s in 1.85 m) commits just short of LEFT_LAUNCH_SPEED (go_committed: the last point a read red's firm stop
+  fits, 2.5 m/s until the commit took the lag) and is carried from there; this car's others (1.3-1.9) and A_GO are not."""
   j = Junction()
   ds = launch_from_the_line(j, a, v_max)
   slow = [kw for name, kw in log_events if name == 'turnpilot.left_not_launched']
   committed = [kw for name, kw in log_events if name == 'turnpilot.left_committed']
   assert len(committed) == 1 and committed[0]['carry'] == carried, committed
-  assert (committed[0]['v'] < ul.LEFT_LAUNCH_SPEED) == carried
-  assert bool(slow) == (a < 1.2) and all(kw['on'] for kw in slow), slow
+  assert (committed[0]['v'] < ul.LEFT_LAUNCH_SPEED + 0.005) == carried  # the log rounds to 0.01: 1.08's is 1.995
+  assert len(slow) == 1 and slow[0]['on'], slow
   after = [d for d in ds if d.state == 'committed']
   assert after and all(d.carry == carried for d in after) and not any(d.carry for d in ds if d.state != 'committed')
   assert not any(d.stops for d in after) and not any(str(d.prompt) in TAKE_CONTROL_PROMPTS for d in ds)

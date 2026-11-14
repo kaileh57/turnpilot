@@ -45,6 +45,7 @@ import numpy as np
 
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.transformations.camera import view_frame_from_device_frame
+from openpilot.selfdrive.turnpilot.detector.exact_stats import median, percentile
 from openpilot.selfdrive.turnpilot.scene.ranging import VISIBILITY_JSON, Lens, calib_from_view
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 
@@ -263,22 +264,44 @@ class SectorQuality:
     self.dark_dn = dark_threshold() if dark_dn is None else dark_dn
     self.history: dict[tuple, deque] = {}    # (view, inner) -> (t, luma) samples within HISTORY_S
     self.changed_t: dict[tuple, float] = {}  # (view, inner) -> when it last changed by FROZEN_MAD_DN or more
+    self.view_history: dict[str, deque] = {}  # view -> (t, its sectors' luma end to end) samples within HISTORY_S
+    self.gathered: dict[str, tuple] = {}      # view -> (geometry key, its sectors' indices end to end, where each starts)
     self.feed: tuple | None = None           # (t, the luma plane's STUCK_STRIDE sample) of the last run, any view
     self.feed_changed_t = 0.                 # when that sample last differed from the run before
 
   def update(self, geom: SideGeometry, name: str, frame: np.ndarray, t: float) -> list[tuple[float, float, str]]:
     """frame: the wide camera's NV12 host copy (flat uint8); t: its camera time, s. Returns (inner, outer, quality) per
-    sector of the view."""
+    sector of the view. The view's sectors are gathered and converted as one array, each judged on its slice, and the
+    temporal statistics blocked takes are worked out once for the view where every sector's samples are the view's (they
+    are, but across a new calibration's maps): sector for sector what judging each alone gave (tests/sector_reference.py),
+    in about half the time (test_light_cost.py)."""
     stride = geom.stride
     stuck = self._stuck(frame[:stride * geom.y_height], t)
     ref = full_range(frame[geom.ref_idx])
     ref_g = float(gradient(frame, geom.ref_idx, stride).mean()) if len(ref) else 0.
-    ref_p5 = float(np.percentile(ref, 5)) if len(ref) else 0.
+    ref_p5 = percentile(ref, 5) if len(ref) else 0.
+    sectors = geom.maps[name].sectors
+    idx, cuts = self._gather(geom, name)
+    vals_all, grad_all = full_range(frame[idx]), gradient(frame, idx, stride)
+    view = self.view_history.setdefault(name, deque())
+    if view and (t - view[-1][0] > GAP_S or len(view[-1][1]) != len(vals_all)):
+      view.clear()
+    view.append((t, vals_all))
+    while view and t - view[0][0] > HISTORY_S + 1e-6:
+      view.popleft()
+    static: list = []  # the view's static pixels, worked out on the first sector that needs them
+
+    def view_static(a: int, b: int) -> np.ndarray:
+      if not static:
+        stack = np.stack([h[1] for h in view])
+        static.append((stack.std(axis=0) < STATIC_STD_DN) & (stack.mean(axis=0) < STATIC_MEAN_DN))
+      return static[0][a:b]
     out = []
-    for s in geom.maps[name].sectors:
+    for k, s in enumerate(sectors):
       key = (name, s.inner)
-      vals = full_range(frame[s.idx])
-      ratio = float(gradient(frame, s.idx, stride).mean()) / ref_g if ref_g > 1e-6 else 0.
+      a, b = int(cuts[k]), int(cuts[k + 1])
+      vals = vals_all[a:b]
+      ratio = float(grad_all[a:b].mean()) / ref_g if ref_g > 1e-6 else 0.
       hist = self.history.setdefault(key, deque())
       if hist and t - hist[-1][0] > GAP_S:
         hist.clear()
@@ -287,8 +310,19 @@ class SectorQuality:
       hist.append((t, vals))
       while hist and t - hist[0][0] > HISTORY_S + 1e-6:
         hist.popleft()
-      out.append((s.inner, s.outer, 'frozen' if stuck else self._quality(vals, ratio, ref_p5, hist, t - self.changed_t[key])))
+      shared = len(hist) == len(view) and all(h[0] == v[0] for h, v in zip(hist, view, strict=True))
+      out.append((s.inner, s.outer, 'frozen' if stuck else
+                  self._quality(vals, ratio, ref_p5, hist, t - self.changed_t[key], (lambda a=a, b=b: view_static(a, b)) if shared else None)))
     return out
+
+  def _gather(self, geom: SideGeometry, name: str) -> tuple[np.ndarray, np.ndarray]:
+    """The view's sectors' indices end to end and where each starts, kept for this geometry's maps."""
+    key = (id(geom), name)
+    if self.gathered.get(name, (None,))[0] != key:
+      sectors = geom.maps[name].sectors
+      idx = np.concatenate([s.idx for s in sectors]) if sectors else np.zeros(0, np.int64)
+      self.gathered[name] = (key, idx, np.cumsum([0] + [len(s.idx) for s in sectors]))
+    return self.gathered[name][1], self.gathered[name][2]
 
   def _stuck(self, luma: np.ndarray, t: float) -> bool:
     """The feed stuck: the luma plane's STUCK_STRIDE sample unchanged, bit for bit, for FROZEN_S of runs no further apart than
@@ -300,7 +334,7 @@ class SectorQuality:
     self.feed = (t, sample)
     return t - self.feed_changed_t >= FROZEN_S - 1e-6
 
-  def _quality(self, vals: np.ndarray, ratio: float, ref_p5: float, hist: deque, still_s: float) -> str:
+  def _quality(self, vals: np.ndarray, ratio: float, ref_p5: float, hist: deque, still_s: float, static_fn=None) -> str:
     if float((vals >= SAT_DN).mean()) >= WASHED_SAT:
       return 'washed'
     # frozen before blocked (review 2026-11-07, LS-3): under vision a blocked sector after dark is judged by the walk's other
@@ -309,16 +343,22 @@ class SectorQuality:
     # threshold, so no noise lifts it) is the dark it looks like, never frozen (the review of 2026-11-08: under vision a dark
     # band is judged on its boxes, where a frozen one waited with no bound): blocked or dark below. A still band that isn't
     # dark stays frozen
-    if still_s >= FROZEN_S and float(np.median(vals)) >= self.dark_dn:
-      return 'frozen'
+    mid = None
+    if still_s >= FROZEN_S:
+      mid = median(vals)
+      if mid >= self.dark_dn:
+        return 'frozen'
     if len(hist) >= MIN_STATIC_SAMPLES:
-      stack = np.stack([h[1] for h in hist])
-      static = (stack.std(axis=0) < STATIC_STD_DN) & (stack.mean(axis=0) < STATIC_MEAN_DN)
+      if static_fn is not None:
+        static = static_fn()  # the view's, its slice (update)
+      else:
+        stack = np.stack([h[1] for h in hist])
+        static = (stack.std(axis=0) < STATIC_STD_DN) & (stack.mean(axis=0) < STATIC_MEAN_DN)
       if float(static.mean()) >= STATIC_FRAC:
         return 'blocked'
-    if float(np.median(vals)) < self.dark_dn:
+    if (median(vals) if mid is None else mid) < self.dark_dn:
       return 'dark'
-    if float(np.percentile(vals, 5)) - ref_p5 >= WASHED_LIFT_DN and ratio < WASHED_RATIO:
+    if percentile(vals, 5) - ref_p5 >= WASHED_LIFT_DN and ratio < WASHED_RATIO:
       return 'washed'
     if ratio < RATIO_USABLE:
       return 'degraded'

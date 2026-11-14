@@ -335,6 +335,7 @@ RIGHT_RED_NEAR_Y_M = 25.
 RIGHT_RED_FAR_Y_M = 80.
 RIGHT_RED_LANE_M = 2.         # m to the far side a track is out of the car's own lane...
 RIGHT_RED_CROSS_BACK_M = 8.   # ...and this far short of the turn point on, it is on the cross road (not a car beside this one)
+RIGHT_LOOK_M = 15.           # m short of its line a right's signal stop asks for the side views (right_looking): 7.5 s or more at 2 m/s
 CONTROL_LINE_M = 10.          # without a mapped line, the stop line is the junction less this (routing/controls.py)
 LATCH_SPEED = 0.3             # m/s: slower than this...
 LATCH_NEAR_M = 5.             # ...this close to the stop point...
@@ -544,6 +545,7 @@ class Driven:
   prompt: str
   reason: str
   cause: str                 # driverWent, drivenOff, movedOff, overrun
+  driver: bool = False       # the driver's own maneuver (his pedal, openpilot disengaged): logged, never prompted (_crossed)
 
   @property
   def maneuver_id(self) -> int | None:
@@ -672,6 +674,26 @@ def right_red_blocked(objects, available: bool, person_front: bool, distance: fl
     if crossing or closing or new:
       return RIGHT_RED_CROSS_REASON
   return ''
+
+
+RIGHT_RED_SIDE_RUNS = 3  # side runs in a row of each side view that saw the look's lanes clear (right_side_blocks), with the look on
+RIGHT_RED_BOX_MATCH_M = 3.  # m a side view's box is from the track it is taken for
+
+
+def right_side_blocks(boxes, objects, distance: float, side: int) -> bool:
+  """A side view's run saw something the right-on-red look waits for: a vehicle box where right_red_blocked's rules reach
+  (ahead of the car to RIGHT_RED_AHEAD_M past the turn point, within RIGHT_RED_FAR_Y_M either way) that is no track of
+  objects the look itself finds clear (a box no published track matches yet, a missed pass's car boxed again, is a car)."""
+  for b in boxes:
+    if str(b.cls) not in VEHICLES or b.xy is None:
+      continue
+    x, y = float(b.xy[0]), float(b.xy[1])
+    if not (-5. < x < distance + RIGHT_RED_AHEAD_M and abs(y) < RIGHT_RED_FAR_Y_M):
+      continue
+    near = [o for o in objects if str(o.cls) in VEHICLES and math.hypot(o.x - x, o.y - y) < RIGHT_RED_BOX_MATCH_M]
+    if not any(velocity_trusted(o) and not right_red_blocked([o], True, False, distance, side) for o in near):
+      return True
+  return False
 
 
 def turn_stop_feasible(v_ego: float, distance: float, hold_m: float = LEFT_LINE_M) -> bool:
@@ -815,13 +837,21 @@ BLIND_REASONS = ('dark', 'aspect', 'twoLit')  # a head's read (Light.reason) tha
 
 
 def head_id(light) -> int | None:
-  """The reader's own id of a published head (modeld's fill_heads: its instance starts 'head<id>'), None with none."""
+  """The reader's own id of a published head (modeld's fill_heads: Light.headIdPlusOne, else its instance's 'head<id>' as in
+  logs and sim lights from before the field), None with none."""
+  n = int(getattr(light, 'headIdPlusOne', 0) or 0)
+  if n > 0:
+    return n - 1
   name = str(getattr(light, 'instance', '') or '').split(' ')[0]
   return int(name[4:]) if name.startswith('head') and name[4:].lstrip('-').isdigit() else None
 
 
 def head_near(light) -> float | None:
-  """A published head's nearer range, m (modeld's fill_heads: 'near<m>' in its instance), None with none."""
+  """A published head's nearer range, m (modeld's fill_heads: Light.nearDistance, else 'near<m>' in its instance as in logs
+  and sim lights from before the field), None with none."""
+  d = float(getattr(light, 'nearDistance', 0.) or 0.)
+  if d > 0.:
+    return d
   for word in str(getattr(light, 'instance', '') or '').split(' ')[1:3]:
     if word.startswith('near'):
       try:
@@ -1182,6 +1212,13 @@ class MapControlPolicy:
     """The route's tracked controls and the camera's signal at an unmapped junction (camera_signal), if there is one."""
     cs = self.camera_signal
     return list(self.tracker.controls.values()) + ([cs] if cs is not None else [])
+
+  def right_looking(self) -> bool:
+    """A signal stops or holds the car for the curb-side turn TurnPilot is taking (update()'s right, its right-on-red
+    procedure not yet gone), from RIGHT_LOOK_M short of its line: the frames its look reads, for which turnpilotd asks modeld
+    for the side views (sideLook). Further back (a queue) the lane paint and the far slot keep their frames."""
+    return any(c.kind == 'signal' and (c.held or (signal_stopping(c.state) and c.d <= RIGHT_LOOK_M)) and c.state is not None and
+               not c.state.done and self._right_turn(c.state) is not None for c in self.all_controls())
 
   def stop_ahead(self) -> float | None:
     """m to the nearest stop sign or signal the car is going to stop at, or None: a stop sign not released, a signal only
@@ -1775,17 +1812,26 @@ class MapControlPolicy:
         o.state.done = 'released'
     cloudlog.event("turnpilot.map_stop_released", kind=c.kind, key=list(c.key), cause=cause, d=round(c.d, 1), v=round(v, 2))
 
-  def _overrun(self, c: TrackedControl, v: float) -> None:
+  def _overrun(self, c: TrackedControl, v: float, driver: bool = False) -> None:
+    """Past the line with nothing holding the car: TurnPilot's overrun, said (stopOverrun), or the driver's (driver: his
+    gas took the car over it, or openpilot disengaged), logged alone (_crossed)."""
     c.state.done = 'overrun'
     if self.held == c.key:
       self.held, c.held = None, False
-    self._transient('stopOverrun')
-    cloudlog.event("turnpilot.map_stop_overrun", error=True, kind=c.kind, key=list(c.key), d=round(c.d, 1), v=round(v, 2))
-    self._crossed(c, -c.d, 'overrun', v)
+    driver = driver or getattr(self, '_engaged', None) is False
+    if not driver:
+      self._transient('stopOverrun')
+    cloudlog.event("turnpilot.map_stop_overrun", error=not driver, driver=driver, kind=c.kind, key=list(c.key), d=round(c.d, 1),
+                   v=round(v, 2))
+    self._crossed(c, -c.d, 'overrun', v, driver)
 
-  def _crossed(self, c: TrackedControl, past_m: float, cause: str, v: float) -> None:
+  def _crossed(self, c: TrackedControl, past_m: float, cause: str, v: float, driver: bool = False) -> None:
     """A stop sign's or an unprotected turn's line crossed with no go (its latch let go as the driver's, or overrun):
-    never silent (DRIVEN_THROUGH_M, owner decision (b)). A signal's stop is the light's, never this."""
+    never silent (DRIVEN_THROUGH_M, owner decision (b)) where TurnPilot's plan took the car over it. A crossing the driver
+    made, on his own pedal (drivenOff, or the gas down now) or with openpilot disengaged, is his maneuver: logged, never a
+    prompt or a chime (the matrix, 2026-11-12: "Stop sign passed unchecked: take control" chimed 2 s after the driver drove
+    the sign on the gas and engaged again, the car 3 m past the junction and driving on). A signal's stop is the light's,
+    never this."""
     kind = 'stop' if is_stop(c) else UNPROTECTED if c.kind == UNPROTECTED else None
     if kind is None:
       return
@@ -1793,9 +1839,10 @@ class MapControlPolicy:
       reason = "Yield passed unchecked: take control" if c.kind == 'yield' else "Stop sign passed unchecked: take control"
     else:
       reason = f"Unprotected {self.turn_name} not checked: take control"
-    self.driven = Driven(kind, c.key, DRIVEN_THROUGH_M - max(past_m, 0.), DRIVEN_PROMPT[kind], reason, cause)
-    cloudlog.event("turnpilot.map_stop_crossed", error=True, kind=c.kind, key=list(c.key), cause=cause, past_m=round(past_m, 1),
-                   v=round(v, 2))
+    driver = driver or cause == 'drivenOff' or bool(getattr(self, '_gas', False)) or getattr(self, '_engaged', None) is False
+    self.driven = Driven(kind, c.key, DRIVEN_THROUGH_M - max(past_m, 0.), DRIVEN_PROMPT[kind], reason, cause, driver)
+    cloudlog.event("turnpilot.map_stop_crossed", error=not driver, driver=driver, kind=c.kind, key=list(c.key), cause=cause,
+                   past_m=round(past_m, 1), v=round(v, 2))
 
   def update(self, nav, updated: bool, valid: bool, v_ego: float, gas_pressed: bool, lights: Lights = NO_LIGHTS,
              dt: float = DT_MDL, turn=None, left: LeftCommand | None = None, release: tuple | None = None,
@@ -1818,6 +1865,7 @@ class MapControlPolicy:
     (maneuver id, the way is clear now, why not) of the route's curb-side turn TurnPilot is taking, None with none: its
     signal's right-on-red procedure (module docstring)."""
     self._engaged = engaged
+    self._gas = gas_pressed
     self._right = right
     self._fault_frame = isinstance(turn, str)  # KEEP_TURN: turnpilotd faulted before it knew the route (no junction, no right)
     if self._right_gone is not None and isinstance(junction, tuple) and int(junction[0]) != self._right_gone:
@@ -1977,10 +2025,9 @@ class MapControlPolicy:
       if dr.left_m <= 0.:
         cloudlog.event("turnpilot.map_stop_crossed_through", kind=dr.kind, key=list(dr.key), cause=dr.cause)
         self.driven = None
-      else:
-        if not (prompts and prompts[0] in TAKE_CONTROL_PROMPTS):
-          prompts.insert(0, dr.prompt)
-          out.driven = dr.reason
+      elif not dr.driver and not (prompts and prompts[0] in TAKE_CONTROL_PROMPTS):
+        prompts.insert(0, dr.prompt)
+        out.driven = dr.reason
     # what the driver sees and hears
     out.prompt = prompts[0] if prompts else 'none'
     # 'none' is a navd that predates controls: nothing to say about a route it never looked at
@@ -2557,7 +2604,7 @@ class MapControlPolicy:
           # past the line under the driver's foot, beyond where the latch can hold it: the driver went. Stopping the car
           # in the junction with nothing to release it would be worse
           st.action = 'overrun'
-          self._overrun(c, v)
+          self._overrun(c, v, driver=True)
           return False
         st.cap = curve(v, c.d)
         self._check(c, v, 'gasLifted')

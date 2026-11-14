@@ -61,7 +61,10 @@ GROUND_GATE_M = 2.0      # third pass: max distance between predicted and measur
 GROUND_GATE_FRAC = 0.15  # plus this fraction of the range
 MIN_HITS = 2             # a track is published after this many matched detections
 MAX_COAST_S = 0.5        # and for this long after its last match;
-SWEEP_COAST_S = 0.65     # (while a stop sweep runs: two missed passes of a 5 Hz side view, 0.6 s between its hits)
+# (while a stop sweep runs: one missed pass of a view the stand schedule runs every STAND_VIEW_DUE_S, 0.4 s: 0.8-0.85 s
+# between its hits on the car's budget, modeld_detector; two missed passes of the held cycle's 5 Hz views. 0.65 until
+# 2026-11-13, when the side views ran 5 a second nowhere but on a host with room for the held cycle)
+SWEEP_COAST_S = 0.9
 MAX_AGE_S = 1.5          # it's dropped after this
 MAX_TRACKS = 3 * MAX_DETECTIONS // 2  # a full message's worth and then some coasting; past it, the soonest to expire go
 # a pedestrian in the path this close can drop out of view (feet below the frame, or YOLO loses a person filling the
@@ -263,10 +266,26 @@ class Track:
   width_seen: float = 0.             # px, its last match's box width in its camera's frame
   span_seen: tuple | None = None     # (right edge, left edge) bearings of its last match's bottom (visibility.py's occluders)
   misses: int = 0                    # forward runs of its camera since its last match (TrackedObject.missedRuns)
+  t_first: float | None = None       # time of its first match, s (camera clock)
+  side_hits: int = 0                 # its matches on a side view
 
   @property
   def cls(self) -> int:
     return max(self.class_votes, key=lambda c: self.class_votes[c])
+
+
+SIDE_VIEWS = ('sideLeft', 'sideRight')
+# A track the side views feed (half its hits or more theirs: a hit every 0.4-0.5 s at a stand) has its velocity trusted
+# (TrackedObject.sideTrusted, scene_policy.velocity_trusted) after SIDE_TRUST_HITS over SIDE_TRUST_SPAN_S: at 0.43 s spacing
+# and 1 px of box jitter the filter's vy is within 0.3 m/s of a 9 m/s crossing car's there (0.57 at 6 hits over 2.2 s) and a
+# standing car's within 0.2 m/s, as good as or better than a forward pass's at VEL_TRUST_HITS (probes/velstd.py)
+SIDE_TRUST_HITS = 8
+SIDE_TRUST_SPAN_S = 3.0
+
+
+def side_trusted(trk) -> bool:
+  return 2 * trk.side_hits >= trk.hits and trk.hits >= SIDE_TRUST_HITS and trk.t_first is not None and \
+    trk.t_seen - trk.t_first >= SIDE_TRUST_SPAN_S - 1e-6
 
 
 def range_noise(xy: np.ndarray) -> np.ndarray:
@@ -663,6 +682,7 @@ class SceneTracker:
     trk.box, trk.box_seen, trk.camera, trk.t_seen, trk.conf = m.box, m.box, camera, t, m.conf
     trk.class_votes[m.cls] = trk.class_votes.get(m.cls, 0.0) + m.conf
     trk.hits += 1
+    trk.side_hits += view in SIDE_VIEWS
     trk.misses = 0
     trk.view = view
     trk.bearing_seen, trk.width_seen, trk.span_seen = m.bearing, float(m.box[2] - m.box[0]), m.span
@@ -679,7 +699,7 @@ class SceneTracker:
 
   def new_track(self, m: Measurement, camera: str, t: float, view: str = 'full') -> None:
     trk = Track(self.next_id, camera, m.box, m.box, t, m.conf, {m.cls: m.conf}, t=t, view=view, bearing_seen=m.bearing,
-                width_seen=float(m.box[2] - m.box[0]), span_seen=m.span)
+                width_seen=float(m.box[2] - m.box[0]), span_seen=m.span, t_first=t, side_hits=int(view in SIDE_VIEWS))
     self.init_state(trk, m)
     self.next_id += 1
     self.tracks.append(trk)
@@ -989,4 +1009,5 @@ class SceneTracker:
       o.view, o.farHits = getattr(View, trk.view, View.full), trk.far_hits
       o.tSeen = float(trk.t_seen)
       o.missedRuns = min(trk.misses, 255)
+      o.sideTrusted = side_trusted(trk)
       o.box = [float(np.clip(v / s, 0, 1)) for v, s in zip(trk.box_seen, (w, h, w, h), strict=True)]

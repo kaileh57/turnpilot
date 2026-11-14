@@ -369,6 +369,9 @@ class RouteFollower:
     self.ahead_distance = float('inf')      # m to it, dead-reckoned
     self._passed_id = -1
     self._stale_t = 0.
+    self.nav_gap = False  # the maneuver is dead-reckoned through invalid navInstructions: no valid route since (update)
+    self._gap_from = 0.   # _stale_t at that run's first invalid message
+    self._line_gap = False  # ...and that run is ridden for a line hold alone (update's line_hold)
     self._moved_on_from: tuple[str, str] | None = None  # (type, modifier) of the NONE step left for the turn after it
     self._held_id = -1  # a committed maneuver: held to its readings' span to its end, not on navd's distance
     self._span = JunctionSpan()        # navd's readings of the maneuver's junction
@@ -398,13 +401,16 @@ class RouteFollower:
     return self.valid and self.maneuver is not None and self.maneuver.kind == ARRIVE and self.distance < ARRIVE_DIST_M
 
   def update(self, instruction, updated: bool, valid: bool, v_ego: float, dt: float, committed: bool = False,
-             right_hand_traffic: bool | None = None, junction_hold: bool = False):
+             right_hand_traffic: bool | None = None, junction_hold: bool = False, line_hold: bool = False):
     """instruction: the latest navInstruction; updated: it arrived since the last call; valid: its valid flag;
     committed: the current maneuver's turn desire is out, so it is held through a gap in the route (module docstring);
     right_hand_traffic: the side traffic keeps to (the last one given when None), for make_maneuver's slight far-side turns;
     junction_hold: the current maneuver is a turn in hand, its desire not out yet (turnpilotd.turn_in_hand: a curb-side TURN
     TurnPilot acts on inside turn_speed.TURN_CAP_LEAD_M): held through a gap as a committed one is, but never against a new
-    route that doesn't turn there, and with a short outlier's re-baselining kept (module docstring)."""
+    route that doesn't turn there, and with a short outlier's re-baselining kept (module docstring);
+    line_hold: the current maneuver is a turn held standing at its line (turnpilotd: the unprotected left's latch, not gone):
+    an invalid run is a gap (nav_gap while it lasts) up to NAV_STALE_S from its first message, never past it, and anything
+    else as for any turn."""
     self.passed = self.replaced = False
     if right_hand_traffic is not None:
       self.right_hand_traffic = bool(right_hand_traffic)
@@ -413,9 +419,13 @@ class RouteFollower:
       # a gap, not a drop: the turn committed or in hand, or the car at or past the junction of this route's maneuver (a turn
       # it has made, navd off its step for a fix: 1e 8:36, module docstring). A new route's separator carries the new
       # routeCount; a turn in hand is held through it too, the new route's first valid update deciding (_on_instruction)
-      if self.valid and (hold or (int(instruction.routeCount) == self.route_count and self.distance <= 0. and
-                                  self.maneuver is not None and self.maneuver.kind in (TURN, KEEP))):
+      if self.valid and (hold or line_hold or (int(instruction.routeCount) == self.route_count and self.distance <= 0. and
+                                               self.maneuver is not None and self.maneuver.kind in (TURN, KEEP))):
         updated = False  # dead-reckoned on as between updates; NAV_STALE_S still ends a real loss
+        if not self.nav_gap:
+          self._gap_from = self._stale_t  # a line hold's gap is timed from its first invalid message
+          self._line_gap = line_hold and not hold
+        self.nav_gap = True
       else:
         dropped = self.valid
         self.reset()
@@ -424,11 +434,19 @@ class RouteFollower:
           self.replaced = True
         return
     if updated:
-      self._stale_t = 0.
+      # navd back on another route after a gap only a line hold rode: the drop the gap stood in for, then the new route
+      dropped = self.nav_gap and self._line_gap and int(instruction.routeCount) != self.route_count
+      if dropped:
+        self.reset()
+        self.maneuver_id += 1
+      self._stale_t, self.nav_gap = 0., False
       self._on_instruction(instruction, committed, max(v_ego, 0.) * dt, junction_hold and not committed)
+      self.replaced = self.replaced or dropped
     elif self.valid:
       self._stale_t += dt
-      if self._stale_t > NAV_STALE_S and not hold:  # navd went quiet: the maneuver is over, as when navd drops the
+      # a line hold rides its invalid run NAV_STALE_S from the run's first message, whatever navd's phase
+      line_gap = line_hold and self.nav_gap and self._stale_t - self._gap_from <= NAV_STALE_S
+      if self._stale_t > NAV_STALE_S and not hold and not line_gap:  # navd went quiet: the maneuver is over, as when navd drops the
         self.reset()  # route, but not replaced (a turn under way finishes and its desire is cleared as for a pass)
         self.maneuver_id += 1
         return

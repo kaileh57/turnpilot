@@ -19,6 +19,7 @@ from openpilot.selfdrive.turnpilot.tests.test_turnpilotd import THREE_LANES_LEFT
 from openpilot.selfdrive.turnpilot.turn_speed import POST_GO_PROFILES
 from openpilot.selfdrive.turnpilot.turnpilotd import GO_LINE_M, LEFT_NO_MOVE_S, NO_MOVE_S, TurnPilot, auto_left_for, left_range_for
 from openpilot.selfdrive.turnpilot import unprotected_left as ul_mod
+from openpilot.selfdrive.turnpilot.unprotected_left import (A_GO, CLEAR_PATH_PAST_M, CONFLICT_PAST_M, go_can_stop)
 from openpilot.selfdrive.turnpilot.unprotected_left import (CLEAR_WINDOW_S, CREEP_STALL_S, HELD_MIN_M, LIGHT_CHANGED_REASON, LIGHT_IN_JUNCTION_REASON,
                                                            LIGHT_RED_MAX_S, LIGHT_WAIT_REASON,
                                                            LONG_WAIT_REASON, ROAD_RANGE_M, STALE_UNDECIDED_S, STAND_UNDECIDED_S,
@@ -752,7 +753,10 @@ def test_a_nearer_reading_at_the_line_never_leaves_the_first_motion_recheck_with
   UNCERTAIN_M. The go's first-motion re-check withdraws only while the car can stop short of the oncoming lanes by the live
   reading, false at first motion there, so a car appearing 90 m up the oncoming lane then was ignored and the car committed,
   4.3-5.8 m past the junction at 4.2 m/s 4.5 s later. A reading under HELD_MIN_M is the position fault, the car held and
-  said, never a go; one that leaves the re-check room (0, 3, 4.5 m nearer) still goes, and its re-check withdraws it."""
+  said, never a go; one that leaves the re-check room (go_can_stop at the injected speed, by the live reading: 0 m nearer,
+  3 m at first motion) still goes, and its re-check withdraws it. Between the two (3 m nearer at 0.8 m/s, 4.5 m) the go's
+  withdrawal no longer stands the car where its next go is judged, the actuator's lag in it: it carries through, never a
+  stand in the oncoming lanes, across before the car seen arrives."""
   sim, plans, go, appeared = first_motion_run(nearer_m, v_inject)
   if JUNCTION - LINE - nearer_m < HELD_MIN_M:
     assert go is None and not any(str(p.controlPrompt) == 'leftGo' for p in plans), f"{nearer_m} m nearer: it went"
@@ -764,6 +768,15 @@ def test_a_nearer_reading_at_the_line_never_leaves_the_first_motion_recheck_with
     return
   assert go is not None and appeared is not None, nearer_m
   more = plans[appeared:]
+  if not go_can_stop(v_inject, JUNCTION - LINE - nearer_m - v_inject ** 2 / (2. * A_GO)):
+    n0 = len(sim.trace) - len(more)
+    more += drive(sim, 4.)
+    rows = sim.trace[n0:]
+    assert not any(str(p.controlAlert) == 'oncomingHolding' or str(p.controlPrompt) in TAKE_CONTROL_PROMPTS for p in more)
+    assert not any(v < 0.05 and JUNCTION - s < ONCOMING_ENTRY_M + 0.5 for s, v, _ in rows), f"{nearer_m} m nearer: stood"
+    across = next(k for k, (s, _, _) in enumerate(rows) if s > JUNCTION + CLEAR_PATH_PAST_M)
+    assert 90. - V_25 * across * DT_MDL > CONFLICT_PAST_M + 5., f"{nearer_m} m nearer: met by the car it carried through for"
+    return
   assert any(str(p.controlAlert) == 'oncomingHolding' for p in more[:int(1.5 / DT_MDL)]), \
     f"{nearer_m} m nearer: a car 90 m up the oncoming lane at the go's first motion never withdrew it"
   assert max(s for s, _, _ in sim.trace[-len(more):]) < JUNCTION - ONCOMING_ENTRY_M, f"{nearer_m} m nearer: into the oncoming lanes"
@@ -1933,22 +1946,22 @@ def gas_crawl_at_the_line(crawl_m, v_crawl=0.7, tracks=False):
   return sim, [sim.step(objs(), engaged=True) for _ in range(int(20. / DT_MDL))], past
 
 
-def test_a_gas_crawl_into_the_left_is_said_through_the_junction_and_a_straight_drive_is_missed():
+def test_a_gas_crawl_into_the_left_is_the_drivers_crossing_never_said_pulsed_or_missed():
   """Skeptic SG-residual-main (owner decision (b)): held at the left's line waiting for a gap, a 2.3 m gas crawl and a re-engage
-  drove straight through the junction; take-control showed about 4.5 s, then nothing, and turnMissed was never set. Now
-  the crossing is said (unprotectedTurnTakeControl, "Unprotected left not checked") until the car is DRIVEN_THROUGH_M past
-  the line, the re-engage hearing it; TurnPilot never pulses the left it didn't check; and driven straight past the
-  junction the left is missed: turnMissed ("Turn Missed", "Rerouting")."""
+  drove straight through the junction; take-control showed about 4.5 s, then nothing. The crossing is the driver's own:
+  never said (map_controls._crossed), TurnPilot never pulses the left it didn't check, and no turnMissed is raised for it."""
   from openpilot.selfdrive.turnpilot.map_controls import DRIVEN_THROUGH_M
   sim, after, past = gas_crawl_at_the_line(2.3)
   rows = list(zip(sim.trace[-len(after):], after, strict=True))
   inside = [p for (s, _, _), p in rows if LINE + past + 0.5 < s < LINE + DRIVEN_THROUGH_M - 1.]
-  assert inside and all(str(p.controlPrompt) == 'unprotectedTurnTakeControl' and p.reason == "Unprotected left not checked: take control"
-                        for p in inside), sorted({(str(p.controlPrompt), p.reason) for p in inside})
+  assert inside and not any(str(p.controlPrompt) == 'unprotectedTurnTakeControl' for p in inside), \
+    sorted({(str(p.controlPrompt), p.reason) for p in inside})  # the driver's own crossing: never said (_crossed)
   assert not any(p.desire == Desire.turnLeft for p in after), "TurnPilot pulsed the left it never checked"
   missed = [k for k, p in enumerate(after) if p.turnMissed]
   assert missed and sim.trace[-len(after) + missed[0]][0] > JUNCTION, "driven straight through the left, never missed"
   assert sim.s > JUNCTION + 30. and not any(p.shouldStop for p in after[5:])
+  # ...nor skipped as too fast to turn: the maneuver was his from the line, and navd is never told to reroute around it
+  assert not any(p.tooFastToTurn for p in after), sorted({p.skipReason for p in after if p.tooFastToTurn})
 
 
 def test_a_left_whose_line_the_driver_crossed_is_never_pulsed_when_the_scene_was_released_into_the_junction():
@@ -1964,8 +1977,41 @@ def test_a_left_whose_line_the_driver_crossed_is_never_pulsed_when_the_scene_was
   assert all(str(p.unprotectedLeft.state) in ('undecided', 'off') for p in after)
   rows = list(zip(sim.trace[-len(after):], after, strict=True))
   inside = [p for (s, _, _), p in rows if LINE + past + 0.5 < s < LINE + DRIVEN_THROUGH_M - 1.]
-  assert inside and all(str(p.controlPrompt) == 'unprotectedTurnTakeControl' for p in inside)
+  assert inside and not any(str(p.controlPrompt) == 'unprotectedTurnTakeControl' for p in inside)  # his crossing: never said
   assert any(p.turnMissed for p in after)
+  assert not any(p.tooFastToTurn for p in after)
+
+
+@pytest.mark.parametrize('engaged', [True, False])
+def test_a_left_the_driver_drives_through_on_his_gas_is_never_skipped_as_too_fast(engaged):
+  """Replay of a logged left, 2026-11-14: the driver's gas took the car over the left's hold line at walking pace and on
+  through the junction faster than the turn's cap. With his crossing no longer prompted (map_controls._crossed), the turn was
+  then skipped as too fast 10 m past the junction: a chime, and navd told to reroute around a turn he was making. The
+  maneuver is his from the line: never a too-fast skip, to its pass and after."""
+  stream = [JUNCTION + 60. + k * 3. * V_25 for k in range(40)]
+  t0 = [None]
+
+  def cars(sim):
+    if t0[0] is None and JUNCTION - sim.s < 60.:
+      t0[0] = sim.t
+    dt = sim.t - t0[0] if t0[0] is not None else 0.
+    return [(s - V_25 * dt, 3.6) for s in stream]
+
+  def pedal(sim, plan):
+    want = 3.5 if sim.s < JUNCTION - 2. else 7.5
+    return 1.5 if sim.v < want else -1. if sim.v > want + 0.3 else 0.
+  sim = left_sim(cars)
+  while JUNCTION - sim.s > 45.:
+    sim.step((), engaged=True)
+  sim.accel = pedal
+  plans = []
+  while sim.s < JUNCTION + 25.:
+    plans.append(sim.step((), engaged=engaged, gas=True))
+  sim.accel = None
+  plans += [sim.step((), engaged=True) for _ in range(int(6. / DT_MDL))]
+  assert sim.tp.drivers_id is not None  # the crossing was the driver's (map_controls.Driven)
+  assert not any(p.tooFastToTurn for p in plans), sorted({p.skipReason for p in plans if p.tooFastToTurn})
+  assert not any(str(p.controlPrompt) == 'unprotectedTurnTakeControl' for p in plans)
 
 
 def test_a_gas_nudge_short_of_the_lefts_reach_stays_held_for_the_full_check():
@@ -2018,11 +2064,11 @@ def withdrawn_go():
   return sim
 
 
-def crossing_said(rows, upto):
-  """The plans of rows (sim.trace's) short of upto m: all the driver's crossing's take-control (map_controls.Driven)."""
+def crossing_silent(rows, upto):
+  """The plans of rows short of upto m: none says the crossing (the driver's own: his gas, or openpilot disengaged; map_controls
+  _crossed logs it and never prompts or chimes for it)."""
   inside = [p for s, _, p in rows if s < upto]
-  return inside and all(str(p.controlPrompt) == 'unprotectedTurnTakeControl' and p.reason == "Unprotected left not checked: take control"
-                        for p in inside)
+  return inside and not any(str(p.controlPrompt) == 'unprotectedTurnTakeControl' or "not checked" in p.reason for p in inside)
 
 
 @pytest.mark.parametrize("rolling", [True, False])
@@ -2051,7 +2097,7 @@ def test_after_a_withdrawn_go_the_drivers_crawl_on_is_theirs_never_held_in_the_o
   in_lanes = [(round(JUNCTION - s, 2), round(v, 2)) for s, v, _ in rows if abs(JUNCTION - s) < ONCOMING_ENTRY_M and v < 0.05]
   assert not in_lanes, f"held standing in the oncoming lanes on the re-engage: {in_lanes[:3]}"
   assert not any(p.shouldStop for p in after)
-  assert crossing_said(rows, LINE + DRIVEN_THROUGH_M - 1.), sorted({(str(p.controlPrompt), p.reason) for _, _, p in rows})
+  assert crossing_silent(rows, LINE + DRIVEN_THROUGH_M - 1.), sorted({(str(p.controlPrompt), p.reason) for _, _, p in rows})
   assert not any(p.desire == Desire.turnLeft for p in after), "TurnPilot pulsed the left it never checked"
   missed = [s for s, _, p in rows if p.turnMissed]
   assert missed and missed[0] > JUNCTION, "driven straight through the left, never missed"
@@ -2081,15 +2127,15 @@ def test_after_a_withdrawn_go_the_drivers_own_left_is_never_held_in_the_junction
   stood = [(round(JUNCTION - s, 2), round(v, 2), p.reason) for s, v, p in rows if v < 0.05]
   assert not stood, f"re-engaged {yawed[0]:.0f} deg round the driver's own left: held standing in the junction {stood[:2]}"
   assert not any(p.shouldStop for p in after)
-  assert crossing_said(rows, LINE + DRIVEN_THROUGH_M - 1.), sorted({(str(p.controlPrompt), p.reason) for _, _, p in rows})
+  assert crossing_silent(rows, LINE + DRIVEN_THROUGH_M - 1.), sorted({(str(p.controlPrompt), p.reason) for _, _, p in rows})
   assert not any(p.desire == Desire.turnLeft for p in after) and not any(p.turnMissed for p in after)
 
 
 @pytest.mark.parametrize("reengage_at", [-2., -8., -25.])
-def test_after_a_withdrawn_go_a_left_the_driver_drives_straight_through_is_said_and_missed(reengage_at):
+def test_after_a_withdrawn_go_a_left_the_driver_drives_straight_through_is_silent_and_missed(reengage_at):
   """Skeptic SIMFIX round 2: driven straight on through the junction under the gas after the withdrawn go and re-engaged 2 m
   or 8 m past its centre, the car was held standing 7.89 and 13.97 m past it and turnMissed was never set. The driver's:
-  never held there, the crossing said until DRIVEN_THROUGH_M past the line, and the left missed (turnMissed, navd's reroute)."""
+  never held there, the crossing never said (the driver's own), and the left missed (turnMissed, navd's reroute)."""
   from openpilot.selfdrive.turnpilot.map_controls import DRIVEN_THROUGH_M
   sim = withdrawn_go()
   n0 = len(sim.trace)
@@ -2103,10 +2149,10 @@ def test_after_a_withdrawn_go_a_left_the_driver_drives_straight_through_is_said_
   assert any(p.turnMissed for _, _, p in sim.trace[n0:]), "a left driven straight through after a withdrawn go: never missed"
   assert not any(v < 0.05 and abs(JUNCTION - s) < 12. for s, v, _ in rows) and not any(p.shouldStop for p in after)
   if LINE + DRIVEN_THROUGH_M - 1. > JUNCTION - reengage_at:
-    assert crossing_said(rows, LINE + DRIVEN_THROUGH_M - 1.), sorted({(str(p.controlPrompt), p.reason) for _, _, p in rows})
-  # said from where the driver took the car past the hold (its reach), disengaged, before any re-engage
+    assert crossing_silent(rows, LINE + DRIVEN_THROUGH_M - 1.), sorted({(str(p.controlPrompt), p.reason) for _, _, p in rows})
+  # silent from where the driver took the car past the hold (its reach), disengaged, before any re-engage
   driven = [r for r in sim.trace[n0:n1] if r[0] > LINE + 2.5]
-  assert crossing_said(driven, LINE + DRIVEN_THROUGH_M - 1.), sorted({(str(p.controlPrompt), p.reason) for _, _, p in driven})
+  assert crossing_silent(driven, LINE + DRIVEN_THROUGH_M - 1.), sorted({(str(p.controlPrompt), p.reason) for _, _, p in driven})
   assert not any(p.desire == Desire.turnLeft for p in after)
 
 
@@ -2133,8 +2179,9 @@ def test_after_a_withdrawn_go_a_nudge_short_of_the_holds_reach_goes_back_to_the_
 
 def late_withdrawn_go(v_w):
   """LEFT_25 at its line through four oncoming cars 6 s apart; the go certified, and later in its launch, at about v_w - 0.35
-  m/s, a car 90 m up the oncoming lane at the limit withdraws it while the car can still stop short of the oncoming lanes:
-  the left's own hold (hold_here) from there, TurnPilot's stop asking about v^2 / (2 STOP_DECEL) m on (skeptic round 1)."""
+  m/s or, nearer the junction, about 0.2 s of launch short of the last point its withdrawal stands the car where its next go
+  is judged (go_can_stop: about 1.9 m/s from the line), a car 90 m up the oncoming lane at the limit withdraws it: the left's
+  own hold (hold_here) from there, TurnPilot's stop asking about v^2 / (2 STOP_DECEL) m on (skeptic round 1)."""
   stream = [JUNCTION + 60. + k * 6. * V_25 for k in range(4)]
   t0, late = [None], {}
 
@@ -2150,7 +2197,7 @@ def late_withdrawn_go(v_w):
   while not (sim.tp.left_now is not None and sim.tp.left_now.state == 'go'):
     sim.step(engaged=True)
     assert sim.t < 120.
-  while sim.v < v_w - 0.35:
+  while sim.v < v_w - 0.35 and go_can_stop(sim.v + 0.3, JUNCTION - sim.s - 0.6):
     sim.step(engaged=True)
   late['s'], late['t'] = sim.s + 90., sim.t
   while sim.tp.left_now.state == 'go':
@@ -2171,15 +2218,27 @@ def test_after_a_go_withdrawn_in_its_launch_a_re_engage_is_held_short_of_the_lan
   the hold would have stood it 4.83-5.21 m from the centre (e93750b). At 2.7 e93750b stood it 3.47 and 2.83 m out, inside
   the lanes. Never let go on TurnPilot's metres: held short of the lanes, waiting for its gap, where the hold can stand the
   car there; let go at the re-engage itself, judged from its frame's speed, before any stop of TurnPilot's, where it can't
-  (the invariant), its crossing said; never standing in the oncoming lanes."""
-  from openpilot.selfdrive.turnpilot.map_controls import DRIVEN_THROUGH_M
+  (the invariant), its crossing the driver's, never said; never standing in the oncoming lanes. A withdrawal stands the car where its next go is
+  judged (go_can_stop, the actuator's lag in it), so a coast over the ask never leaves the hold without room: at 2.7 the
+  driver's own pedal (the gas, 2.5 m/s^2; a cancel and the brake released on a slope alike) raises the speed instead, until
+  a re-engage is (frac - 0.5) m past where any hold of the left's could still stand the car short of the lanes."""
+  from openpilot.selfdrive.turnpilot.map_controls import DRIVEN_THROUGH_M, reengage_stop_m
+  from openpilot.selfdrive.turnpilot.unprotected_left import hold_caps
   sim = late_withdrawn_go(v_w)
   asked = sim.tp.left.hold_asked
   s0, rows = sim.s, []  # (openpilot engaged, the left's own hold still standing after it, the plan)
-  sim.accel = lambda sim, plan: 0.
-  while sim.s - s0 < frac * asked - 1e-3 and sim.tp.left.hold_here:
+  left = sim.tp.left
+  sim.accel = lambda sim, plan: 2.5 if v_w > 2.5 else 0.
+
+  def driving():
+    if v_w > 2.5:
+      return left.hold_m + reengage_stop_m(sim.v, hold_caps) <= left.hold_entry + frac - 0.5
+    return sim.s - s0 < frac * asked - 1e-3
+  while driving() and left.hold_here:
     p = sim.step(engaged=False, gas=gas)
-    rows.append((False, sim.tp.left.hold_here, p))
+    rows.append((False, left.hold_here, p))
+  if v_w > 2.5:  # the scenario: re-engaged where no hold of the left's stands the car short of the lanes
+    assert left.hold_here and left.hold_m + reengage_stop_m(sim.v, hold_caps) > left.hold_entry, (left.hold_m, sim.v)
   sim.accel = None
   n = len(sim.trace)
   for _ in range(int(8. / DT_MDL)):
@@ -2194,7 +2253,8 @@ def test_after_a_go_withdrawn_in_its_launch_a_re_engage_is_held_short_of_the_lan
     assert let_go == reengage, f"let go on row {let_go}, the re-engage {reengage}"
     assert not any(p.shouldStop for e, _, p in rows if e), "let go on TurnPilot's own braking"
     assert not any(p.desire == Desire.turnLeft for _, _, p in rows[let_go:]), "the go's turnLeft out on a left let go as the driver's"
-    assert crossing_said(after, LINE + DRIVEN_THROUGH_M - 1.), sorted({(str(p.controlPrompt), p.reason) for *_, p in after})
+    # the driver's own crossing (his pedal, openpilot disengaged): never said (map_controls._crossed)
+    assert crossing_silent(after, LINE + DRIVEN_THROUGH_M - 1.), sorted({(str(p.controlPrompt), p.reason) for *_, p in after})
   else:  # held where it stands, short of the lanes, the full check going on
     assert let_go is None, f"let go {'engaged' if rows[let_go][0] else 'disengaged'}: the full check (c) skipped"
     assert stood and stood[0] > ONCOMING_ENTRY_M and sim.v < 0.05
@@ -2363,7 +2423,7 @@ def test_a_left_the_driver_has_turned_into_when_it_is_let_go_keeps_its_desire_to
   assert not d.done and let_go.desire != CLEAR_DESIRE
   plans = [sim.step(engaged=False, gas=True, yaw_rate=sim.v / 6.) for _ in range(5)]
   assert not any(p.desire == CLEAR_DESIRE for p in plans) and not d.done
-  assert str(plans[-1].controlPrompt) == 'unprotectedTurnTakeControl'
+  assert str(plans[-1].controlPrompt) != 'unprotectedTurnTakeControl'  # the driver's own left: never a take-control (_crossed)
 
 
 @pytest.mark.parametrize("v_w", [2.5, 2.7])

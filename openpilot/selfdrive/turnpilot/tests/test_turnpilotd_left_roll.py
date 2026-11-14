@@ -651,3 +651,63 @@ def test_a_red_or_yellow_head_read_beside_the_greens_is_no_green_to_roll_on(monk
     assert tp.left_roll_light(1, 50.)[0] == 'unread', (accepted, camera)
   monkeypatch.setattr(tp.map_controls, 'junction_lights', lambda distance: ({'green'}, set()))
   assert tp.left_roll_light(1, 50.)[0] == 'green'
+
+
+def go_sounds(seen_s: float):
+  """The rolling go withdrawn a frame after it for a car first boxed 98 m up and seen seen_s, the car passing, the left going
+  again: [(s after the first go, banner, sound)] of each leftGo spell, as selfdrived builds the alert from the plan (None,
+  None if they change while it is up)."""
+  from openpilot.selfdrive.selfdrived.events import turnpilot_control_prompt_alert
+  first = {'t': None}
+
+  def cars(sim):
+    left = sim.tp.left_now
+    if first['t'] is None and left is not None and left.rolled:
+      first['t'] = sim.t
+    if first['t'] is None or sim.t - first['t'] > seen_s:
+      return []
+    return [(JUNCTION + 98. - V_25 * (sim.t - first['t']), 3.5, 'closing')]
+  sim = roll_sim(cars)
+  rows = drive(sim, limit_s=80.)
+  assert sim.s >= JUNCTION + 30.
+  out = []
+  for (t, _, _, p, _), (_, _, _, q, _) in zip(rows[1:], rows, strict=False):
+    if str(p.controlPrompt) != 'leftGo':
+      continue
+    alert = turnpilot_control_prompt_alert(None, None, _PlanSM(p), False, 0, 0)
+    if str(q.controlPrompt) != 'leftGo':
+      out.append((round(t - first['t'], 2), alert.alert_text_1, alert.audible_alert))
+    elif (alert.alert_text_1, alert.audible_alert) != out[-1][1:]:
+      out[-1] = (out[-1][0], None, None)  # the go's banner or sound changed while it was up
+  return out
+
+
+class _PlanSM(dict):
+  """selfdrived's SubMaster as hooks.fresh_plan reads it: this plan, received now and valid."""
+  def __init__(self, plan):
+    import time
+    super().__init__(turnpilotPlan=plan)
+    self.valid, self.recv_time = {'turnpilotPlan': True}, {'turnpilotPlan': time.monotonic()}
+
+
+@pytest.mark.parametrize("seen_s", [0.2, 0.5, 1.0, 3.0])
+def test_a_go_again_soon_after_its_withdrawn_go_is_shown_without_a_second_chime(seen_s):
+  # a rolling go withdrawn for a car boxed briefly goes again 2.7-5.5 s later: "Turning" both times, chimed only the first
+  AudibleAlert = log.SelfdriveState.AudibleAlert
+  sounds = go_sounds(seen_s)
+  assert len(sounds) == 2 and sounds[1][0] < 8., sounds
+  assert [b for _, b, _ in sounds] == ["Turning", "Turning"]
+  assert [a for _, _, a in sounds] == [AudibleAlert.prompt, AudibleAlert.none], sounds
+
+
+def test_a_go_after_the_repeat_window_or_of_another_left_chimes():
+  from openpilot.selfdrive.turnpilot.hooks import PROMPT_REPEAT_S
+  from openpilot.selfdrive.turnpilot.unprotected_left import UnprotectedLeft
+  AudibleAlert = log.SelfdriveState.AudibleAlert
+  sounds = go_sounds(PROMPT_REPEAT_S)  # the car boxed the whole window: the left goes again more than 8 s on
+  assert len(sounds) == 2 and sounds[1][0] > PROMPT_REPEAT_S and [a for _, _, a in sounds] == [AudibleAlert.prompt] * 2, sounds
+  # another maneuver's left starts with no withdrawn go behind it
+  ul = UnprotectedLeft()
+  ul.maneuver_id, ul.withdrawn_t = 1, 0.
+  ul._reset()
+  assert ul.withdrawn_t == math.inf and not ul.repeat_go

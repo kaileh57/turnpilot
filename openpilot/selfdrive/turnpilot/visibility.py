@@ -47,6 +47,13 @@ VIEW_KEY = {'road': 'road', 'full': 'full'}
 OCCLUDER_RANGE_TRUST_DEG = 40.  # deg: a ground range is trusted under this bearing only (the full pass's measured domain)
 OCCLUDER_NEAR_FRAC = 0.7        # and then at its near end
 STEADY_S, STEADY_SAMPLES = 1.0, 5
+# The wide camera's views (the full wide pass and the side views) at modeld's stand schedule arrive every 0.4-0.5 s, slower on
+# a loaded chestnut: each is fresh within CADENCE_SLACK times its own cadence (the median gap of its last CADENCE_RUNS runs),
+# never under DET_FRESH_S, never over CADENCE_FRESH_MAX_S (views gone longer are not arriving: stale, as before)
+CADENCE_KEYS = ('full', 'sideLeft', 'sideRight')
+CADENCE_RUNS = 5
+CADENCE_SLACK = 1.5
+CADENCE_FRESH_MAX_S = 0.9
 STEADY_BEARING_DEG, STEADY_WIDTH = 0.3, 0.05
 STEADY_PERIOD_S = 0.25          # s: the steady history must reach back STEADY_S less about one 5 Hz period
 RAW_BLOCK_CONF = 0.35
@@ -142,6 +149,7 @@ class LiveVisibility:
 
   def reset(self) -> None:
     self.view_t: dict[str, float] = {}
+    self.gaps: dict[str, deque] = {}  # the last CADENCE_RUNS run times of each CADENCE_KEYS view
     self.raw: dict = {}                                  # view key: its newest RawFrame
     self.sectors = {'left': deque(), 'right': deque()}   # (camera time, [(lo, hi, quality)] in unsigned deg) per side-view run
     self.history: dict[str, deque] = {}                  # view key: (camera time, boxes) over STEADY_S
@@ -154,6 +162,8 @@ class LiveVisibility:
   def observe_run(self, key: str, t: float, raw=None, sectors=None) -> None:
     """A detector run: its view key (scene.tracker.view_key), camera time, RawFrame, and a side view's sectorQuality as
     (inner, outer, quality) in deg left of the axis (or the capnp list)."""
+    if key in CADENCE_KEYS and t > self.view_t.get(key, -math.inf):
+      self.gaps.setdefault(key, deque(maxlen=CADENCE_RUNS)).append(t)
     self.view_t[key] = max(t, self.view_t.get(key, -math.inf))
     self.newest_t = t if self.newest_t is None else max(self.newest_t, t)
     if raw is not None:
@@ -177,12 +187,25 @@ class LiveVisibility:
 
   # -------------------------------------------------------------------------------------------------------- the inputs
 
+  def fresh_s(self, key: str) -> float:
+    """How old the view's newest run may be and count: DET_FRESH_S, or for a wide camera view CADENCE_SLACK times its own
+    cadence, to CADENCE_FRESH_MAX_S."""
+    ts = self.gaps.get(key)
+    if key not in CADENCE_KEYS or ts is None or len(ts) < 3:
+      return sr.DET_FRESH_S
+    gaps = sorted(b - a for a, b in zip(ts, list(ts)[1:], strict=False))
+    return min(max(sr.DET_FRESH_S, CADENCE_SLACK * gaps[len(gaps) // 2]), CADENCE_FRESH_MAX_S)
+
+  def extra_age_s(self) -> float:
+    """s the views' freshness bounds (fresh_s) reach past DET_FRESH_S: the age a go's clear window adds (stop_go._need_s)."""
+    return max((self.fresh_s(k) - sr.DET_FRESH_S for k in CADENCE_KEYS), default=0.)
+
   def fresh_key(self, key: str) -> bool:
-    """The view's newest run within DET_FRESH_S: its camera time behind the newest run of any view, plus the time since that
+    """The view's newest run within its fresh_s: its camera time behind the newest run of any view, plus the time since that
     run arrived (recv_age_s)."""
     t = self.view_t.get(key)
     return self.available and t is not None and self.newest_t is not None and \
-      self.newest_t - t + self.recv_age_s <= sr.DET_FRESH_S + 1e-9
+      self.newest_t - t + self.recv_age_s <= self.fresh_s(key) + 1e-9
 
   def fresh(self, view: str, side: str) -> bool:
     return self.fresh_key(SIDE_VIEW[side] if view == 'side' else VIEW_KEY.get(view, view))

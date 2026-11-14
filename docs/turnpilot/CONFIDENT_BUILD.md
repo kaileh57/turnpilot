@@ -20,6 +20,11 @@ faults alert, and driver monitoring is stock.
 | Road view freshness (`ROAD_FRESH_S`) | a road run more than 0.5 s after the last starts the clear window over | 0.5 s, or 1.25 times the road pass's own cadence where it runs slower (the median gap of its last 5 runs), to `ROAD_FRESH_MAX_S` (0.83 s, a pass down to 1.5 Hz); what that takes past 0.5 s is added to T_req, so R_req reaches further |
 | A committed left and a red | a red read refuses the go | a left that can no longer stop short of the oncoming lanes finishes: on the comfortable curve for a yellow or a red no longer read, on the red's own stop (0.5 s, then 3.0 m/s², 1 m to spare) for a red read now |
 
+| A go from a stand withdrawn (`go_can_stop`, `go_committed`) | withdrawn wherever the comfortable curve (v²/2·1.5) ends short of the oncoming lanes; committed past the hold line once it no longer does | the rolling go's rule: withdrawn only where that stop begun `ROLL_STOP_LAG_S` (0.5 s) on, 1 m to spare, still stands the car `HELD_MIN_M` (4.5 m) short of the junction. Past it the left carries through at its post-go profile (a slow one carried by the lift), the scene's junction holds yield to it past the hold line, and it commits where not even a read red's firm stop fits (never while another stop brakes it; stood by one where its own hold stands it, it is judged afresh). From the line the last withdrawal comes at about 2.0 m/s, 7.9 m out (it was about 2.8 m/s, 6.6 m); from a full creep (5 m) none after the first motion, from a signal's mouth (6 m) to about 0.7 m/s. L3's slow-launch check moved with it: every launch from the line is judged where its withdrawal still fits |
+| A left's 'stale' handback (`STALE_UNDECIDED_S`) | latched for the rest of the left | the car still standing, the first fresh road run judges it again on a fresh window; never raised on the frame the left comes back on after turnpilotd's own detector handback |
+| A gap in the route at a left's line | the first invalid `navInstruction` drops the maneuver: the line's latch hands back and the left comes back on a new id at its line ('Junction position unsure') | a left standing on its line's latch, not gone, rides invalid messages as a gap (`route_follower` `line_hold`) up to `NAV_STALE_S` (3 s) from the first of them, nothing said, and never goes while it lasts (its clear window starts again once the route is back). Longer, or navd back on another route (a new routeCount: the drop the gap stood in for), ends it with the same handback. A left on its own hold after a withdrawn go is held as a committed turn, as before |
+| "Turning" chime | every `leftGo` onset chimes | a go of the same left within `PROMPT_REPEAT_S` (8 s) of a withdrawn go that was shown keeps its banner and is silent (`unprotectedLeft.goRepeat`); the first go of a left, a go after that window and a quiet retry's first audible go still chime |
+
 ## Lights (`map_controls.py`, `detector/light_state.py`)
 
 | Rule | Public value | This build |
@@ -34,7 +39,10 @@ faults alert, and driver monitoring is stock.
 | `ROUND_MAX` | a glow filling its box is never a lamp | a round red or green glow filling its box is read (1.6 times as tall as wide at most). Not measured by day |
 | Lamp position rule | red counted in the upper half, green in the lower | hue only; position places a yellow only |
 | Right at a signal | goes with the model when no colour is read | flows only on a read green, at a mapped signal and wherever the camera boxes a governing head at its junction in `TURN_HEAD_RUNS` (2) road runs; otherwise stops at the line, stands `RIGHT_RED_DWELL_S` (1.5 s), looks for `RIGHT_RED_CLEAR_S` (1.0 s) and goes. Never while a red has been read in the last `RIGHT_RED_UNREAD_S` (2.5 s) and `RIGHT_RED_UNREAD_READS` (6) road runs, at any run rate (the seconds alone only once the reader has given no run for `RIGHT_RED_QUIET_S`, 10 s). A red or yellow read again after its go, while a stop still ends within `RED_PAST_M` of the line, stops it again. A stand for an unread light ends `TURN_DROPPED_S` (1.0 s) after the turn is dropped |
+| Right on red and an uncontrolled junction: side views | the look and the cross-traffic hold judge the forward passes' tracks only (the side views never ran there) | at or under 2 m/s (`SWEEP_V_MAX`) turnpilotd asks for `sideLook` while a curb-side turn's signal stops or holds the car for its right-on-red look, and while a turn at a junction with no mapped control is where its cross-traffic hold could stand the car; never over the left's view or a stop sweep. The side views' tracks hold both as crossing traffic. A car only a side view sees stays a new track for about 11 s (`VEL_TRUST_HITS` 25 at about 2.3 a second): standing where the right-on-red look's 'new' rule reaches it, it holds the right that long; closing inside `CROSS_Y_NEAR_M` (13 m) it no longer holds an uncontrolled turn (Sim: the car stood short of the through road as it crossed). The wide pass runs about 2.3 a second there (was 5 or more): a walker only it sees must be in view about 0.7 s before the right-on-red go to hold it (0.2 s without the look); seen later, the go is let go and the scene's crosswalk hold stands the car again at under 0.5 m/s, short of them |
 | A red's match to its signal | a head within 10 m before to 40 m past the line, by its range as read | the same for every head; a red or yellow no line takes so is the first line's ahead that the span from its nearer range to its read range reaches. The nearer range is the reader's second estimate, from the box's height against a 1.07 m head (`HEAD_M`), never nearer than a head 3.0 m up would be (`LOW_HEAD_M`), and at most the read range over `CAMERA_RANGE_LONG` (1.4). A green and an unread head keep the window as read |
+| A signal on its approach's own node | its line `CONTROL_LINE_M` (10 m) before the node | `SIGNAL_NODE_LINE_M` (4 m) before a signal node no other road meets (`routing/controls.py`): route 29's three such signals had the driver standing 0.3-4.8 m short of the node |
+| A line the driver crossed | its take-control and reason up until 30 m past it, engaged or not, and `stopOverrun` (owner decision (b)) | the driver's own crossing (his gas, or openpilot disengaged) is logged only: no prompt, no chime. A crossing with openpilot engaged and no gas is said as before |
 | Camera stop with no route | dropped with the route's maneuver unless already braking | a stop a camera red or yellow raised stays through a route gap and is the same junction's under the route's next maneuver id; only its light lets it go |
 | Off-route speed cap | 11.2 m/s with an alert when a destination is set and no route is valid | no cap, one silent status line (with `TurnPilotAlwaysDrive` on) |
 | A stop driven past under the gas | dropped when the gas lifts | dropped 2 m past the line above 2 m/s |
@@ -73,13 +81,15 @@ faults alert, and driver monitoring is stock.
 | Stop signs under vision stop-go | routed around when the line would hand back | never routed around |
 | Detector handback | latched to a full disengage | clears if the detector returns within 3 s |
 | Detector re-measure | waits 16 frames (0.8 s) after any pass over budget | skips one run (`FORCE_SKIP_FRAMES` 4) when only slightly over |
+| Side views at a stand (`detector/modeld_detector.py` stand schedule) | the held cycle: full wide and road passes 5 a second each, a side view only where it leaves `DEBT_CAP_S` (8 ms) of debt, which on this car is never past the first | once the side views have had no frame for `STAND_STARVED_S` (0.3 s) at or under 2 m/s in a sweep or a `sideLook`: the road pass every `STAND_ROAD_DUE_S` (0.2 s), the wide pass and each side view every `STAND_VIEW_DUE_S` (0.4 s), a side run allowed `SIDE_STAND_CAP_S` (16.7 ms, a third of a frame) of lateness, and counted an overrun only past half a frame (`SIDE_STAND_OVERRUN_S`). On the car's timings: road 4.4-4.7 a second (was 5), wide 2.2-2.3 (was 5), each side view 2.1-2.3 (was 0); a sweep's tracks coast `SWEEP_COAST_S` 0.9 s (was 0.65) |
 
 ## Not proven on the car
 
 Everything above is tested in unit simulations and open-loop replays of logged drives
 (`openpilot/tools/turnpilot/drive_scorecard.py`). None of it has been driven, and no left's verdict changed on a replayed
-drive: the replay is open loop and reuses the logged build's detections. The right-on-red look and the stop-sign go judge
-cross traffic on the forward cameras only. No logged left would have taken the rolling go.
+drive: the replay is open loop and reuses the logged build's detections. The right-on-red look, an uncontrolled junction's
+cross-traffic hold and the stop-sign go now ask for the side views at walking pace, but no drive log has side-view runs at
+them yet: on the logs they judged cross traffic on the forward cameras only. No logged left would have taken the rolling go.
 
 Reds at night: on the last logged night drive the car read no red at four of five red stands. That build made a head only
 from a box scoring 0.35 or more, and most heads there score 0.20 to 0.35. The reader now reads down to 0.2 (0.1 for a
@@ -91,3 +101,21 @@ Still seen in replay: the car brakes for several seconds at a light that has jus
 range further than the reader's match to the mapped signal allows. Greens are read at a lower confidence than reds, and a
 read green can release a camera red's stop, let a right flow and let a left roll. The reader's and tracker's added cost was
 timed on a desktop only.
+
+Open after the 2026-11-14 round, each reproduced and left unchanged because no honest fix exists off the car:
+
+- A stand at a green whose only read heads hang on the far side. Those heads range past the 40 m match to the line, so a
+  stop raised by a red read on the approach is not released by them: in replay the car brakes 5.2 s into one such green and
+  would stand at its line. A release by longer range was built and parked: the map tiles do not mark signalled mid-block
+  crossings, so nothing tells this junction's far heads from the next junction's. The driver's gas releases the stand.
+- A next junction's green 50-60 m past the line that reads a quarter short falls inside the same match and can release a
+  camera red whose own heads read nothing.
+- A red first read inside 22 m at 25 mph, 33 m at 30, 45 m at 35 or 58 m at 40 is driven through, since a stop no longer
+  fits at 3.0 m/s². The hardest braking ever commanded in the logs is 2.2 m/s²: whether the car delivers 3.0 needs a brake
+  test.
+- A navd reading that steps several metres nearer while a left stands at its line hands the left back for good.
+- The stand schedule's side-view runs were timed on a desktop scaled to the car (8.8 times, give or take a third). A side
+  run may leave a third of a frame of lateness; overruns past half a frame turn the side views off for the drive.
+- With the side look on, the wide camera's full pass runs about 2.3 times a second at a stand, so a walker only it sees is
+  tracked about 0.4 s after first boxed (0.2 s before). A car first boxed by a side view inside the last side period
+  (under 0.5 s) before a right's go does not hold it.

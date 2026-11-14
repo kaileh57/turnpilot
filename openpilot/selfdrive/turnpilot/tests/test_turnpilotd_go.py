@@ -511,7 +511,7 @@ def test_a_lefts_go_the_car_launches_on_gently_with_a_car_in_the_band_that_launc
 
   def cars(sim):
     left = sim.tp.left_now
-    if st['t'] is None and left is not None and left.state == 'go' and sim.v > 1.5:
+    if st['t'] is None and left is not None and left.state == 'go' and sim.v > 1.:  # seen before the judgement (1.19 m/s)
       st['t'] = sim.t
     if st['t'] is None or sim.t - st['t'] > 2.:
       return ()
@@ -575,16 +575,16 @@ def test_a_slow_launch_at_the_cars_own_range_and_yaw_keeps_driving_on_the_band_t
 
 
 def test_a_slow_launch_with_a_car_seen_in_the_band_it_needs_at_the_cars_range_and_yaw_waits_and_turns_after_it():
-  """L3's rail on the car's own range and the Sim's yaw: an oncoming car about 140 m up the band when the 0.6 m/s^2 launch
+  """L3's rail on the car's own range and the Sim's yaw: an oncoming car about 145 m up the band when the 0.6 m/s^2 launch
   is judged (outside the A_GO launch's band from there, inside this one's) withdraws the go to the left's own wait short of
-  the oncoming lanes. The car stands there yawed about 29 deg, past where the band's far edge leaves the road camera's frame
-  (YAW_VIEW_DEG; the 'yaw' handback past 15 deg until 2026-11-08): judged from where it stands at its measured heading on
-  what the camera frames, said once, and it turns once the car has gone."""
+  the oncoming lanes. The car stood there yawed about 29 deg until L3's judgement took the actuator's lag (go_stop_m) and
+  moved nearer the line; it stands now yawed less than YAW_VIEW_DEG, judged from where it stands at its measured heading,
+  and it turns once the car has gone."""
   st = {'t': None}
 
   def cars(sim):
     left = sim.tp.left_now
-    if st['t'] is None and left is not None and left.state == 'go' and sim.v > 1.5:
+    if st['t'] is None and left is not None and left.state == 'go' and sim.v > 1.:  # seen before the judgement (1.19 m/s)
       st['t'] = sim.t
     if st['t'] is None or sim.t - st['t'] > 2.:
       return ()
@@ -596,8 +596,10 @@ def test_a_slow_launch_with_a_car_seen_in_the_band_it_needs_at_the_cars_range_an
   assert not any(str(p.controlPrompt) in TAKE_CONTROL_PROMPTS for p in plans)
   stood = [(s, i) for i, (s, v, _) in enumerate(sim.trace) if v < 0.05 and s > JUNCTION - LINE_D + 0.5]
   assert stood and max(s for s, _ in stood) < JUNCTION - ONCOMING_ENTRY_M  # stood short of the oncoming lanes, past its line
+  # judged where its withdrawal still fits (go_stop_m), it stands nearer its line than it did, under YAW_VIEW_DEG at an 8 m
+  # radius; test_a_stand_yawed_past_what_the_road_camera_frames_... stands one past it (a 4 m radius)
   views = [kw for name, kw in said if name == 'turnpilot.left_yaw_view']
-  assert len(views) == 1 and views[0]['heading_deg'] > YAW_VIEW_DEG, views
+  assert not views and sim.tp.left.state != 'undecided', views
   assert not any(name == 'turnpilot.left_undecided' for name, _ in said)
   assert any(str(p.unprotectedLeft.state) == 'committed' for p in plans) and sim.s > JUNCTION
 
@@ -612,7 +614,7 @@ def test_a_stand_yawed_past_what_the_road_camera_frames_is_judged_on_what_it_fra
 
   def cars(sim):
     left = sim.tp.left_now
-    if st['t'] is None and left is not None and left.state == 'go' and sim.v > 1.5:
+    if st['t'] is None and left is not None and left.state == 'go' and sim.v > 1.:  # seen before the judgement (1.19 m/s)
       st['t'] = sim.t
     if st['t'] is None or sim.t - st['t'] > 2.:
       return ()
@@ -853,16 +855,18 @@ def test_a_committed_far_side_turn_released_in_the_junction_is_never_lifted():
   withdrawal: after the commit every oncoming hold drops, and the path corridor never sees a car in the oncoming lane), so
   plannerd lifted the model's hold for the oncoming car and moved the car 3.23 m, 0.9 m into the oncoming lane at 1.4 m/s,
   as the oncoming car reached it. A far-side turn released in the junction is never certified (why junction): the car stands
-  where the walker stopped it, short of the oncoming lanes, and the stall's handback comes, as on 109215f. At a signal the
-  oracle reads green too (the light certified, the oncoming road on its green)."""
+  where the walker stopped it, short of the oncoming lanes. At a signal the oracle reads green too (the light certified, the
+  oncoming road on its green). The walker stood the car where the left's withdrawal fits again (go_can_stop), so the left is
+  committed no more: its own hold, judged afresh, waiting (as on 109215f the stall's handback came instead, the committed
+  left never judging again); never a go lifted over the model there, never a take-control."""
   for signal in (False, True):
     sim, plans, s0, oncoming = committed_left_stopped_by_a_walker(signal)
     assert all(go(p)[0] == 'none' for p in plans), signal
     assert not any(lifted for _, _, lifted in sim.planned[-len(plans):]), signal
     assert sim.s - s0 < 0.1 and JUNCTION - sim.s > ONCOMING_ENTRY_M, signal
     assert oncoming() < sim.s  # the oncoming car went by
-    stalled = next(i for i, p in enumerate(plans) if p.controlPrompt == 'stalledTakeControl')
-    assert stalled * DT_MDL <= STALL_PROMPT_S + 0.2, signal
+    assert sim.tp.left.hold_here and all(str(p.unprotectedLeft.state) == 'waitGap' for p in plans[1:]), signal
+    assert not any(str(p.controlPrompt) in TAKE_CONTROL_PROMPTS for p in plans), signal
 
 
 def test_a_curb_side_turn_released_in_the_junction_at_a_green_is_certified_and_a_far_side_one_isnt():

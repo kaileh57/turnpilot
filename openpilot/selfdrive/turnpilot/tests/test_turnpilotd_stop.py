@@ -1159,13 +1159,13 @@ def test_a_gas_nudge_short_of_the_line_then_a_re_engage_goes_back_to_the_full_ch
 
 
 @pytest.mark.parametrize("past", [3., 5.])
-def test_a_crawl_past_the_line_under_the_gas_is_said_through_the_junction_never_held_in_it(tmp_path, past):
-  """Skeptic SG-residual-main (owner decision (b)): latched at the line with the decider observing, the driver crawled 3-5 m
-  past under the gas and re-engaged rolling; the decider went off and the car drove through the junction with no check and
-  no prompt (its go had come while the driver drove: a go of TurnPilot's with openpilot disengaged let the latch go). Now
-  the decider never goes disengaged, the car's motion past the line under the driver lets the latch go, and that crossing is
-  said (stopSignTakeControl, "Stop sign passed unchecked") until the car is DRIVEN_THROUGH_M past the line, a re-engage in
-  the junction hearing it, never a hold of the decider's own there."""
+def test_a_crawl_past_the_line_under_the_gas_is_the_drivers_never_said_never_held_in_it(tmp_path, past):
+  """Skeptic SG-residual-main: latched at the line with the decider observing, the driver crawled 3-5 m past under the gas and
+  re-engaged rolling; the decider went off and the car drove through the junction (its go had come while the driver drove:
+  a go of TurnPilot's with openpilot disengaged let the latch go). Now the decider never goes disengaged and the car's
+  motion past the line under the driver lets the latch go: the driver's own crossing, logged, never a prompt or a chime
+  (map_controls._crossed; the matrix, 2026-11-12: "Stop sign passed unchecked" chimed after the driver drove the sign and
+  engaged again), never a hold of the decider's own there."""
   from openpilot.selfdrive.turnpilot.map_controls import DRIVEN_THROUGH_M
   sim = StopSim(tmp_path, mode='auto', model='goes')
   run_to_line(sim)
@@ -1184,7 +1184,7 @@ def test_a_crawl_past_the_line_under_the_gas_is_said_through_the_junction_never_
   sim.run(10.)
   after = sim.trace[k0:]
   inside = [p for s, _, p in after if s < S_LINE + DRIVEN_THROUGH_M - 1.]
-  assert inside and all(str(p.controlPrompt) == 'stopSignTakeControl' and p.reason == "Stop sign passed unchecked: take control"
-                        for p in inside), sorted({(str(p.controlPrompt), p.reason) for p in inside})
+  assert inside and not any(str(p.controlPrompt) == 'stopSignTakeControl' or "passed unchecked" in p.reason
+                            for p in inside), sorted({(str(p.controlPrompt), p.reason) for p in inside})
   assert not any(p.shouldStop for _, _, p in after) and min(v for _, v, _ in after) > 0.5, "held in the junction"
   assert all(str(p.controlPrompt) == 'none' for s, _, p in after if s > S_LINE + DRIVEN_THROUGH_M + 1.)

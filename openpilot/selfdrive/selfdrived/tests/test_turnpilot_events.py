@@ -330,6 +330,12 @@ def test_the_unprotected_lefts_wait_is_silent_its_go_chimes_and_its_fault_hands_
     assert prompt not in TAKE_CONTROL_PROMPTS
   a, = alerts(EventName.turnpilotControlPrompt, FakeSM(plan(controlPrompt='leftGo', reason='Turning')))
   assert a.alert_text_1 == 'Turning' and a.audible_alert == AudibleAlert.prompt
+  # the same left's go again soon after a withdrawn one (unprotectedLeft.goRepeat): its banner, no second chime
+  repeat = messaging.new_message('turnpilotPlan')
+  repeat.turnpilotPlan.controlPrompt, repeat.turnpilotPlan.reason = 'leftGo', 'Turning'
+  repeat.turnpilotPlan.unprotectedLeft.goRepeat = True
+  a, = alerts(EventName.turnpilotControlPrompt, FakeSM(repeat.as_reader().turnpilotPlan))
+  assert a.alert_text_1 == 'Turning' and a.audible_alert == AudibleAlert.none and a.visual_alert == VisualAlert.none
   a, = alerts(EventName.turnpilotControlPrompt, FakeSM(plan(controlPrompt='leftUndecidedTakeControl',
                                                             reason="View of oncoming traffic blocked: take control")))
   assert a.alert_text_1 == "View of oncoming traffic blocked: take control" and a.audible_alert == AudibleAlert.tpHandback

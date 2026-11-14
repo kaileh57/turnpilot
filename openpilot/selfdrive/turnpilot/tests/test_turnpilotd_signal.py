@@ -724,17 +724,18 @@ def test_selfdrived_never_says_finishing_for_a_veto_at_the_lefts_go():
 
 
 def test_a_veto_at_the_lefts_go_past_its_point_of_no_return_finishes_it_out_loud():
-  """Past the point where the car can stop short of the oncoming lanes the left goes on (committed_past_line commits it):
-  a veto there is "Turn Signal Changed" / "Finishing the turn", never a withdrawal in the oncoming lanes."""
-  from openpilot.selfdrive.turnpilot.scene_policy import ONCOMING_ENTRY_M, STOP_DECEL
+  """Past the point where the car can stop short of the oncoming lanes the left goes on (go_can_stop: its withdrawal, the
+  actuator's lag in it, no longer stands the car where its next go is judged; go_committed commits it): a veto there is
+  "Turn Signal Changed" / "Finishing the turn", never a withdrawal in the oncoming lanes."""
   from openpilot.selfdrive.turnpilot.tests.test_turnpilotd_left import JUNCTION, drive, left_sim
+  from openpilot.selfdrive.turnpilot.unprotected_left import go_can_stop
   sim = left_sim()
   sim.answers_prompt = False
   sim.tp.car_signal_flags, sim.tp.car_signal_mode, sim.tp.car_signal_proven = int(TeslaFlags.CAR_SIGNALS), 'on', True
   state = {'driver': 'none'}
   sim.car_signal = overruling_port(state, LaneChange.left)
-  while not (sim.trace and str(sim.trace[-1][2].unprotectedLeft.state) == 'go' and sim.v > 0.3 and
-             sim.v ** 2 / (2. * STOP_DECEL) >= JUNCTION - sim.s - ONCOMING_ENTRY_M):
+  while not (sim.trace and str(sim.trace[-1][2].unprotectedLeft.state) in ('go', 'committed') and sim.v > 0.3 and
+             not go_can_stop(sim.v, JUNCTION - sim.s)):
     drive(sim, DT_MDL)
     assert sim.t < 90.
   state['driver'] = 'right'
