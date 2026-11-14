@@ -6,6 +6,7 @@ schedule, no side view ran past the first at a stand on this car: the held cycle
 side run's step left more than DEBT_CAP_S from any step (route 26: one side run in 9.6 s of sweep, noRoom the rest; route 29
 never asked for one). Each stand is a minute of steps; per pass the runs a second, the longest gap between runs, and every
 step's lateness, which must stay under a third of a frame (no frame dropped)."""
+import math
 from collections import deque
 from types import SimpleNamespace
 
@@ -204,3 +205,119 @@ def test_with_the_cars_timing_spread_and_a_slower_model_the_side_views_stay_on(m
           f"latest {1e3 * late.max():.1f} ms")
     assert det.stand and not det.side.disabled and all(r[n][0] > 1.5 for n in SIDE_VIEWS)
     assert late.max() < FORCE_SKIP_LATE_S + 0.006 and r['road'][0] >= 4.3
+
+
+# modeld's own clock (modeld.py): frames arrive every CYCLE_S and the main camera's vipc client is conflated, so a step that
+# ends a whole frame late finds a newer frame and the ones between are dropped (vipc_dropped_frames). One dropped frame
+# makes that frame's cameraOdometry invalid (fill_model_msg.fill_pose_msg), locationd's inputsOK false and selfdrived raise
+# locationdTemporaryError (soft disable); three within a few seconds put frameDropPerc (FirstOrderFilter, 10 s) past 1:
+# modeldLagging. The harness above counts lateness as the time budget does; this one plays the frames as camerad sends them.
+# modeld's time per frame outside the model and the detector, measured on the 11-06/11-08 rlogs where a frame started at
+# the last one's end: 3.5-3.9 ms (REST_S, the time budget's count of it, is 3), the detector's own step on a frame where
+# nothing runs about 0.05 ms (this Mac's 5 us at 8.8x)
+REAL_REST_S, STEP_S, UPLOAD_S = 0.0037, 0.00005, 0.042  # an upload: route 26's 38.1-38.6 ms a view, and 10% more
+
+
+class EofMeta:
+  def __init__(self, frame_id, eof_s):
+    self.frame_id, self.timestamp_eof = frame_id, int(eof_s * 1e9)
+
+
+def real_clock(monkeypatch, plan, seed=0, scale=1., ready=True):
+  """plan: (seconds, view, v_ego, signal_near) spells, each on modeld's real clock. The desktop-scaled costs (the sectors, the
+  junction light read) times scale. Per processed frame: its view, the lateness it started with, the frames dropped before it,
+  and whether the side views' maps were on the device."""
+  clock = SimpleNamespace(t=1000.)
+  det = side_detector(side_time=SIDE_S, ready=ready)
+  monkeypatch.setattr(modeld_detector, 'time', SimpleNamespace(monotonic=lambda: clock.t, perf_counter=lambda: clock.t))
+  rng = np.random.default_rng(seed + 100)
+
+  def spread(s, sd):
+    return max(0., s + rng.normal(0., sd)) + (TAIL_S if rng.random() < TAIL_P else 0.)
+
+  def costs(fn, s, sd=RUN_SD_S):
+    def run(*args, **kwargs):
+      clock.t += spread(s, sd)
+      return fn(*args, **kwargs)
+    return run
+  det.light_mode, det.lights = 'addOnly', FakeLights()
+  det.times = deque([FULL_S] * TIME_WINDOW, maxlen=TIME_WINDOW)
+  det.paint_times.extend([PAINT_S] * TIME_WINDOW)
+  det.light_times.extend([LIGHT_S] * TIME_WINDOW)
+  det.run = costs(det.run, FULL_S)
+  det.lane_paint.read = costs(det.lane_paint.read, PAINT_S)
+  light = {'s': LIGHT_S}
+  read = det.lights.read
+  det.lights.read = lambda *a, **kw: (setattr(clock, 't', clock.t + spread(light['s'], RUN_SD_S)), read(*a, **kw))[1]
+  det.stand_update = costs(det.stand_update, STEP_S, EXTRA_SD_S / 4)
+  side = det.side
+  side.run = costs(side.run, SIDE_S)
+  side.upload = costs(side.upload, UPLOAD_S)
+  side.quality = SectorCost(clock, SECTOR_S * scale, spread)
+
+  class PM:
+    def send(self, name, msg):
+      td = msg.as_reader().turnpilotDetections
+      clock.t += spread(ROAD_EXTRA_S if str(td.camera) == 'road' and str(td.view) not in SIDE_VIEWS else WIDE_EXTRA_S, EXTRA_SD_S / 2)
+  spells, t = [], 0.
+  for secs, view, v_ego, signal_near in plan:
+    spells.append((t + secs, view, v_ego, signal_near))
+    t += secs
+  model = model_times(round(t / CYCLE_S) + 1, seed)
+  t0, end, last = clock.t, clock.t, -1
+  out = []
+  while True:
+    arrived = math.floor((end - t0) / CYCLE_S + 1e-9)  # the newest frame camerad has sent by now (conflated)
+    j = arrived if arrived > last else last + 1
+    start = end if arrived > last else t0 + j * CYCLE_S
+    if j * CYCLE_S >= t:
+      return det, out
+    _, view, v_ego, signal_near = next(sp for sp in spells if j * CYCLE_S < sp[0])
+    light['s'] = (JUNCTION_LIGHT_S if signal_near or view == 'sideLook' else LIGHT_S) * scale
+    clock.t = start + max(0., REAL_REST_S + rng.normal(0., 0.00035)) + float(model[j])
+    eof = t0 + j * CYCLE_S
+    det.step(PM(), det.model_state, float(model[j]), 0., log.Desire.none, [EofMeta(j, eof), EofMeta(j, eof)], view, 0., v_ego, signal_near)
+    out.append((view, start - eof, j - last - 1 if last >= 0 else 0, side.geometry is not None))
+    end, last = clock.t, j
+
+
+def frame_drop_perc(dropped) -> float:
+  """modeld's frameDropPerc, its highest over the frames (modeld.py: FirstOrderFilter(0., 10., 1 / 20), x / (1 + x))."""
+  x, alpha, top = 0., (1. / 20) / (10. + 1. / 20), 0.
+  for d in dropped:
+    x = (1 - alpha) * x + alpha * min(d, 10)
+    top = max(top, 100 * x / (1 + x))
+  return top
+
+
+@pytest.mark.parametrize("what_, view, v_ego, signal_near", STANDS + [('crossing', 'stopSweepGo', 1., False)])
+@pytest.mark.parametrize("scale", [1., 1.6])
+def test_on_modeld_clock_a_stand_drops_no_frame_so_no_stock_lateness_alert(monkeypatch, what_, view, v_ego, signal_near, scale):
+  # the stand schedule's side runs may leave a third of a frame of lateness; a frame is dropped only at a whole one. The time
+  # budget counts modeld's own time as REST_S, 0.7 ms a frame under the car's: admitted on the budget's debt alone, the side
+  # runs filled the stand until it ran a whole frame late (3-19 frames dropped in 90 s at a stop sign, modeldLagging past
+  # 3.7 ms). Admitted on the frame's measured lateness (measure_late), at the car's timing (11-06 model times and spreads,
+  # its sectors and light read at 1.6x the desktop scale too) no frame of the stand starts more than 25 ms late and none is
+  # dropped: neither locationdTemporaryError nor modeldLagging
+  det, out = real_clock(monkeypatch, [(2., 'auto', 8., False), (20., view, v_ego, signal_near)], scale=scale)
+  late = np.array([o[1] for o in out if o[0] == view][20:])  # from a second in: the drive's lateness paid back
+  dropped = [o[2] for o in out]
+  print(what_, scale, f"worst {1e3 * late.max():.1f} ms p99 {1e3 * np.percentile(late, 99):.1f}", det.stand)
+  assert det.stand and not det.side.disabled
+  assert sum(dropped) == 0 and frame_drop_perc(dropped) == 0. and late.max() < 0.025
+
+
+@pytest.mark.parametrize("view, signal_near", [('stopSweep', False), ('sideLook', True), ('sideLook', False)])
+@pytest.mark.parametrize("seed", range(4))
+def test_the_first_stands_map_upload_takes_a_paid_back_frame(monkeypatch, seed, view, signal_near):
+  # the side maps are recomputed at the first stand of a drive (a stop sweep, or a look at a right on red or a junction) and
+  # uploaded a view a step (38.1-38.6 ms each on the car). From the held cycle's odd step after a full pass, 2-4 ms late,
+  # the upload's step ended 41 ms late (median) and up to 48 at this cost, a frame from a drop; on a frame paid back as its
+  # age says (measure_late) it stays under 40, and the maps are up within 2 s (0.35-0.45 s before)
+  det, out = real_clock(monkeypatch, [(2., 'auto', 8., False), (6., view, 0., signal_near)], seed=seed, ready=False)
+  stand = [o for o in out if o[0] == view]
+  late = np.array([o[1] for o in stand])
+  up = [k for k, o in enumerate(stand) if o[3]]
+  print(seed, view, signal_near, f"worst {1e3 * late.max():.1f} ms, maps up after {up[0] * CYCLE_S if up else None} s")
+  assert sum(o[2] for o in out) == 0 and late.max() < 0.040
+  assert up and up[0] * CYCLE_S < 2.

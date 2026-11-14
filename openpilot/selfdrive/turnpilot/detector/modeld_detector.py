@@ -162,7 +162,7 @@ gathered from the wide frame through maps that are graph inputs), but only with 
 it the odd steps idle, so the approach costs what the detector costs today. The side views' boxes go back to the wide
 camera's fisheye pixels (camera wide, view sideLeft or sideRight), each with its sectors' image quality (sectorQuality) from
 the host copy of the wide frame. Their maps follow the bus's calibration: recomputed off the step (a thread) when it moves
-more than sideview.RECALIB_DEG, uploaded on an odd step, the views invalid until then (sideViewStatus mapsStale). Each
+more than sideview.RECALIB_DEG, uploaded on a paid-back step (SIDE_UPLOAD_DEBT_S), the views invalid until then (sideViewStatus mapsStale). Each
 view's run is governed by the time budget on its own estimate (noRoom); a failure, a median run over SIDE_BUDGET_S, or
 SIDE_OVERRUNS of the last TIME_WINDOW runs pushing the debt past DEBT_CAP_S turn them off for the drive (sideViewStatus disabled,
 which turnpilotd says once, sideCamerasOff), and both cycles fall back to the forward views. While a sweep runs, the lane
@@ -408,6 +408,18 @@ SIDE_STAND_OVERRUN_S = CYCLE_S / 2
 # what a side run's step costs past its run and its sectors (the boxes back through the lens, the message, the send), the stand
 # schedule's estimate: the far crop's measured 2.5 ms (FAR_STEP_OVERHEAD_S), a run of the same model and a message like it
 SIDE_STEP_OVERHEAD_S = FAR_STEP_OVERHEAD_S
+# A view's maps go up to the device (38.1-38.6 ms a view on the car, route 26) only on a step this late or less (the debt,
+# or the frame's measured lateness where more: measure_late): from the held cycle's odd step after a full pass (2-4 ms of
+# debt) the upload's step ended up to 48 ms late on the car's timing replayed, and a whole frame late drops one, which makes
+# cameraOdometry invalid and raises locationdTemporaryError. A refused upload takes the next held frame this late or less
+# instead of its full pass
+SIDE_UPLOAD_DEBT_S = 0.002
+# The stand schedule's side runs are admitted on the lateness the frame really started with (measure_late) where it is more
+# than the time budget's debt: the budget counts modeld's own time outside the model and the detector as REST_S, and the car
+# spends 3.5-3.9 ms there (11-06/11-08 rlogs, frames started at the last one's end). Replayed, that 0.5-0.9 ms a frame
+# pushed the stand schedule, near full by the budget's count, a whole frame late: 5-22 frames dropped in 90 s of stop-sign
+# stands, modeldLagging from 3.7 ms. A frame's age past its model time, less its least over LATE_FLOOR_S, is its lateness
+LATE_FLOOR_S = 30.
 # a signal mapped within this (plan_inputs' signal_near): during a sweep the light reader reads colour only
 # then; out of one, with the reader reading (lights_near), it alternates the cameras at a crawl and in a turn (choose_camera)
 # and skips the paint standing
@@ -896,6 +908,11 @@ class SideViews:
     self.view_t: dict[str, float] = {}    # ...and of each view's (the stand schedule's due times)
     self.started_t: float | None = None   # when the speed gate last opened
     self.quality: SectorQuality | None = SectorQuality()  # None: failed, off for the drive (no sectors: none ok)
+    self.upload_deferred = False    # an upload was refused for lateness (SIDE_UPLOAD_DEBT_S): the next held frame on time's
+
+  def upload_due(self) -> bool:
+    """Whether the next prepare(upload=True) would put a view's maps on the device: their recompute has finished."""
+    return self.pending is not None and self.pending[0].done()
 
   def calibration(self) -> tuple[list, list] | None:
     """(rpyCalib, wideFromDeviceEuler) when calibrated (and the wide lens, once the device is known), else None."""
@@ -1056,6 +1073,8 @@ class ModeldDetector:
   last_cam: str | None = None     # the camera of the last full run
   odd_paint: tuple | None = None  # (paint, lanePaintStatus, its time, steps) read on the far crop's frame (read_odd_paint)
   debt = 0.                       # s this step started late: the last one's time past STEP_BUDGET_S (the time budget)
+  late = 0.                       # s this frame started late as its age says (measure_late), 0 unmeasured
+  late_mins: deque | None = None  # (whole second, its least frame age past the model) over LATE_FLOOR_S: the age of an on-time frame
   last_step_t: float | None = None  # time.monotonic() at the last step()'s start
   step_t0 = 0.                    # time.perf_counter() at this step()'s start
   next_cam: str | None = None     # the camera a full run would take on this frame (choose_camera's peek), for odd_room
@@ -1293,11 +1312,36 @@ class ModeldDetector:
       if self.last_step_t is not None:
         self.native_gap(self.last_step_t, now)  # and the native, stepped by no one past STEP_GAP_S, missed nothing more
     self.last_step_t, self.step_t0, self.model_time = now, time.perf_counter(), model_execution_time
+    self.measure_late(now, model_execution_time, metas)
     try:
       self.detect(pm, model_state, model_execution_time, desired_curvature, desire, metas, view, far_bearing, v_ego, signal_near,
                   far_first)
     finally:
       self.debt = self.debt_after(model_execution_time)
+
+  def measure_late(self, now: float, model_execution_time: float, metas: list) -> None:
+    """self.late: how late this frame started, from the main camera's EOF (nanos since boot, a fixed offset from
+    time.monotonic() while the device runs): the step's start less the model's time and the EOF, less its least over
+    LATE_FLOOR_S (an on-time frame's, the offset and camerad's latency in it). 0 with no EOF."""
+    eof = getattr(metas[0], 'timestamp_eof', 0) if metas else 0
+    if not eof:
+      self.late = 0.
+      return
+    age = now - model_execution_time - eof * 1e-9
+    sec = math.floor(now)
+    mins = self.late_mins if self.late_mins is not None else deque()
+    self.late_mins = mins
+    if mins and mins[-1][0] == sec:
+      mins[-1] = (sec, min(mins[-1][1], age))
+    else:
+      mins.append((sec, age))
+    while mins and sec - mins[0][0] > LATE_FLOOR_S:
+      mins.popleft()
+    self.late = max(0., age - min(m for _, m in mins))
+
+  def excess_late(self) -> float:
+    """How much later this frame started than the time budget's debt says (measure_late), 0 when it says no later."""
+    return max(0., self.late - self.debt)
 
   def detect(self, pm, model_state, model_execution_time: float, desired_curvature: float, desire: int, metas: list,
              view: str, far_bearing: float, v_ego: float | None, signal_near: bool, far_first: bool = False) -> None:
@@ -1351,7 +1395,13 @@ class ModeldDetector:
       elif not self.far_first:
         self.far_step(pm, model_state, model_execution_time, metas, far_bearing)
       return
-    if sweep is not None and self.side is not None and not self.side.disabled:
+    side = self.side
+    if (sweep is not None or self.stand_look) and side is not None and not side.disabled and gated and side.upload_deferred \
+        and self.debt + self.excess_late() <= SIDE_UPLOAD_DEBT_S and side.upload_due():
+      side.upload_deferred = False
+      self.side_ready(upload=True)  # the upload refused on an odd step takes this frame, on time (SIDE_UPLOAD_DEBT_S)
+      return
+    if sweep is not None and side is not None and not side.disabled:
       self.side_ready(upload=False)  # the maps' recompute starts with the sweep, above the gate too; uploaded on an odd step
     lights_read = self.lights_read()
     if time.monotonic() < self.retry_at:
@@ -1619,7 +1669,7 @@ class ModeldDetector:
     slack each (the model's time past STEP_BUDGET_S), its run and lights past STEP_BUDGET_S on top within DEBT_CAP_S (with
     its step's extra too, the side views lost a fifth of their runs at a right on a red and the road camera gained none:
     there its own run with the lights needs the step paid back, whatever the side runs before it)."""
-    after = self.debt_after(model_execution_time, estimate)
+    after = self.debt_after(model_execution_time, estimate) + self.excess_late()  # the frame's real lateness (LATE_FLOOR_S)
     if after > SIDE_STAND_CAP_S:
       return False
     if 'road' not in self.frames or self.sweep == 'stopSweepGo':
@@ -1635,7 +1685,12 @@ class ModeldDetector:
     docstring); name: the stand schedule's pick (stand_pick, which judged its room: stand_fits). Its failures turn the side
     views off for the drive and touch nothing of the full pass's."""
     side = self.side
-    if side is None or side.disabled or not gated or not self.side_ready(upload=True):
+    if side is None or side.disabled or not gated:
+      return
+    upload = self.debt + self.excess_late() <= SIDE_UPLOAD_DEBT_S  # the frame's real lateness (measure_late)
+    if not upload and side.geometry is None and side.upload_due():
+      side.upload_deferred = True  # the next held frame on time (SIDE_UPLOAD_DEBT_S)
+    if not self.side_ready(upload=upload):
       return
     stand = name is not None
     name = name if stand else SIDE_VIEWS[side.next]
@@ -1662,7 +1717,7 @@ class ModeldDetector:
       td.farStatus, td.sideViewStatus = self.far_status(), SideViewStatus.running
       td.nativeStatus = self.native_status()
       pm.send('turnpilotDetections', msg)
-      side.ran(name, time.monotonic(), dt, self.debt_after(model_execution_time) > cap)
+      side.ran(name, time.monotonic(), dt, self.debt_after(model_execution_time) + (self.excess_late() if stand else 0.) > cap)
     except Exception:
       cloudlog.exception("turnpilot side views failed")
       side.disable("failed")
