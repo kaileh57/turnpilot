@@ -17,7 +17,14 @@ a missing shard is never mistaken for a tile with no stops. Each shard:
    "junctions": {"<osm node id>": {pos [lat, lon], approaches [{way_id, dir f|b, bearing_deg, class, maxspeed, oneway,
                                    stops, kind, evidence, line}, ...]}},
    "rail": [{lat, lon, ways [way_id, ...]}],
-   "unplaced": [{node, kind, lat, lon, direction, stop_tag, why}]}
+   "unplaced": [{node, kind, lat, lon, direction, stop_tag, why}],
+   "signals": [{node, kind signal|crossing, lat, lon, ways [way_id, ...], direction f|b|''}]}
+"signals" (the signal layer, build_signals) is every node where signal heads can stand: highway=traffic_signals (kind
+signal), and a crossing with signals (crossing=traffic_signals, crossing:signals=yes, or a signalled crossing_ref: kind
+crossing); ways the drivable ways it is on (none: mapped beside the road); direction the traffic its heads face, along (f)
+or against (b) its ways' node order, from direction= or traffic_signals:direction= forward|backward; '' when untagged, both,
+or on ways that are not one road through it (a junction; two ways meeting end to end or start to start). The key is new
+beside the others: a car before it ignores it, and a shard without it says the layer is unknown there (osm_sidecar.py).
 f: traffic travelling along the way's node order (Valhalla's edge.forward), b: against it. A control sits in the shard of
 its line (of its junction when it has no line), a junction, a crossing and an unplaced sign in the shard of their
 position. Every stop and give_way node is in a shard once, as a control or unplaced, so route_audit can list one near a
@@ -406,10 +413,65 @@ def build_sidecar(control_lines: Iterable[str], way_lines: Callable[[], Iterable
   return {'controls': dict(sorted(controls.items())), 'junctions': junctions, 'rail': rail, 'unplaced': unplaced, 'stats': dict(stats)}
 
 
+SIGNAL_CROSSING_REFS = {'pelican', 'toucan', 'puffin', 'pegasus', 'hawk'}  # crossing_ref values with signal heads
+
+
+def signal_kind(t: dict) -> str | None:
+  """'signal' or 'crossing' for a node where signal heads stand (module docstring, "signals"), None for any other."""
+  if t.get('highway') == 'traffic_signals':
+    return 'signal'
+  if t.get('crossing') == 'traffic_signals' or t.get('crossing:signals') == 'yes' or t.get('crossing_ref') in SIGNAL_CROSSING_REFS:
+    return 'crossing'
+  return None
+
+
+def build_signals(signal_lines: Iterable[str], way_lines: Callable[[], Iterable[str]]) -> list[dict]:
+  """The signal layer from osmium OPL: signal_lines the nodes (any tags; those signal_kind takes are kept), way_lines() one
+  pass over the highway ways with their node locations, for the drivable ways each is on and their sense."""
+  nodes = {}  # node id -> (lat, lon, kind, direction tag)
+  for line in signal_lines:
+    if not line.startswith('n'):
+      continue
+    f = fields(line)
+    try:
+      nid, t = int(f['n']), parse_tags(f.get('T', ''))
+      lat, lon = float(f['y']), float(f['x'])
+    except (KeyError, ValueError):
+      continue
+    kind = signal_kind(t)
+    if kind is not None:
+      nodes[nid] = (lat, lon, kind, t.get('traffic_signals:direction') or t.get('direction') or '')
+  on = defaultdict(dict)  # node id -> {drivable way: where the node is on it, 'first', 'last' or 'mid'}
+  for line in way_lines():
+    if not line.startswith('w') or not nodes:
+      continue
+    f = fields(line)
+    if not drivable(parse_tags(f.get('T', ''))):
+      continue
+    ids = [int(x) for x in NODE_ID.findall(f.get('N', ''))]
+    for n in set(ids).intersection(nodes):
+      on[n][int(f['w'])] = 'first' if ids[0] == n and ids[-1] != n else 'last' if ids[-1] == n and ids[0] != n else 'mid'
+  out = []
+  for nid, (lat, lon, kind, tag) in sorted(nodes.items()):
+    at = on.get(nid, {})
+    sense = {'forward': 'f', 'backward': 'b', 'reverse': 'b'}.get(tag, '')
+    # a direction tag is along the way the node is on: kept for one way, or for two that make one road through it (a way
+    # split: one ends where the other starts, so the sense is the same on both); at a junction, or two ways meeting end to
+    # end or start to start, the tag says nothing certain and the node faces both ways
+    one_road = len(at) == 1 or (len(at) == 2 and sorted(at.values()) == ['first', 'last'])
+    out.append({'node': nid, 'kind': kind, 'lat': round(lat, 7), 'lon': round(lon, 7), 'ways': sorted(at),
+                'direction': sense if one_road else ''})
+  return out
+
+
 def shards(sidecar: dict, cells: set[int], osm_timestamp: str) -> dict[int, dict]:
-  """{level-2 tile: shard} for every tile in cells; what falls in no tile there is left out (counted in the stats)."""
+  """{level-2 tile: shard} for every tile in cells; what falls in no tile there is left out (counted in the stats). The
+  signal layer (sidecar 'signals', build_signals) goes in by position, every shard carrying the key when the sidecar has it."""
   out = {c: {'version': VERSION, 'osm_timestamp': osm_timestamp, 'tile': c, 'controls': {}, 'junctions': {}, 'rail': [], 'unplaced': []}
          for c in sorted(cells)}
+  if 'signals' in sidecar:
+    for shard in out.values():
+      shard['signals'] = []
   dropped = 0
   junctions = sidecar['junctions']
   for k, entries in sidecar['controls'].items():
@@ -426,7 +488,7 @@ def shards(sidecar: dict, cells: set[int], osm_timestamp: str) -> dict[int, dict
       out[cell]['junctions'][str(jn)] = j
     else:
       dropped += 1
-  for what in ('rail', 'unplaced'):
+  for what in ('rail', 'unplaced', 'signals'):
     for r in sidecar.get(what, []):
       cell = level2_index(r['lon'], r['lat'])
       if cell in out:
@@ -478,6 +540,14 @@ def extract(osm: Path, work: Path) -> tuple[Path, Path]:
   return nodes, ways
 
 
+def extract_signals(osm: Path, work: Path) -> Path:
+  """With osmium: the nodes signal heads can stand at (signal_kind's tags) as OPL."""
+  out = work / 'signals.opl'
+  run('osmium', 'tags-filter', '-R', '-O', '-f', 'opl', '-o', out, osm, 'n/highway=traffic_signals', 'n/crossing=traffic_signals',
+      'n/crossing:signals=yes', 'n/crossing_ref=' + ','.join(sorted(SIGNAL_CROSSING_REFS)))
+  return out
+
+
 def way_pass(ways_pbf: Path) -> Callable[[], Iterable[str]]:
   def lines():
     proc = subprocess.Popen(['osmium', 'add-locations-to-ways', '-f', 'opl', '-o', '-', str(ways_pbf)], stdout=subprocess.PIPE,
@@ -505,10 +575,11 @@ def build(osm: Path, out_dir: Path, osm_timestamp: str, tile_dir: Path, work: Pa
   with tempfile.TemporaryDirectory(dir=work, prefix='osm-controls-') as tmp:
     nodes, ways = extract(Path(osm), Path(tmp))
     side = build_sidecar(nodes.read_text().splitlines(), way_pass(ways))
+    side['signals'] = build_signals(extract_signals(Path(osm), Path(tmp)).read_text().splitlines(), way_pass(ways))
   shard_map = shards(side, cells, osm_timestamp)
   write_shards(out_dir, shard_map)
   stats = {**side['stats'], 'shards': len(shard_map), 'controls': sum(len(v) for v in side['controls'].values()),
-           'junctions': len(side['junctions']), 'rail': len(side['rail'])}
+           'junctions': len(side['junctions']), 'rail': len(side['rail']), 'signals': len(side['signals'])}
   print(f"osm_controls: {json.dumps(stats, sort_keys=True)}", flush=True)
   return stats
 

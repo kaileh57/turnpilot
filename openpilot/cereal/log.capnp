@@ -2574,6 +2574,11 @@ struct NavInstruction {
     # TurnPilot (stop signs, SG1b): the junction at a stop or yield control's node and every road there
     # (turnpilot/routing/junctions.py); unset (status none) on a signal, and from a navd before it
     junctionInfo @6 :MapJunction;
+    # TurnPilot (a signal's camera green, map_controls.far_green and its green window): m from the stop point straight on
+    # past this junction to the nearest place another signal's heads could stand (a node where another drivable way meets,
+    # or an OSM signal or signalled crossing: routing/controls.signal_clear_m); 0 unknown (not a signal, off the route, the
+    # road not followed, the sidecar's signal layer missing or stale), and from a navd before it. Capped at CLEAR_LOOK_M
+    signalClearM @7 :Float32;
   }
 
   # TurnPilot (STOP_SIGNS.md 3.1): a stop or yield control's junction. Units: m, deg from north (clockwise), m/s.

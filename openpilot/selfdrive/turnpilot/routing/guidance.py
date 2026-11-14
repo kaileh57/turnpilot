@@ -299,7 +299,7 @@ def control_msg(c, distance: float, ident: int) -> dict:
   """A NavInstruction.MapControl for a route's or a lookup's control (routing/controls.py), with its junction when it has
   one (a stop or yield: MapJunction, routing/junctions.py)."""
   out = {'id': ident, 'kind': c.kind, 'distance': float(distance), 'lineMapped': c.line_mapped, 'junction': c.junction,
-         'crossSuspect': c.cross_suspect}
+         'crossSuspect': c.cross_suspect, 'signalClearM': float(getattr(c, 'signal_clear_m', 0.) or 0.)}
   info = getattr(c, 'junction_info', None)
   if info is not None:
     out['junctionInfo'] = info.to_msg()

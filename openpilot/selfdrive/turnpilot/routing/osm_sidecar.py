@@ -9,7 +9,10 @@ own tiles (maps/corridor.py) and the region's osm_timestamp in its manifest.json
   junctions: {"<osm node id>": {pos [lat, lon], approaches [...]}}
   rail: [{lat, lon, ways}]
   unplaced: [{node, kind, lat, lon, direction, stop_tag, why}]: the stop and give_way nodes no approach takes (route_audit)
-routing/controls.py unions its stops and yields with Valhalla's flags (STOP_SIGNS.md, SG1a).
+  signals: [{node, kind signal|crossing, lat, lon, ways, direction f|b|''}]: where signal heads can stand (the signal layer);
+           a shard without the key (a builder before it) leaves the layer unknown in its tile
+routing/controls.py unions its stops and yields with Valhalla's flags (STOP_SIGNS.md, SG1a), and reads the signal layer
+(signal_layer) for a signal's clear road straight on (controls.signal_clear_m).
 
 load() reads the shards of every level-2 tile a route's shape passes through (each must be there: the build writes one per
 tile, empty or not) and of the tiles within NEAR_DEG of it (read if there: a line on the route by a tile's edge). Its
@@ -45,6 +48,7 @@ class OsmSidecar:
   junctions: dict[int, dict] = field(default_factory=dict)
   rail: list[dict] = field(default_factory=list)
   unplaced: list[dict] = field(default_factory=list)
+  layer: bool = False         # every shard read carries the signal layer (its 'signals' key; signal_layer reads it)
 
   def entries(self, key: str) -> list[dict]:
     return self.controls.get(key, [])
@@ -123,7 +127,7 @@ def load(sidecar_dir, points) -> OsmSidecar:
     return OsmSidecar('missing', f"no {SHARDS}/ in {root}")
   stamp = tiles_stamp(root)
   on, near = cells(points)
-  out = OsmSidecar('ok')
+  out = OsmSidecar('ok', layer=True)
   absent, stale = [], []
   for cell in sorted(on | near):
     shard = read_shard(root / SHARDS / f'{cell}.json')
@@ -139,6 +143,7 @@ def load(sidecar_dir, points) -> OsmSidecar:
       out.junctions[int(node)] = j
     out.rail.extend(shard.get('rail') or [])
     out.unplaced.extend(shard.get('unplaced') or [])
+    out.layer = out.layer and isinstance(shard.get('signals'), list)
   if absent:
     out.status, out.detail = 'missing', f"no shard for tile {absent[0]}" + (f" and {len(absent) - 1} more" if len(absent) > 1 else '')
   elif stamp is None:
@@ -146,3 +151,33 @@ def load(sidecar_dir, points) -> OsmSidecar:
   elif stale:
     out.status, out.detail = 'stale', f"tile {stale[0][0]}'s shard is from {stale[0][1]}, the tiles from {stamp}"
   return out
+
+
+def signal_layer(sidecar_dir, points, near_deg: float) -> tuple[list[dict] | None, str]:
+  """(the signal layer's nodes in every level-2 tile within near_deg of points [(lat, lon), ...], '') when each of those
+  tiles has a shard stamped as the tiles are that carries the layer (its 'signals' key, osm_controls.build_signals: {node,
+  kind, lat, lon, ways, direction}); else (None, why): no directory, a tile with no shard or one that doesn't read, a stamp
+  that differs or none to check, or a shard from a builder before the layer. The layer known only in part is not known."""
+  if sidecar_dir is None or str(sidecar_dir) == NO_DIRECTORY:
+    return None, "no sidecar directory"
+  root = Path(sidecar_dir)
+  stamp = tiles_stamp(root)
+  if stamp is None:
+    return None, f"the tiles in {root} have no osm_timestamp"
+  want = set()
+  for lat, lon in samples(points) if points else []:
+    for dlat in (-near_deg, 0., near_deg):
+      for dlon in (-near_deg, 0., near_deg):
+        want.add(level2_index(lon + dlon, lat + dlat))
+  out: list[dict] = []
+  for cell in sorted(want):
+    shard = read_shard(root / SHARDS / f'{cell}.json')
+    if shard is None:
+      return None, f"no shard for tile {cell}"
+    if shard.get('osm_timestamp') != stamp:
+      return None, f"tile {cell}'s shard is from {shard.get('osm_timestamp')}, the tiles from {stamp}"
+    layer = shard.get('signals')
+    if not isinstance(layer, list):
+      return None, f"tile {cell}'s shard has no signal layer"
+    out.extend(layer)
+  return (out, '') if want else (None, "no points")

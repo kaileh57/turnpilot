@@ -443,7 +443,23 @@ HEAD_PLACE_DEG = 1.
 # (a line's heads hang from its line to CAMERA_ASSOC_PAST_M past it; a head further on is the next junction's and has no say
 # while this line's own read a colour)
 HEAD_CLUSTER_M = CAMERA_ASSOC_PAST_M
-RED_HEADS_KEPT = 8            # a signal's heads that read it red or yellow, kept at most (the reader reads 8 heads a run)
+# Where the map clears the road straight on past a signal's junction (TrackedControl.clear_m: navd's signalClearM, m from its
+# stop point to the nearest place another signal's heads could stand, routing/controls.signal_clear_m; 0 unknown), a far-side
+# green no line's window takes lets a camera stop go (far_green) while it reads nearer than any head of that place can
+# (next_head_read_m); the window itself takes a green as before. Another signal's heads stand no nearer than FAR_GREEN_NEXT_BACK_M
+# short of its place (a junction's near-corner pole heads, half a 24 m cross road short of its node, and 3 m for the map's
+# node), and read as near as they can when hung highest (NEXT_HEAD_TOP_M: MUTCD 4D.15, a housing's top over the roadway at
+# most 25.6 ft, 7.8 m; its centre half a 12 in three-lamp head lower) with the elevation off by NEXT_HEAD_PITCH_DEG
+# (calibration, and the car's nose-down pitch braking: 0.115 deg per m/s^2 fitted over nine logged stops, 0.35 deg at
+# RED_DECEL, the worst stop's rate 1.2 deg there; a grade to the head beyond that is not budgeted): ranged as the reader
+# does (light_state.ASSUMED_HEAD_M over the road, the camera READER_CAM_M up: ranging.DEFAULT_HEIGHT). A head 150 m on
+# reads no nearer than 0.49 of that, 100 m on 0.55, 50 m on 0.62. Unknown (clear_m 0): no far green
+FAR_GREEN_NEXT_BACK_M = 15.
+NEXT_HEAD_TOP_M = 7.8 - 0.53
+NEXT_HEAD_PITCH_DEG = 1.0
+READER_HEAD_M = 5.5    # light_state.ASSUMED_HEAD_M
+READER_CAM_M = 1.22    # scene/ranging.DEFAULT_HEIGHT
+RED_HEADS_KEPT = 8           # a signal's heads that read it red or yellow, kept at most (the reader reads 8 heads a run)
 # A head no line's window takes, short of the camera's own line at a route turn's junction (CAMERA_ROUTE: the junction less
 # CONTROL_LINE_M, nothing mapped to say where the stop is) from PROTECT_BEFORE_M before the junction, the window that makes a
 # mapped signal the junction's, is that line's too (camera_owner). 1e 7:03-7:07 (2026-11-06 replay): route_follower's junction
@@ -886,6 +902,19 @@ def camera_light_input(msg, status: str, age_s: float, mode: str, rejects=()) ->
                       vetoes=vetoes)
 
 
+def next_head_read_m(c) -> float | None:
+  """The nearest range as read another signal's heads past signal c's junction can show (FAR_GREEN_* above), m; None where
+  the map doesn't clear the road on (c.clear_m 0)."""
+  clear = float(getattr(c, 'clear_m', 0.) or 0.)
+  if clear <= 0.:
+    return None
+  t = c.d + clear - FAR_GREEN_NEXT_BACK_M
+  if t <= 0.:
+    return 0.
+  e = math.atan2(NEXT_HEAD_TOP_M - READER_CAM_M, t) + math.radians(NEXT_HEAD_PITCH_DEG)
+  return (READER_HEAD_M - READER_CAM_M) / math.tan(e) if e < math.pi / 2 else 0.
+
+
 def camera_owner(dist: float, signals, state: str = 'unknown', near: float | None = None):
   """The signal control a camera head dist m ahead belongs to: the last line before it within the association window. A
   head no line's window takes, up to CAMERA_JUNCTION_BEFORE_M short of the camera's own line at a route turn's junction (key
@@ -966,6 +995,30 @@ def movement_state(heads, side: int = 0) -> str:
   ahead = min(abs(h[2]) for h in cluster)
   lead = {h[0] for h in cluster if abs(h[2]) <= ahead + HEAD_PLACE_DEG}
   return lead.pop() if len(lead) == 1 else stop
+
+
+def far_green(c, signals, camera: CameraLights) -> bool:
+  """Whether this road run's read is a green for signal c's camera stop that no line's window takes as read (FAR_GREEN_*;
+  ControlState.camera_green, for the stop's release only): the map clears the road straight on (c.clear_m known), no head
+  reads red or yellow at any range and no low-confidence red or yellow is read, every head of the nearest cluster of those
+  reading a colour (HEAD_CLUSTER_M) reads green, none is any line's by its range as read, each one's span from its range
+  over CAMERA_RANGE_LONG to its range reaches c's window before any other line's (the first line ahead, as a red's), and
+  each reads nearer than another signal's heads past c's junction can (next_head_read_m). The head's box-size range
+  (head_near) is never used for a green: a glow box larger than its head reads it short."""
+  far = next_head_read_m(c)
+  if far is None or camera.vetoes:
+    return False
+  cols = [h for h in camera.heads if h[0] in ('red', 'yellow', 'green')]
+  if not cols or any(h[0] != 'green' for h in cols):
+    return False
+  nearest = min(h[1] for h in cols)
+  for _, dist in (h[:2] for h in cols if h[1] <= nearest + HEAD_CLUSTER_M):
+    if dist >= CAMERA_RANGE_MAX - 1e-6 or dist >= far or camera_owner(dist, signals) is not None:
+      return False
+    reach = [o for o in signals if o.d - CAMERA_ASSOC_BEFORE_M <= dist and dist / CAMERA_RANGE_LONG <= o.d + CAMERA_ASSOC_PAST_M]
+    if min(reach, key=lambda o: o.d, default=None) is not c:
+      return False
+  return True
 
 
 def camera_state(c, signals, camera: CameraLights | None, side: int = 0) -> str:
@@ -1984,8 +2037,13 @@ class MapControlPolicy:
           st.light = self._camera_adds(c, st, st.camera, v)
         st.green_t = st.green_t + dt if st.light == 'green' else 0.
         stopping = bool(st.cam_stop) or st.light in ('red', 'yellow')
-        # any red or yellow read for it, a low-confidence one too, ends the green read so far
-        st.camera_green.update(bool(st.cam_green) and not stopping, stopping or bool(st.cam_veto), camera.run if acting else None, dt)
+        # any red or yellow read for it, a low-confidence one too, ends the green read so far. A stop the camera's red raised
+        # whose own heads read no colour counts the green of its far-side heads where the map clears the road (far_green),
+        # for its release alone (never a curb-side turn's stop for want of a green: its right-on-red procedure stands)
+        far = acting and st.mode == SIGNAL_STOP and st.camera_added and not st.accepted_stop and not st.turn_stop and \
+          st.camera == 'unknown' and not stopping and not st.cam_veto and far_green(c, live_signals, camera)
+        st.camera_green.update((bool(st.cam_green) or far) and not stopping, stopping or bool(st.cam_veto),
+                               camera.run if acting else None, dt)
         st.camera_green_t = st.camera_green.first_t
         # no head of it in view (hidden, out of the frame, the read stale) is not its red gone: the run starts again
         gone = not stopping and bool(st.cam_seen) and not st.cam_veto

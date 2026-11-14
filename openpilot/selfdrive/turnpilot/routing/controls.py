@@ -146,6 +146,25 @@ ALONG_DEG = 15.          # deg: an edge at a node pointing this close to our roa
 SUSPECTED_STOPS = True   # emit suspected unmapped stops (N5) as stop controls: until SG2 routes around them, each is a stop
 CACHE_MAX = 4096         # Q1 and Q2 answers a LocateCache keeps, each
 SAME_EDGE_NODE_M = 1.5   # m: an edge's end node this close to another's is the same node (surveys.SAME_NODE_M)
+# A signal's clear road straight on (Control.signal_clear_m, MapControl.signalClearM; map_controls' far-side green and its
+# green window): from its junction's node every onward edge within CLEAR_BRANCH_DEG of the bearing the road arrives with is
+# followed, node by node, to the first node where the tiles have another drivable way meet (a parking aisle or a driveway
+# too) or a fork, and on each edge walked the first node of the OSM signal layer (osm_sidecar.signal_layer) where another
+# signal's heads could stand (layer_place); the nearest over the branches, m from the stop point. Valhalla's own signal
+# flags are not read: the layer has every node they come from, with the direction its heads face. An edge Valhalla flags
+# internal (inside a divided road's junction) leads to the junction's own far carriageway, never the next place. A signal
+# on a node no other road meets governs the first road junction within CLEAR_GOVERN_M on, else its own node (a mid-block
+# crossing). 0 (unknown, the gate closed): no onward edge within CLEAR_BRANCH_DEG (the road ends or bends), a locate that
+# finds nothing (a tile's edge), a next edge not starting at the node or with no way id, more than CLEAR_NODES nodes, the
+# layer not known for every level-2 tile within CLEAR_LAYER_DEG of the road walked, or a failure. Nothing within CLEAR_LOOK_M: CLEAR_LOOK_M
+CLEAR_BRANCH_DEG = 30.
+CLEAR_GOVERN_M = 30.
+CLEAR_LOOK_M = 200.
+CLEAR_NODES = 24
+CLEAR_LAYER_DEG = 0.0003  # about 30 m: the tiles a node beside the road walked can be in
+LAYER_ON_M = 5.           # m: a layer node on the walked edge's way this close to its shape is on it
+LAYER_BESIDE_M = 15.      # m: a layer node on no drivable way (mapped beside the road) this close to the walked edge is at it
+CLEAR_OWN_M = 35.         # m past the junction's own node a signalled crossing or a head mapped beside the road is its own
 
 
 @dataclass
@@ -175,6 +194,7 @@ class Control:
   exclusion: tuple[float, float, float] | None = None
   first_edge: bool = False
   last_edge: bool = False
+  signal_clear_m: float = 0.  # a signal's: m from its stop point straight on to where another signal could be (signal_clear_m)
   # navd's, from SG2's certifier and avoidance loop (routing/certify.py, routing/avoid.py): its certification and reason
   # (also on junction_info for the bus), and the Unix-time window its ETA's light check passed for (certifiable only)
   certification: str = 'unchecked'
@@ -935,6 +955,158 @@ def signal_behind(call, edges, tpts, tcum, back0: float) -> bool | None:
     return None
 
 
+def node_edges(call, node, memo: dict | None = None) -> tuple[dict, list]:
+  """(locate's verbose answer at node (lat, lon), radius 1, for a car; its candidates with a shape). memo: answers by node,
+  for one route's walks (signal_clear_m)."""
+  k = (round(node[0], 6), round(node[1], 6))
+  if memo is not None and k in memo:
+    return memo[k]
+  ans = (call('locate', {'locations': [{'lat': node[0], 'lon': node[1], 'radius': 1}], 'costing': 'auto', 'verbose': True}) or
+         [None])[0] or {}
+  out = ans, [x for x in ans.get('edges') or [] if len(edge_shape(x)) >= 2]
+  if memo is not None:
+    memo[k] = out
+  return out
+
+
+def onward(cands, h: float) -> list:
+  """The candidates leaving a node within CLEAR_BRANCH_DEG of the bearing h the road arrives with."""
+  return [x for x in cands if float(x.get('percent_along', 0.)) < 0.5 and angle_diff(float(x.get('heading', 0.)), h) <= CLEAR_BRANCH_DEG]
+
+
+def next_place(cands, arrive: float) -> str:
+  """What a node on the road straight on is by the tiles (signal_clear_m): 'place' where more than one way goes on from it
+  (another drivable way meets, a parking aisle or a driveway too, or a fork), 'on' where the one road goes on within
+  CLEAR_BRANCH_DEG, 'lost' where it ends or bends past that with nothing else meeting (not followed: unknown). A way is an
+  edge pointing away from the node more than ALONG_DEG from the way we came, its two directions one way."""
+  back = (arrive + 180.) % 360.
+  dirs: list[float] = []
+  for x in cands:
+    a = away(x)
+    if angle_diff(a, back) > ALONG_DEG and not any(angle_diff(a, o) <= 1. for o in dirs):
+      dirs.append(a)
+  if len(dirs) > 1:
+    return 'place'
+  return 'on' if dirs and angle_diff(dirs[0], arrive) <= CLEAR_BRANCH_DEG else 'lost'
+
+
+def layer_place(layer, seg) -> float | None:
+  """m along a walked edge of the first signal-layer node on it whose heads could be another signal's (CLEAR_OWN_M above):
+  on the edge's way (LAYER_ON_M of its shape) or on no drivable way beside it (LAYER_BESIDE_M). seg: (m from the stop point
+  at its start, its shape, its way id, along its way's node order, m past the junction's own node at its start, it is
+  inside the junction (an internal edge), its start node is the junction's own (its node or a far carriageway's))."""
+  d0, shape, way, forward, from_node, internal, own_start = seg
+  if internal:
+    return None
+  cum = cumulative(shape)
+  best = None
+  for s in layer:
+    ways = s.get('ways') or []
+    if ways and way not in ways:
+      continue
+    hit = nearest(shape, cum, (float(s['lat']), float(s['lon'])), 0., cum[-1])
+    if hit is None or hit[1] > (LAYER_ON_M if ways else LAYER_BESIDE_M):
+      continue
+    if own_start and hit[0] <= SAME_EDGE_NODE_M:
+      continue  # on the junction's own node
+    sense = s.get('direction') or ''
+    if ways and sense in ('f', 'b') and (sense == 'f') != forward:
+      continue  # its heads face the oncoming traffic
+    if (s.get('kind') == 'crossing' or not ways) and from_node + hit[0] <= CLEAR_OWN_M:
+      continue  # the junction's own crosswalk, or a head mapped beside its road
+    best = hit[0] if best is None else min(best, hit[0])
+  return None if best is None else d0 + best
+
+
+def signal_clear_m(call, node, arrive: float, from_m: float, junction: bool, sidecar_dir, memo: dict | None = None,
+                   detail: list | None = None) -> float:
+  """m from a signal's stop point (from_m short of node (lat, lon), its edge's end, the road arriving at arrive deg) straight
+  on to the nearest place past its junction another signal's heads could stand, 0 unknown (CLEAR_* above). junction: other
+  roads meet at node (Control.junction); else its junction is the first road junction within CLEAR_GOVERN_M on.
+  sidecar_dir: the signal layer's (osm_sidecar.signal_layer). detail: filled with what was found, for tools."""
+  try:
+    seen = 0
+    if not junction:
+      d, at, h = from_m, node, arrive
+      while True:
+        _, cands = node_edges(call, at, memo)
+        seen += 1
+        on = onward(cands, h)
+        if not on:
+          return 0.
+        x = min(on, key=lambda x: angle_diff(float(x['heading']), h))
+        shape = edge_shape(x)
+        if haversine(shape[0], at) > NODE_GAP_M:
+          return 0.
+        d2, end, h2 = d + cumulative(shape)[-1], shape[-1], bearing(shape[-2], shape[-1])
+        if d2 - from_m > CLEAR_GOVERN_M:
+          break  # a mid-block signal: its own node is its junction
+        _, c2 = node_edges(call, end, memo)
+        what = next_place(c2, h2) if c2 else 'lost'
+        if what == 'lost':
+          return 0.
+        if what == 'place':
+          node, arrive, from_m = end, h2, d2
+          break
+        d, at, h = d2, end, h2
+    best, frontier, segs = CLEAR_LOOK_M, [(node, arrive, from_m, True)], []
+    while frontier:
+      at, h, d, own = frontier.pop()
+      if d >= best:
+        continue
+      seen += 1
+      if seen > CLEAR_NODES:
+        return 0.
+      _, cands = node_edges(call, at, memo)
+      on = onward(cands, h)
+      if not on:
+        return 0.  # the road doesn't go on straight, or nothing found (a tile's edge): not known
+      for x in on:
+        shape = edge_shape(x)
+        if haversine(shape[0], at) > NODE_GAP_M:
+          return 0.
+        d2, end, h2 = d + cumulative(shape)[-1], shape[-1], bearing(shape[-2], shape[-1])
+        internal = bool(((x.get('edge') or {}).get('classification') or {}).get('internal'))
+        way = int((x.get('edge_info') or {}).get('way_id') or 0)
+        if not way:
+          return 0.  # no way to match the layer's nodes on it by
+        segs.append((d, shape, way, bool((x.get('edge') or {}).get('forward', True)), d - from_m, internal, own))
+        if d2 >= best:
+          continue
+        if internal:
+          frontier.append((end, h2, d2, True))  # inside a divided road's junction: on to its far carriageway, its own
+          continue
+        _, c2 = node_edges(call, end, memo)
+        what = next_place(c2, h2) if c2 else 'lost'
+        if what == 'lost':
+          return 0.
+        if what == 'place':
+          best = d2
+        else:
+          frontier.append((end, h2, d2, False))
+    layer, why = osm_sidecar.signal_layer(sidecar_dir, [p for s in segs for p in s[1]], CLEAR_LAYER_DEG)
+    if layer is None:
+      if detail is not None:
+        detail.append(('layer', why))
+      return 0.
+    walked = [p for s in segs for p in s[1]]
+    lat0, lat1 = min(p[0] for p in walked) - CLEAR_LAYER_DEG, max(p[0] for p in walked) + CLEAR_LAYER_DEG
+    lon0, lon1 = min(p[1] for p in walked) - CLEAR_LAYER_DEG, max(p[1] for p in walked) + CLEAR_LAYER_DEG
+    layer = [s for s in layer if lat0 <= float(s['lat']) <= lat1 and lon0 <= float(s['lon']) <= lon1]
+    graph = best
+    for seg in segs:
+      if seg[0] < best:
+        m = layer_place(layer, seg)
+        if m is not None and m < best:
+          best = m
+    if detail is not None:
+      detail.append(('graph', round(graph, 1), 'layer', round(best, 1) if best < graph else None, 'nodes', seen))
+    return best
+  except Exception:
+    cloudlog.exception("turnpilot controls: a signal's clear road straight on (locate) failed")
+    return 0.
+
+
 def maneuver_at(steps, starts, stop_s: float, node_s: float) -> str:
   """The route's maneuver at a junction (N8): the first step starting from the stop point stop_s to MANEUVER_AFTER_M past
   the node node_s (m along the route's shape), else straight."""
@@ -1235,7 +1407,7 @@ def _route_controls(call, steps, tiles_dir, sidecar_dir=None, ahead: bool = Fals
     f['status'] = j.status
     f['info'] = j
 
-  controls = []
+  controls, memo = [], {}  # memo: the walks' locates by node (signal_clear_m)
   for i, f in enumerate(sorted(found, key=lambda c: c['s'])):
     a = f['a']
     end_m, span, key, node = ends[a]
@@ -1250,7 +1422,10 @@ def _route_controls(call, steps, tiles_dir, sidecar_dir=None, ahead: bool = Fals
                             edge=a, junction_info=f.get('info'),
                             approach_key=(int(edges[a].get('way_id') or 0), bool(edges[a].get('forward', True)), (round(nd[0], 6), round(nd[1], 6))),
                             exclusion=(ex[0], ex[1], ex_bearing), first_edge=bool(real) and a == real[0],
-                            last_edge=bool(real) and a == real[-1]))
+                            last_edge=bool(real) and a == real[-1],
+                            signal_clear_m=0. if f['kind'] != 'signal' or ahead or not osm_ok or not osm.layer else
+                            signal_clear_m(call, nd, bearing(point_at(pts, cum, end_m - 5.), point_at(pts, cum, end_m)), end_m - f['s'],
+                                           f['junction'], sidecar_dir, memo)))
   side = 'none expected' if osm is None else osm.status
   cloudlog.info(f"turnpilot controls: {len(controls)} on the route ({status}), {unmatched}/{len(edges)} edges unmatched, OSM sidecar {side}")
   return controls, status

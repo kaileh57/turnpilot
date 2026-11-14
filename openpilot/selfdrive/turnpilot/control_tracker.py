@@ -62,6 +62,7 @@ class TrackedControl:
   state: Any = None          # the policy's own state for it
   junction_info: dict | None = None  # a stop or yield's MapControl.junctionInfo as a dict (routing/junctions.py); None a signal's
   fixes: list = field(default_factory=list)  # (odometer m, navd's distance plus it) of its moving fixes over the last FIX_SPREAD_M
+  clear_m: float = 0.        # a signal's MapControl.signalClearM: m from its stop point to where another signal could be; 0 unknown
 
   @property
   def fix_spread(self) -> float:
@@ -74,7 +75,8 @@ class TrackedControl:
 def from_msg(route_count: int, c) -> TrackedControl:
   """A tracked control from navd's MapControl c; its junction copied out (the message's buffer isn't kept)."""
   return TrackedControl((route_count, int(c.id)), str(c.kind), float(c.distance), bool(c.lineMapped), bool(c.junction),
-                        bool(c.crossSuspect), junction_info=c.junctionInfo.to_dict() if c._has('junctionInfo') else None)
+                        bool(c.crossSuspect), junction_info=c.junctionInfo.to_dict() if c._has('junctionInfo') else None,
+                        clear_m=float(getattr(c, 'signalClearM', 0.) or 0.))
 
 
 def adopt(o: TrackedControl, candidates, measured: bool = False) -> bool:

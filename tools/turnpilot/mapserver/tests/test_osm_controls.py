@@ -250,6 +250,12 @@ def osm_xml(m: Map) -> str:
 def test_sidecar_only_rebuilds_the_shards_stamped_with_the_regions_timestamp(tmp_path):
   m = crossroads()
   m.node_tags[3] = {'highway': 'stop', 'direction': 'forward'}
+  # the signal layer through osmium's filter: one node for each of its tags
+  m.node_tags[2] = {'highway': 'crossing', 'crossing:signals': 'yes'}
+  m.node_tags[31] = {'highway': 'crossing', 'crossing_ref': 'hawk'}
+  m.node_tags[21] = {'crossing': 'traffic_signals'}
+  m.node_tags[22] = {'highway': 'traffic_signals', 'traffic_signals:direction': 'backward'}
+  m.node_tags[32] = {'highway': 'crossing', 'crossing': 'marked'}
   region = tmp_path / 'indianapolis'
   region.mkdir()
   (tmp_path / 'region.osm').write_text(osm_xml(m))
@@ -268,9 +274,92 @@ def test_sidecar_only_rebuilds_the_shards_stamped_with_the_regions_timestamp(tmp
 
   shard = json.loads((region / f'osm_controls/{cell}.json').read_text())
   assert shard['osm_timestamp'] == meta['osm_timestamp'] and [e['junction_node'] for e in shard['controls']['10:f']] == [4]
+  assert {(s['node'], s['kind'], s['direction']) for s in shard['signals']} == {(2, 'crossing', ''), (31, 'crossing', ''),
+                                                                                 (21, 'crossing', ''), (22, 'signal', 'b')}
   assert json.loads((region / 'meta.json').read_text()) == meta  # the region's stamp and build time stay
   index = json.loads((region / 'index.json').read_text())
   data = (region / f'osm_controls/{cell}.json').read_bytes()
   assert index == {tile: [2, cell, hashlib.sha256(b'tile').hexdigest(), 4],
                    f'osm_controls/{cell}.json': [2, cell, hashlib.sha256(data).hexdigest(), len(data)]}
   assert (region / 'controls_built').exists()  # the region's tiles come from its .pbf, which carries its controls
+
+
+# --- the signal layer (build_signals) ---
+
+def signal_road():
+  """A main road (way 50, secondary, south to north) through a signalled junction at node 52 with a cross road (way 60), a
+  signalled mid-block crossing (node 54, a footway 70 across it) 150 m on, then a divided cross road: way 50 ends at node 55
+  where way 51 carries on north across the two carriageways (oneways 80 and 81, nodes 56 and 57), each with its own signal
+  node. Node 53 is the oncoming approach's stop line, tagged backward; node 58 a signal mapped beside the road."""
+  m = Map()
+  m.node(51, 0., 0.)
+  m.node(52, 100., 0., highway='traffic_signals')
+  m.node(53, 110., 0., highway='traffic_signals', **{'traffic_signals:direction': 'backward'})
+  m.node(54, 250., 0., highway='crossing', crossing='traffic_signals')
+  m.node(55, 300., 0.)
+  m.node(56, 400., 0., highway='traffic_signals')
+  m.node(57, 420., 0., highway='traffic_signals', direction='forward')
+  m.node(59, 500., 0.)
+  m.node(58, 405., 12., highway='traffic_signals')
+  m.node(61, 100., -60.)
+  m.node(62, 100., 60.)
+  m.node(71, 250., -10.)
+  m.node(72, 250., 10.)
+  for nid, east in ((82, -60.), (83, 60.)):
+    m.node(nid, 400., east)
+  for nid, east in ((84, 60.), (85, -60.)):
+    m.node(nid, 420., east)
+  m.way(50, [51, 52, 53, 54, 55], highway='secondary')
+  m.way(51, [55, 56, 57, 59], highway='secondary')
+  m.way(60, [61, 52, 62], highway='tertiary')
+  m.way(70, [71, 54, 72], highway='footway', footway='crossing')
+  m.way(80, [82, 56, 83], highway='primary', oneway='yes')
+  m.way(81, [84, 57, 85], highway='primary', oneway='yes')
+  m.node(90, 0., 30., highway='crossing', crossing='marked')  # an unsignalled crossing: not in the layer
+  m.node(91, 0., 40., highway='crossing', crossing='uncontrolled', crossing_ref='zebra')
+  m.node(92, 0., 50., highway='crossing', **{'crossing:signals': 'yes'})
+  m.node(93, 0., 60., highway='crossing', crossing_ref='hawk')
+  return m
+
+
+def layer_of(m: Map) -> dict:
+  return {s['node']: s for s in osm_controls.build_signals(m.control_lines(), m.way_lines)}
+
+
+def test_the_signal_layer_has_every_signal_and_signalled_crossing_with_its_ways():
+  layer = layer_of(signal_road())
+  assert set(layer) == {52, 53, 54, 56, 57, 58, 92, 93}
+  assert layer[52]['kind'] == 'signal' and layer[52]['ways'] == [50, 60]  # the junction's node: both roads
+  assert layer[54]['kind'] == 'crossing' and layer[54]['ways'] == [50]    # the footway is no drivable way
+  assert layer[58]['ways'] == [] and layer[92]['ways'] == [] and layer[93]['kind'] == 'crossing'
+  assert (layer[52]['lat'], layer[52]['lon']) == tuple(round(x, 7) for x in ll(100., 0.))
+
+
+def test_a_signals_direction_is_kept_only_where_its_ways_are_one_road_through_it():
+  layer = layer_of(signal_road())
+  assert layer[53]['direction'] == 'b'   # on way 50 alone, its heads facing the traffic against the way's order
+  assert layer[57]['direction'] == ''    # a junction node (ways 51 and 81): the tag says nothing certain
+  assert layer[52]['direction'] == '' and layer[54]['direction'] == ''
+  m = signal_road()
+  m.node_tags[55] = {'highway': 'traffic_signals', 'direction': 'forward'}  # a way split: 50 ends where 51 starts
+  assert layer_of(m)[55]['direction'] == 'f' and layer_of(m)[55]['ways'] == [50, 51]
+  m.ways[1] = (51, [59, 57, 56, 55], {'highway': 'secondary'})  # both end at 55: no one sense
+  assert layer_of(m)[55]['direction'] == ''
+
+
+def test_the_divided_roads_carriageway_signals_are_each_in_the_layer_on_their_own_road():
+  layer = layer_of(signal_road())
+  assert layer[56]['ways'] == [51, 80] and layer[57]['ways'] == [51, 81]
+
+
+def test_the_layer_goes_in_every_shard_by_position_and_leaves_the_other_keys_as_they_were():
+  m = signal_road()
+  side = m.build()
+  cell = osm_controls.level2_index(LON0, LAT0)
+  before = osm_controls.shards(dict(side), {cell, cell + 1}, '2026-10-26T21:24:46Z')
+  side['signals'] = osm_controls.build_signals(m.control_lines(), m.way_lines)
+  after = osm_controls.shards(side, {cell, cell + 1}, '2026-10-26T21:24:46Z')
+  assert after[cell + 1]['signals'] == [] and len(after[cell]['signals']) == 8
+  for c in (cell, cell + 1):
+    assert {k: v for k, v in after[c].items() if k != 'signals'} == before[c]
+    assert 'signals' not in before[c]  # a builder before the layer: no key at all
