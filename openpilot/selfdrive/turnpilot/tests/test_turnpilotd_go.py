@@ -1311,3 +1311,61 @@ def test_a_left_the_model_waits_on_without_stopping_goes_and_the_model_follows_i
   plans = run_objects(sim, 20.)
   assert not any(p.desire == Desire.turnLeft for p in plans)
   assert all(p.reason == MODEL_HOLD_REASON['light'] for p in plans[round(1. / DT_MDL):]), {p.reason for p in plans}
+
+
+def step_scene(sim, available=True):
+  """drive's frame with the scene available or not (a gap in the detector's messages)."""
+  turning = sim.tp.desires.started and abs(JUNCTION - sim.s) < 12. and sim.v > 0.3
+  return sim.step(engaged=True, available=available, yaw_rate=sim.v / 8. if turning else 0.)
+
+
+@pytest.mark.parametrize('lag_s, after_s', [(0.3, 0.3), (0.7, 0.55), (1.0, 0.55)])
+def test_a_lifted_lefts_go_ended_by_a_gap_in_the_scene_is_judged_again_once_it_is_back(lag_s, after_s, monkeypatch):
+  """gate2 (stand10 s2842): the left's lifted go ended 0.55 s on by a 0.8 s gap in the scene (go_blocked 'scene', the lift
+  withdrawn), the car not yet moving on it; the left stayed 'go' and nothing gave the lift again, so a model that holds until
+  lifted stood LEFT_NO_MOVE_S and was handed back for good (cantStartTakeControl) at an empty junction. Now the gap is a hold
+  of the scene's to the left once the car is at rest: its go withdrawn where it stands, a fresh window from the scene's
+  return (never the go from before the gap), then the go lifted again and the turn taken, no handback for a gap shorter
+  than the scene's own bound."""
+  from openpilot.selfdrive.turnpilot import unprotected_left as ul
+  sim = left_go_with_lag(launching, lag_s)
+  events = []
+  real = ul.cloudlog.event
+  monkeypatch.setattr(ul.cloudlog, 'event', lambda name, **kw: (events.append((name, sim.t)), real(name, **kw)))
+  plans = [step_scene(sim) for _ in range(round(after_s / DT_MDL))]
+  plans += [step_scene(sim, False) for _ in range(round(0.8 / DT_MDL))]
+  back = sim.t
+  assert sim.tp.go_cert.end == 'scene' and sim.v < 0.3  # the premise: the lift ended by the gap, the car not yet moving
+  plans += [step_scene(sim) for _ in range(round(20. / DT_MDL))]
+  assert not any(str(p.controlPrompt) in TAKE_CONTROL_PROMPTS or str(p.handback) != 'none' for p in plans)
+  withdrawn = [t for name, t in events if name == 'turnpilot.left_go_withdrawn']
+  goes = [t for name, t in events if name == 'turnpilot.left_go']
+  assert len(withdrawn) == 1 and withdrawn[0] < back and len(goes) == 1 and goes[0] >= back + ul.CLEAR_WINDOW_S - 0.11, (withdrawn, goes, back)
+  assert any(str(p.goCertified.cause) == 'unprotectedLeft' for p in plans[round((goes[0] - back) / DT_MDL):])
+  assert any(str(p.unprotectedLeft.state) == 'committed' for p in plans) and sim.s > JUNCTION
+
+
+@pytest.mark.parametrize('model_fn', [launching, coasting])
+@pytest.mark.parametrize('after_s', [1.3, 1.5, 2.0])
+def test_a_lifted_lefts_go_rolling_through_a_scene_gap_turns_never_stands_for_good(model_fn, after_s):
+  """The same gap later in the go, the car rolling on a plan it answers 1.0 s late (this car: 0.7-1.0 s): a go under way,
+  as through any detector gap, never withdrawn while it rolls (its stop would carry the car up to 1 m on, inside
+  LEFT_LIFT_ROOM_M, where its next go is never lifted and a model that holds keeps it standing); withdrawn only once it
+  rests where a go can be lifted. The turn is taken, or, come to rest nearer than that room with the model holding, the
+  no-move handback as before: never a silent stand."""
+  sim = left_go_with_lag(model_fn, 1.0)
+  plans = [step_scene(sim) for _ in range(round(after_s / DT_MDL))]
+  plans += [step_scene(sim, False) for _ in range(round(0.8 / DT_MDL))]
+  plans += [step_scene(sim) for _ in range(round(25. / DT_MDL))]
+  turned = any(str(p.unprotectedLeft.state) == 'committed' for p in plans) and sim.s > JUNCTION
+  handed = [str(p.controlPrompt) for p in plans if str(p.controlPrompt) in TAKE_CONTROL_PROMPTS]
+  assert not any(str(p.handback) != 'none' for p in plans)
+  assert (turned and not handed) or (not turned and set(handed) == {'cantStartTakeControl'} and
+                                     JUNCTION - sim.s - ONCOMING_ENTRY_M < LEFT_LIFT_ROOM_M), (turned, set(handed), sim.s)
+
+
+def test_a_lifted_lefts_go_through_a_scene_gap_past_its_bound_is_still_the_detectors_handback():
+  sim = left_go_with_lag(launching, 0.3)
+  plans = [step_scene(sim) for _ in range(round(0.3 / DT_MDL))]
+  plans += [step_scene(sim, False) for _ in range(round(5. / DT_MDL))]
+  assert str(plans[-1].handback) == 'detectorStopped' and sim.v < 0.05 and JUNCTION - sim.s > ONCOMING_ENTRY_M

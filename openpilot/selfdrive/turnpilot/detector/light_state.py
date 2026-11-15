@@ -166,6 +166,12 @@ VOTE_M, VOTE_N = 5, 2
 VOTE_S = 1.5
 MATCH_HEIGHTS = 1.5         # a read is the same head when its box centre is within this many box heights
 HEAD_DROP_S = VOTE_S        # a head not seen this long is forgotten: its sightings are too old to vote
+# ...and its range as read no more than this times the head's last: a head the car drives toward or stands at never ranges
+# further but by one head's own error. Route 29's red head standing 60 m off read 56-70 m from run to run (1.23 between two
+# reads at most), its red heads read green again 1.16 further at most (the lit lamp's glow boxed alone moving down the head).
+# A box further out than that is another head (the next junction's mast): it never takes a lost head's id nor its votes.
+# Nearer than that only the car's motion tells the two apart, which the reader has not: map_controls.same_head has it
+SAME_HEAD_RANGE_OUT = 1.25
 # a head within this of the lane's bearing governs it. Kept at 10 after the 11-06 night, though every red it read was a side
 # head 15-30 deg off: at 1e 4:45-4:48 three right-side heads 16-25 deg off read red, 4-5 votes, as the car went through at
 # 10.5 m/s, its driver not braking (not the car's lights), so a wider gate would have braked it hard on a through road; at
@@ -450,6 +456,7 @@ class Head:
   box: tuple                 # normalized x0 y0 x1 y1
   t: float
   reads: deque = field(default_factory=lambda: deque(maxlen=VOTE_M))  # (frame time, state) of its last sightings
+  range: float | None = None  # m as its last sighting read it, None where the reads carry no range
 
   def counts(self) -> Counter:
     """Its sightings that vote: the last VOTE_M, none older than VOTE_S at its last one."""
@@ -478,12 +485,18 @@ class HeadVoter:
     self.next_id = 0
 
   def update(self, t: float, reads: list) -> list[Head]:
-    """reads: (normalized box, state) of this frame's heads. Returns the heads seen this frame, in reads' order."""
+    """reads: (normalized box, state[, m as read]) of this frame's heads. Returns the heads seen this frame, in reads' order.
+    A read is a head's when its box centre is within MATCH_HEIGHTS of its own height of the head's last box and, both with a
+    range, it ranges no further than SAME_HEAD_RANGE_OUT times the head's last (a read at MAX_RANGE, a range the reader
+    could not say, never continues a head read nearer)."""
     pairs = []
-    for i, (box, _) in enumerate(reads):
+    for i, (box, *rest) in enumerate(reads):
       cx, cy = centre(box)
       reach = MATCH_HEIGHTS * max(box[3] - box[1], 1e-3)
+      rng = rest[1] if len(rest) > 1 else None
       for hd in self.heads:
+        if rng is not None and hd.range is not None and (rng > hd.range * SAME_HEAD_RANGE_OUT or rng >= MAX_RANGE > hd.range):
+          continue
         hx, hy = centre(hd.box)
         dist = math.hypot(cx - hx, cy - hy)
         if dist <= reach:
@@ -495,14 +508,14 @@ class HeadVoter:
       taken_reads.add(i)
       taken_heads.add(hd.id)
       out[i] = hd
-    for i, (box, state) in enumerate(reads):
+    for i, (box, state, *rest) in enumerate(reads):
       hd = out.get(i)
       if hd is None:
         hd = Head(self.next_id, box, t)
         self.next_id += 1
         self.heads.append(hd)
         out[i] = hd
-      hd.box, hd.t = tuple(box), t
+      hd.box, hd.t, hd.range = tuple(box), t, rest[0] if rest else None
       hd.reads.append((t, state))
     self.heads = [hd for hd in self.heads if t - hd.t <= HEAD_DROP_S + 1e-6]
     return [out[i] for i in range(len(reads))]
@@ -634,7 +647,7 @@ class LightReader:
       if r.state != 'unknown':
         self.colour_counts[r.state] += 1
       reads.append((norm, float(box[4]), r))
-    heads = self.voter.update(t, [(norm, r.state) for norm, _, r in reads])
+    heads = self.voter.update(t, [(norm, r.state, r.distance) for norm, _, r in reads])
     # the low-confidence boxes within the governing bearing past GREEN_LOW_MAX: read on a run a head reads or votes green
     # (at any confidence: the green map_controls would count), for a red or yellow among them (never a head: a third green
     # there is left unpublished too); else left unread

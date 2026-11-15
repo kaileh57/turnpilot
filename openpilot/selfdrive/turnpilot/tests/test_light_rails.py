@@ -830,3 +830,203 @@ def test_a_camera_signal_a_red_raised_outlives_the_route():
   assert car.policy.camera_signal is cs and cs.key == (mc.CAMERA_ROUTE, 9) and cs.state.turn_id == 9
   held_at = drive(car, cam_heads(('red', JUNCTION + 15.)), until_s=JUNCTION)
   assert held_at is not None and math.isclose(held_at, JUNCTION - mc.CONTROL_LINE_M, abs_tol=5.)
+
+
+def lagging_stop(first: str, then: str, first_m: float, then_m: float, lag_m: float, v: float = 10.9):
+  """A through signal's camera head (24 m past its line) read green, then first from first_m before the line, then then
+  from then_m; the plan's braking lags until lag_m before the line (the car holds its speed, engaged). Returns (where the
+  car stood past the line, None if it never did; the hardest accel; the alerts)."""
+  car = through(v=v)
+
+  def lights(c):
+    d = LINE - c.s
+    st = 'green' if d > first_m else first if d > then_m else then
+    return cam_heads((st, LINE + 24.))(c)
+  while LINE - car.s > first_m + 1.:
+    car.step(lights=lights)
+  while LINE - car.s > lag_m:
+    car.step(lights=lights, accel=0., engaged=True)
+  stood = drive(car, lights, seconds=20., until_s=LINE + 15.)
+  return None if stood is None else stood - LINE, min(r[3] for r in car.rows), {r[-1].alert for r in car.rows}
+
+
+def test_a_stop_decided_on_a_yellow_that_turns_red_is_a_reds_stop():
+  # gate2: decided on the yellow 40 m out at 10.9 m/s (a -2.0 stop fits there after T_LAT), red 3 m later; the car's braking
+  # lags to 23.6 m out, where -2.0 ends 6 m past the line and RED_DECEL ends short of it (red_stop_fits). The stop is the
+  # red's from its red on: its floor and its reach. It kept the yellow's floor, overran and the car went through the red
+  assert mc.red_stop_fits(10.9, 23.6) and 10.9 ** 2 / 4. > 23.6 + mc.RED_PAST_M
+  past, hardest, alerts = lagging_stop('yellow', 'red', 40., 37., 23.6)
+  assert past is not None and past <= mc.RED_PAST_M and 'stopOverrun' not in alerts, (past, alerts)
+  assert -mc.RED_DECEL - 1e-6 <= hardest < mc.MAP_DECEL_MAX
+
+
+def test_a_reds_stop_never_falls_back_to_the_yellows_floor():
+  # the other way: a red's stop (first read 30 m out, where it fits) whose head then reads yellow keeps the red's floor
+  past, hardest, alerts = lagging_stop('red', 'yellow', 30., 27., 23.6)
+  assert past is not None and past <= mc.RED_PAST_M and 'stopOverrun' not in alerts, (past, alerts)
+  assert hardest >= -mc.RED_DECEL - 1e-6
+
+
+def test_a_yellows_stop_still_yellow_keeps_the_yellows_floor():
+  # still yellow, its stop at -2.0 at most (the comfortable stop where it fits)
+  past, hardest, alerts = lagging_stop('yellow', 'yellow', 40., 37., 33.)
+  assert past is not None and past <= 0.5 and hardest >= mc.MAP_DECEL_MAX - 1e-6, (past, hardest)
+
+
+# --- one head, one track: the reader's voter and map_controls.same_head (gate2: the next junction's head took a lost red
+# head's id and its votes, and its green let this line's red go on the approach) ---
+
+VFOV_DEG = 61. * 1208. / 1928.   # the road camera's vertical field; horizontal +-30.5 deg over the frame's width
+HEAD_UP_M = light_state.ASSUMED_HEAD_M - CAM_H
+
+
+def true_box(d: float, y: float = -1.5):
+  """A 1.07 m head y m to the side, d m on, boxed where the road camera draws it (normalized x0 y0 x1 y1)."""
+  cx = 0.5 - math.degrees(math.atan2(y, d)) / 61.
+  cy = 0.5 - math.degrees(math.atan2(HEAD_UP_M, d)) / VFOV_DEG
+  half = math.degrees(math.atan2(light_state.HEAD_M / 2., d)) / VFOV_DEG
+  return (cx - 0.4 * half, cy - half, cx + 0.4 * half, cy + half)
+
+
+def read_of(d: float, y: float = -1.5):
+  """(normalized box, m as read, bearing deg) of a head y m to the side, d m on."""
+  return true_box(d, y), d, math.degrees(math.atan2(-y, d))
+
+
+def test_the_same_head_settings():
+  # map_controls has the car's motion, the reader's voter has not: the policy holds an id to one head's own error from where
+  # the car's motion puts it, the voter to that and the run-to-run spread of a head's range
+  assert (mc.HEAD_RANGE_OUT, mc.HEAD_RANGE_PX_M, light_state.SAME_HEAD_RANGE_OUT, mc.HEAD_PLACE_M, mc.HEAD_PLACE_DEG) == (1.2, 2., 1.25, 5., 1.)
+  assert mc.CAMERA_RANGE_MAX == light_state.MAX_RANGE
+
+
+@pytest.mark.parametrize('lost_m, new_m, gap_s', [(104., 140., 1.36), (114., 140., 0.9)])
+def test_the_next_junctions_head_boxed_beyond_a_lost_red_head_is_never_that_head(lost_m, new_m, gap_s):
+  # gate2's cells: this line's red head last boxed lost_m off closing at 11 m/s, the next junction's head first boxed new_m
+  # off gap_s later, inside HEAD_DROP_S and within MATCH_HEIGHTS of the lost box. The voter gave it the lost head's id and
+  # its red votes, and the id alone made it the head that had read the signal's red
+  v, t = light_state.HeadVoter(), 0.
+  for k in range(6):
+    t = 0.2 * k
+    box, d, brg = read_of(lost_m + 11. * (1. - t))
+    red = v.update(t, [(box, 'red', d)])[0]
+  last = (red.id, d, brg)
+  box, d, brg = read_of(new_m)
+  new = v.update(t + gap_s, [(box, 'green', d)])[0]
+  assert not mc.same_head((new.id, d, brg), last, 11. * gap_s), \
+    f"a head first boxed {new_m:.0f} m off is the red head lost {lost_m:.0f} m off {gap_s} s before"
+  if new_m > lost_m * light_state.SAME_HEAD_RANGE_OUT:  # the voter alone, without the car's motion
+    assert new.id != red.id and new.state != 'red', "it took the lost red head's id and votes"
+
+
+@pytest.mark.parametrize('ratio', [1.3, 1.4, 1.6, 2.0])
+@pytest.mark.parametrize('lost_m', [40., 60., 80., 100., 115.])
+def test_the_voter_never_carries_a_heads_id_out_to_another_mast(lost_m, ratio):
+  v = light_state.HeadVoter()
+  box, d, _ = read_of(lost_m)
+  for k in range(3):
+    old = v.update(0.1 * k, [(box, 'red', d)])[0]
+  box, d, _ = read_of(lost_m * ratio)
+  new = v.update(0.5, [(box, 'green', d)])[0]
+  assert new.id != old.id and new.state != 'red'
+
+
+@pytest.mark.parametrize('lost_m', [125., 140., 145.])
+def test_a_read_at_the_readers_farthest_range_is_never_a_head_read_nearer(lost_m):
+  # the reader says MAX_RANGE for any head it cannot range: a box there may be any mast beyond, so it takes no nearer head's
+  # id, votes or place
+  v = light_state.HeadVoter()
+  box, d, brg = read_of(lost_m)
+  for k in range(3):
+    old = v.update(0.1 * k, [(box, 'red', d)])[0]
+  new = v.update(0.3, [(true_box(lost_m + 20.), 'green', light_state.MAX_RANGE)])[0]
+  assert new.id != old.id and new.state != 'red'
+  assert not mc.same_head((old.id, mc.CAMERA_RANGE_MAX, brg), (old.id, lost_m, brg), 0.)
+
+
+@pytest.mark.parametrize('gap_s', [0.5, 1.5, 3.])
+@pytest.mark.parametrize('speed', [5., 10., 15.])
+def test_this_lines_own_head_boxed_again_after_a_gap_is_still_its_head(speed, gap_s):
+  # the cost of the tighter association: a head read for a second closing at speed, unboxed gap_s, boxed again where the
+  # car's motion puts it, is still the head that read the red, by the reader's id (inside HEAD_DROP_S, its box still in
+  # reach) or by its place carried by the metres driven. A night red read green again ranges up to 1.16 further
+  for y, further in ((-1.5, 1.), (2.5, 1.), (-1.5, 1.16)):
+    v, t, d0 = light_state.HeadVoter(), 0., 25. + speed * (1. + gap_s)
+    for k in range(11):
+      t = 0.1 * k
+      box, d, brg = read_of(d0 - speed * t, y)
+      red = v.update(t, [(box, 'red', d)])[0]
+    last = (red.id, d, brg)
+    box, d, brg = read_of(d0 - speed * (t + gap_s), y)
+    again = v.update(t + gap_s, [(box, 'green', d * further)])[0]
+    assert mc.same_head((again.id, d * further, brg), last, speed * gap_s), (y, further, again.id == red.id)
+    if gap_s < light_state.HEAD_DROP_S and further == 1.:
+      assert again.id == red.id or speed * gap_s > 10., (y, d)  # the voter's own track, unless its box moved out of reach
+
+
+def test_the_bursty_green_bridge_takes_no_id_moved_out_to_another_mast():
+  # a burst of green on the reader's head 4 at 30 m, a gap past CAMERA_GREEN_GAP_S, then green again on id 4 boxed 60 m off
+  # (another head carrying the id): never the same burst
+  g = GreenReads()
+  bursts(g, [(0.7, ('green', HEAD4)), (2.0, None)])
+  assert g.dormant
+  steady = bursts(g, [(0.5, ('green', [(4, 60., 0.)]))])
+  assert not any(steady) and not g.bridged
+  g = GreenReads()  # the same head again (its range within one head's error): carried on, steady on both bursts' reads
+  steady = bursts(g, [(0.7, ('green', HEAD4)), (2.0, None), (0.5, ('green', [(4, 34., 0.)]))])
+  assert g.bridged and steady[-1]
+
+
+def next_junction_reads(car, voter, unread_m: float, next_m: float, frame: list):
+  """The camera's read of this run (every other frame): this line's heads 24 m past its line, red, boxed until unread_m before
+  it; the next junction's, next_m past the line, green, boxed from 140 m off; both pairs 1.5 m left and 2 m right, through the
+  reader's voter."""
+  if frame and car.frame % 2:
+    return frame[0]
+  reads = []
+  for s, st in ((LINE + 24., 'red'), (LINE + next_m, 'green')):
+    if (st == 'red' and LINE - car.s <= unread_m) or not 2. < s - car.s < 140.:
+      continue
+    for y in (-1.5, 2.):
+      box, d, brg = read_of(s - car.s, y)
+      reads.append((box, st, d, brg))
+  heads = voter.update(car.t, [(box, st, d) for box, st, d, _ in reads])
+  cam = CameraLights([(hd.state, d) for hd, (_, _, d, _) in zip(heads, reads, strict=True)], False, 'read',
+                     ids=[hd.id for hd in heads], bearings=[brg for *_, brg in reads])
+  frame[:] = [Lights(camera=cam)]
+  return frame[0]
+
+
+@pytest.mark.parametrize('unread_m, next_m', [(80., 60.), (80., 65.), (80., 70.), (80., 75.), (90., 50.), (90., 55.), (90., 60.), (90., 65.)])
+def test_the_next_junctions_green_never_lets_this_lines_red_go(unread_m, next_m):
+  # gate2's closed loop (sweep_voter.py): this line's red heads unboxed from unread_m out, the next junction's green next_m
+  # past the line first boxed 140 m off: the car stood. It took the lost red heads' ids and let the red go 52-66 m out, the
+  # car through it at 11.2 m/s
+  car, voter, frame = through(v=11.18), light_state.HeadVoter(), []
+  stood = drive(car, lambda c: next_junction_reads(c, voter, unread_m, next_m, frame), seconds=30., until_s=LINE + 5.)
+  assert stood is not None and stood <= LINE + 0.5, f"ran this line's red at {max(r[2] for r in car.rows if r[1] > LINE):.1f} m/s"
+
+
+@pytest.mark.parametrize('red_m, stops', [(0.3, False), (7.7, True)])
+def test_a_yellows_stop_meeting_its_red_is_decided_as_a_red_first_read_there(red_m, stops):
+  # matrix gyr25|reengage: decided on the yellow, the driver takes over 25 m out and rolls to the line at 4.8 m/s; the red is
+  # first read red_m before it, a run after he hands back. At the line no red's stop fits (red_stop_fits): through it, said, as a
+  # late red. The yellow's stop turned red's there ended 4.3 m past the line, beyond RED_PAST_M, and a left stood in the
+  # junction's mouth beyond its own hold for good. 7.7 m out a red's stop fits: it stops within RED_PAST_M
+  car = through(v=10.9)
+
+  def lights(c):
+    d = LINE - c.s
+    return cam_heads(('green' if d > 40. else 'yellow' if d > red_m else 'red', LINE + 24.))(c)
+  while LINE - car.s > 25.:
+    car.step(lights=lights)
+  car.v = 4.8
+  while LINE - car.s > red_m + 0.5:  # he hands back on the light he sees turn red; the camera's red is read a run later
+    car.step(lights=lights, accel=0.)
+  assert mc.red_stop_fits(car.v, red_m) == stops
+  stood = drive(car, lights, seconds=10., until_s=LINE + 15.)
+  alerts = [r[-1].alert for r in car.rows if LINE - r[1] < red_m]
+  if stops:
+    assert stood is not None and stood <= LINE + mc.RED_PAST_M, stood
+  else:
+    assert stood is None and 'cannotStopComfortably' in alerts, (stood, set(alerts))

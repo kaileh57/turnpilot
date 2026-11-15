@@ -31,9 +31,9 @@ faults alert, and driver monitoring is stock.
 | --- | --- | --- |
 | `RED_DECEL` | 2.0 m/s² | 3.0 m/s² for a read red |
 | `RED_LAG_S`, `RED_PAST_M` | none; an overrun 2 m past the line drops the stop | 0.5 s and 4 m: a red is stopped for if the stop ends within 4 m past its line, otherwise the car goes through and says so |
-| `RED_GONE_S` | a camera red holds until a steady green | released after 2.5 s unbroken of a head that read the red in view and reading neither red nor yellow, in at least `RED_GONE_READS` (6) road runs. The head is known again by the reader's id for it, or by its place (`HEAD_PLACE_M` 5 m, `HEAD_PLACE_DEG` 1 degree); another head of the signal says nothing. Nor does one whose read says nothing of its lamp (every lamp dark, not read as a vertical head, two lamps lit), nor any head while a low-confidence red is read for the signal |
+| `RED_GONE_S` | a camera red holds until a steady green | released after 2.5 s unbroken of a head that read the red in view and reading neither red nor yellow, in at least `RED_GONE_READS` (6) road runs. The head is known again by its place (`HEAD_PLACE_M` 5 m of where its last read put it less the metres driven since, `HEAD_PLACE_DEG` 1 degree of its bearing seen from there), or by the reader's id for it only while it ranges no further than 1.2 times that plus 2 m (`HEAD_RANGE_OUT`, `HEAD_RANGE_PX_M`); the reader's voter never gives a box ranging over 1.25 times further than a head's last read (`SAME_HEAD_RANGE_OUT`), or at the reader's farthest range, that head's id or votes, and a box carrying a kept head's id at another place is never recorded as a red head of its own; another head of the signal says nothing. Nor does one whose read says nothing of its lamp (every lamp dark, not read as a vertical head, two lamps lit), nor any head while a low-confidence red is read for the signal |
 | Camera green | every head of the signal agrees | the signal's state is its movement's (`movement_state`), for its red and its green alike. Only heads that read a colour speak, and of them the nearest cluster (`HEAD_CLUSTER_M`, 40 m of the nearest): the next junction's heads have no say while this line's own read a colour. Going straight or turning right: the state most of them read; on a tie the head nearest the car's heading (within `HEAD_PLACE_DEG`), else red or yellow. A route left across the oncoming lanes: the left-most head (its red holds the left beside green balls; its green beside red balls is the left's green, the oncoming lanes judged as before); where bearings do not single one out, red or yellow. One head in view governs. A red or yellow read under `LIGHT_READ_CONF` raises no stop, and is a veto of a green or a red gone only where, were it a head, it would change that state. The same head's green counts wherever its range reads once it has read the signal's red |
-| Camera green, steady | `CAMERA_GREEN_STEADY_S` (1.0 s) of green on every frame, unbroken | `CAMERA_GREEN_READS` (3) road runs reading green, the first and the last 1.0 s apart or more and the last no older than `CAMERA_STALE_S` (1.0 s), no red or yellow read between; a run that reads nothing does not start it over (`CAMERA_GREEN_GAP_S` 1.5 s ends it). At a stand, a burst of `CAMERA_GREEN_BURST` (2) reads or more is carried across a gap of up to `CAMERA_GREEN_BRIDGE_S` (4 s) on the same head (its reader id or its place) while no red or yellow is read on any head at any range and no low-confidence one: then 2 reads of that head after the gap as well, and the bursts' own read spans (never the gaps) must sum to 1.0 s, the last read in hand |
+| Camera green, steady | `CAMERA_GREEN_STEADY_S` (1.0 s) of green on every frame, unbroken | `CAMERA_GREEN_READS` (3) road runs reading green, the first and the last 1.0 s apart or more and the last no older than `CAMERA_STALE_S` (1.0 s), no red or yellow read between; a run that reads nothing does not start it over (`CAMERA_GREEN_GAP_S` 1.5 s ends it). At a stand, a burst of `CAMERA_GREEN_BURST` (2) reads or more is carried across a gap of up to `CAMERA_GREEN_BRIDGE_S` (4 s) on the same head (its place, or its reader id within one head's ranging error, as for `RED_GONE_S`) while no red or yellow is read on any head at any range and no low-confidence one: then 2 reads of that head after the gap as well, and the bursts' own read spans (never the gaps) must sum to 1.0 s, the last read in hand |
 | `VOTE_N` | 4 of 5 reads | 2 of the last 5 sightings within `VOTE_S` (1.5 s), a tie is unknown; a head is kept `HEAD_DROP_S` 1.5 s unseen (was 0.6 s) |
 | `LIGHT_GREEN_CONF` | the reader takes traffic-light boxes down to `LIGHT_READ_CONF` (0.2) | down to 0.1 a box within the governing bearing is read too, and is a head only on a run it reads green (at most `GREEN_LOW_MAX` 2 a frame). A red or yellow read there is no head and raises no stop; it vetoes a green and a red gone for its signal. On a run with a low green the low boxes past `GREEN_LOW_MAX` are read for one too |
 | `ROUND_MAX` | a glow filling its box is never a lamp | a round red or green glow filling its box is read (1.6 times as tall as wide at most). Not measured by day |
@@ -87,7 +87,7 @@ faults alert, and driver monitoring is stock.
 | Stop signs under vision stop-go | routed around when the line would hand back | never routed around |
 | Detector handback | latched to a full disengage | clears if the detector returns within 3 s |
 | Detector re-measure | waits 16 frames (0.8 s) after any pass over budget | skips one run (`FORCE_SKIP_FRAMES` 4) when only slightly over |
-| Side views at a stand (`detector/modeld_detector.py` stand schedule) | the held cycle: full wide and road passes 5 a second each, a side view only where it leaves `DEBT_CAP_S` (8 ms) of debt, which on this car is never past the first | once the side views have had no frame for `STAND_STARVED_S` (0.3 s) at or under 2 m/s in a sweep or a `sideLook`: the road pass every `STAND_ROAD_DUE_S` (0.2 s), the wide pass and each side view every `STAND_VIEW_DUE_S` (0.4 s), a side run allowed `SIDE_STAND_CAP_S` (16.7 ms, a third of a frame) of lateness, and counted an overrun only past half a frame (`SIDE_STAND_OVERRUN_S`). On the car's timings: road 4.4-4.7 a second (was 5), wide 2.2-2.3 (was 5), each side view 2.1-2.3 (was 0); a sweep's tracks coast `SWEEP_COAST_S` 0.9 s (was 0.65) |
+| Side views at a stand (`detector/modeld_detector.py` stand schedule) | the held cycle: full wide and road passes 5 a second each, a side view only where it leaves `DEBT_CAP_S` (8 ms) of debt, which on this car is never past the first | once the side views have had no frame for `STAND_STARVED_S` (0.3 s) at or under 2 m/s in a sweep or a `sideLook`: the road pass every `STAND_ROAD_DUE_S` (0.2 s), the wide pass and each side view every `STAND_VIEW_DUE_S` (0.4 s), a side run allowed `SIDE_STAND_CAP_S` (16.7 ms, a third of a frame) of lateness, and counted an overrun only past half a frame (`SIDE_STAND_OVERRUN_S`). On the car's timings: road 4.4-4.7 a second (was 5), wide 2.2-2.3 (was 5), each side view 2.1-2.3 (was 0); a sweep's tracks coast `SWEEP_COAST_S` 0.9 s (was 0.65). A side run or a maps upload takes only a frame that started on time by the camera's clock (`measure_late`), so the side views arrive less often than that on a slower device and the stand then decides on the forward passes |
 
 ## Not proven on the car
 
@@ -108,22 +108,46 @@ range further than the reader's match to the mapped signal allows. Greens are re
 read green can release a camera red's stop, let a right flow and let a left roll. The reader's and tracker's added cost was
 timed on a desktop only.
 
-Open after the 2026-11-14 round, each reproduced and left unchanged because no honest fix exists off the car:
+Open after the 2026-11-14 rounds. Each was reproduced in a unit simulation, a replay or the closed-loop scenario matrix
+(13,800 runs of whole maneuvers on the unit simulator, in two perception modes: side views on the stand schedule, and side
+views with no room, the test car's logged state). The matrix on this tree shows no rail hit outside this list.
 
-- A stand at a green whose only read heads hang on the far side. Those heads range past the 40 m match to the line, so a
-  stop raised by a red read on the approach is not released by them: in replay the car brakes 5.2 s into one such green and
-  would stand at its line. The far-side green release (Lights, `far_green`) fixes it only once the map server's shards carry
-  the OSM signal layer (`build_region.py <region> --sidecar-only`, then `deploy.sh`); until then the gate is closed. The
-  driver's gas releases the stand.
-- A next junction's green 50-60 m past the line that reads a quarter short falls inside the same match and can release a
-  camera red whose own heads read nothing. Narrowing a green's match to where the map's next place could read was built and
-  not landed: on route 29 it delayed one stand's release 2.5 s and held the near line of a two-line left through its green.
+Needs the car:
+
 - A red first read inside 22 m at 25 mph, 33 m at 30, 45 m at 35 or 58 m at 40 is driven through, since a stop no longer
   fits at 3.0 m/s². The hardest braking ever commanded in the logs is 2.2 m/s²: whether the car delivers 3.0 needs a brake
   test.
-- A navd reading that steps several metres nearer while a left stands at its line hands the left back for good.
 - The stand schedule's side-view runs were timed on a desktop scaled to the car (8.8 times, give or take a third). A side
-  run may leave a third of a frame of lateness; overruns past half a frame turn the side views off for the drive.
+  run takes only a frame that started on time by the camera's own clock (`measure_late`); in a replay on modeld's clock no
+  stand then drops a frame at 1.0 to 1.6 times the car's timings, and both side views arrive within 0.45 s on about 86% of
+  a stop sign's frames at 1.0 and far fewer at 1.6. "Driving Model Lagging" or "locationd Temporary Error" at a stand
+  would mean the schedule ran a frame late on the device.
+- Reds and greens at night rest on one drive's low-resolution video (see above).
+
+Known and left as they are:
+
+- A stand at a green whose only read heads hang on the far side is released by `far_green` only where the map clears the
+  road beyond the junction, which needs the map server's shards to carry the OSM signal layer. Without it the car stands,
+  says "Stopped at signal: far green not matched, gas to go", and the driver's gas releases it.
+- A next junction's green 50-60 m past the line that reads a quarter short falls inside the 40 m match and can release a
+  camera red whose own heads read nothing. Narrowing the match by the map was built and not landed: on the logged drive it
+  delayed one stand's release 2.5 s and held a left through its green.
+- A red head the reader stops boxing, with the next junction's green boxed within 1.5 s at no more than 1.2 times
+  (plus 2 m) the range where the lost head then is, cannot be told from that head turning green: its lit lamp's glow
+  moves down the head by as much. It keeps the lost head's id and can let this line's camera red go on the approach. At
+  100 m that means the next junction's heads less than 22 m beyond this line's. None of the closed-loop sweep's cells
+  outside the 40 m match falls in it; the nearest held by 1.4 m.
+- A green read only in bursts more than 4 s apart never releases a stand; the driver's gas does.
+- A red read again after a right-on-red go stops the car up to 4 m past its line. Signals carry no cross-road lane count,
+  so on a four-lane cross road with the default line that stop can rest the nose in the first cross lane. Each later go
+  from such a stand, if the red is read again, rests a little further on, never past 4 m.
+- A navd reading that steps several metres nearer while a left stands at its line hands the left back for good.
+- A navigation loss longer than 3 s on a left's approach drops the left: the car crosses its line without turning, and the
+  turn is said missed once navigation returns.
+- A stop line the driver takes the car over himself is silent. Re-engaged, a crossing car the cameras already track holds
+  the car short of the cross lanes; a car not yet tracked at the re-engage, or a re-engage already in the lanes, does not.
 - With the side look on, the wide camera's full pass runs about 2.3 times a second at a stand, so a walker only it sees is
   tracked about 0.4 s after first boxed (0.2 s before). A car first boxed by a side view inside the last side period
   (under 0.5 s) before a right's go does not hold it.
+- At a stop sign a car that has just crossed hides the far lane as it leaves: the go comes about 3 s later with the side
+  views running than without them.

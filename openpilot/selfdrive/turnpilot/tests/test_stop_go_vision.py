@@ -13,6 +13,7 @@ from openpilot.selfdrive.turnpilot import stop_rules as sr
 from openpilot.selfdrive.turnpilot import visibility_table as vt
 from openpilot.selfdrive.turnpilot.routing import certify as ce
 from openpilot.selfdrive.turnpilot.routing.tests.test_certify import lanes_junction, two_way_junction, utc, vision_junction, visibility
+from openpilot.selfdrive.turnpilot.hooks import PROMPT_REPEAT_S
 from openpilot.selfdrive.turnpilot.stop_evidence import CAR_HALF_LEN_M, DEFAULT_LINE_M, junction_lanes
 from openpilot.selfdrive.turnpilot.tests.test_stop_evidence import track as ev_track
 from openpilot.selfdrive.turnpilot.tests.test_stop_go import Drive, World, arrived_at, first_go, raw_box, rolling
@@ -888,3 +889,103 @@ def test_vision_a_stand_past_the_line_still_goes_across_an_empty_junction(tmp_pa
     k = next(k for k, d in enumerate(out) if d.go_cause == 'clearBox')
     assert out[k].state == 'committed' and out[k].release is not None and out[k].reason == sg.GOING_REASON
     assert (k - arrived_at(out)) * DT_MDL == pytest.approx(sr.VISION_CLEAR_S, abs=0.11) and out[k - 1].prompt == 'stopGo'
+
+
+# ------------------------------------------------------------------------------------- the go's line said once (gate2 A3)
+
+def with_hold(w, hold, after_s, for_s):
+  """w's decider with hold added to its go conditions for for_s, from after_s past its line's first say."""
+  real, said = w.sg.go_holds, {}
+
+  def go_holds(f, pos, launch):
+    out = real(f, pos, launch)
+    if 't' not in said and w.sg.said_t is not None:
+      said['t'] = w.sg.said_t
+    if not launch and 't' in said and after_s - 1e-6 <= w.sg.t - said['t'] < after_s + for_s - 1e-6:
+      out = out + [hold]
+    return out
+  w.sg.go_holds = go_holds
+
+
+def line_from(out, said, i):
+  return [(d.prompt, d.reason) for d in out[said:i + 1]]
+
+
+def heard(d):
+  """The title selfdrived shows for the decider's prompt and reason, and whether it chimes (events.turnpilot_control_prompt_alert)."""
+  from openpilot.cereal import messaging
+  from openpilot.selfdrive.selfdrived.events import AudibleAlert, EventName
+  from openpilot.selfdrive.selfdrived.tests.test_turnpilot_events import FakeSM, alerts
+  msg = messaging.new_message('turnpilotPlan')
+  msg.turnpilotPlan.controlPrompt, msg.turnpilotPlan.reason, msg.turnpilotPlan.stopGo.chime = d.prompt, d.reason, d.chime
+  a, = alerts(EventName.turnpilotControlPrompt, FakeSM(msg.as_reader().turnpilotPlan))
+  return a.alert_text_1, 'chime' if a.audible_alert != AudibleAlert.none else 'none'
+
+
+def test_vision_a_said_go_stays_said_when_its_window_steps_with_the_side_views_age(tmp_path):
+  """gate2 A3 (stand10 s88: "Going" chimed twice 0.1 s apart, the car standing): the window's length moves with the views'
+  extra_age_s at every side run of the stand schedule; a frame where it stepped 0.075 s un-said the line and the next said
+  it again. Once said the line stays up to its go, the go itself as late as the longer window."""
+  w = vworld(tmp_path, 25)
+  real = w.sg._need_s
+  w.sg._need_s = lambda: real() + (0.075 if w.sg.said_t is not None else 0.)
+  out = w.run(6.)
+  i, said = first_go(out), next(k for k, d in enumerate(out) if d.prompt == 'stopGo')
+  assert all(d.prompt == 'stopGo' and d.reason == sg.GOING_REASON for d in out[said:i + 1]), line_from(out, said, i)
+  assert (i - arrived_at(out)) * DT_MDL == pytest.approx(sr.VISION_CLEAR_S + 0.075, abs=0.11)
+
+
+def test_vision_a_said_go_stays_said_while_a_side_view_catches_up_and_its_window_runs_again(tmp_path):
+  """gate2 A3 (stand10 s1220): a side view's reach lapsing for one run 0.3 s after "Going" put the wait's words back and
+  chimed "Going" again 2.1 s later. A view catching up is not something seen: the line stays up, and the window still runs
+  again in full from it, the go VISION_CLEAR_S after the lapse."""
+  w = vworld(tmp_path, 25)
+  with_hold(w, sg.Hold('reach:left1', sg.reach_text('left', 'stale'), sg.DYNAMIC), 0.3, DT_MDL)
+  out = w.run(8.)
+  i, said = first_go(out), next(k for k, d in enumerate(out) if d.prompt == 'stopGo')
+  assert all(d.prompt == 'stopGo' and d.reason == sg.GOING_REASON for d in out[said:i + 1]), line_from(out, said, i)
+  assert (i - said) * DT_MDL == pytest.approx(0.3 + DT_MDL + sr.VISION_CLEAR_S, abs=0.11)
+  assert heard(out[said]) == (sg.GOING_REASON, 'chime')
+
+
+def test_vision_a_go_said_again_after_a_car_held_it_is_shown_not_chimed(tmp_path):
+  """A car seen 0.3 s after "Going" un-says it (the wait's words while it holds). The go said again inside PROMPT_REPEAT_S of
+  the chimed line is shown, not chimed (the line's quiet form, as V7's silent go: waitingForCross with its words), through
+  its go; VISION_ANNOUNCE_S of it before the go as any line, the window run again in full."""
+  w = vworld(tmp_path, 25)
+  with_hold(w, sg.Hold('tracked:7', "a car from the left", sg.DYNAMIC), 0.3, 0.5)
+  out = w.run(10.)
+  i, said = first_go(out), next(k for k, d in enumerate(out) if d.prompt == 'stopGo')
+  held = said + round(0.3 / DT_MDL)
+  assert out[held].prompt == 'waitingForCross' and out[held].reason != sg.GOING_REASON
+  again = next(k for k in range(held, i + 1) if out[k].reason == sg.GOING_REASON)
+  assert all(d.prompt == 'waitingForCross' and d.reason == sg.GOING_REASON and not d.chime for d in out[again:i + 1]), \
+    line_from(out, again, i)
+  assert (i - again) * DT_MDL == pytest.approx(sr.VISION_ANNOUNCE_S, abs=0.11)
+  assert (i - held) * DT_MDL == pytest.approx(0.5 + sr.VISION_CLEAR_S, abs=0.11) and (i - said) * DT_MDL < PROMPT_REPEAT_S
+  assert heard(out[said]) == (sg.GOING_REASON, 'chime') and heard(out[again]) == (sg.GOING_REASON, 'none')
+  assert out[i].release is not None and out[i].go_cause == 'stopSign'
+
+
+def test_vision_a_go_withdrawn_for_a_car_and_said_again_soon_is_shown_not_chimed(tmp_path):
+  """The same once the go is out: a car seen 0.2 s into it withdraws it (the capped abort, the wait again); its next line
+  inside PROMPT_REPEAT_S of the chimed one is shown, not chimed, as the left's goRepeat."""
+  w = vworld(tmp_path, 25)
+  real, went = w.sg.go_holds, {}
+
+  def go_holds(f, pos, launch):
+    out = real(f, pos, launch)
+    if 't' not in went and w.sg.state == 'going':
+      went['t'] = w.sg.t
+    if 't' in went and 0.2 - 1e-6 <= w.sg.t - went['t'] < 0.7 - 1e-6:
+      out = out + [sg.Hold('tracked:7', "a car from the left", sg.DYNAMIC)]
+    return out
+  w.sg.go_holds = go_holds
+  out = w.run(12.)
+  i = first_go(out)
+  k = next(k for k in range(i, len(out)) if out[k].withdraw)
+  j = next((m for m in range(k + 1, len(out)) if out[m].go_cause in ('stopSign', 'clearBox')), None)
+  assert j is not None, [(d.state, d.prompt, d.reason) for d in out[k::10]]
+  again = next(m for m in range(k + 1, j + 1) if out[m].reason == sg.GOING_REASON)
+  assert (again - i) * DT_MDL < PROMPT_REPEAT_S
+  assert heard(out[i]) == (sg.GOING_REASON, 'chime') and all(heard(d) == (sg.GOING_REASON, 'none') for d in out[again:j + 1])

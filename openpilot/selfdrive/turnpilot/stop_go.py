@@ -102,7 +102,9 @@ gate that fails before the first go is the 1 s handback saying which ("Stop sign
 it, a held fault (H9), never shadow (C14). ALWAYS_DRIVE's amendments V1-V10 hold under vision alone (each marked V<n> below);
 the other four modes are as they were (tests/test_stop_go_modes_golden.py). The go's line is said on VISION_ANNOUNCE_S of
 acting, engaged frames in a row before it: re-engaged (or acting again) with the window already run, the line comes first and
-the go VISION_ANNOUNCE_S after it, never on the re-engaged frame. SAT-11, under vision alone: every vehicle standing at the go is
+the go VISION_ANNOUNCE_S after it, never on the re-engaged frame. A line said stays said through a step of its window and
+a view catching up; one un-said by a hold or a withdrawn go and said again inside hooks.PROMPT_REPEAT_S is shown, not
+chimed (_observe, _announce). SAT-11, under vision alone: every vehicle standing at the go is
 watched for its start (_watch_starts: its ground point and speed toward our path, our own motion taken out), its start before
 the commit withdrawing the go and after it a threat in the band; and from the commit point on, a confirmed vehicle in our path
 corridor ahead (in it, or entering it within RAIL_ENTER_S and still there when we reach it) is the in-path rail (_rail): the
@@ -156,6 +158,7 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.turnpilot import stop_rules as sr
 from openpilot.selfdrive.turnpilot.go_override import GO_WINDOW_S, Takeover
+from openpilot.selfdrive.turnpilot.hooks import PROMPT_REPEAT_S
 from openpilot.selfdrive.turnpilot.detector.light_state import ASSUMED_HEAD_M
 from openpilot.selfdrive.turnpilot.map_controls import CREEP_AT_M, CREEP_SPEED, CROSSED_CAUSES, YIELD_STOP_REASON, is_stop
 from openpilot.selfdrive.turnpilot.maps import surveys as survey_file
@@ -324,6 +327,8 @@ VISION_STALL_H5_S = 30.         # V4: s standing in the junction past the in-lan
 VISION_BOX_LIFT_M = 2.25        # V4: m all of a stand's clearBox lifts may move the car, until the model's takeover predicate
 VISION_ROLLUP_PROGRESS_M = 1.0  # V3: m a roll-up's goes must move the car for their count to start over (progress)
 TAKEOVER_WITHDRAWALS = ('gate', 'window', 'stoodAgain')  # V3: the model not taking over, which still meets GO_RETRIES
+# the holds a said line rides through (_observe), with any lane's reach ('reach:'): views catching up, not something seen
+LINE_RIDE_HOLDS = ('stale', 'calibration')
 LOOK_REASON = "Look both ways"  # the long look's line before its go
 GOING_REASON = "Going"
 NO_LIFT_REASON = "signal at the junction: the car's own go"  # V7
@@ -733,6 +738,9 @@ class StopGo:
     self.need_s = sr.CLEAR_S        # s the go conditions must hold for the go
     self.long_look: list = []       # (role, limit) of the conflicting approaches over 25 mph or of unknown speed
     self.said_t = None              # decider clock this go's line and chime were first said, said every frame since (None: not)
+    self.chimed_t: float | None = None  # ...when the last line that chimed was first said
+    self.unsaid_held = False        # the last line said was un-said by a hold (_observe)
+    self.quiet = False              # this line (and its go) a repeat inside PROMPT_REPEAT_S of a chimed one: shown, not chimed
     self.vision_top = ''            # the top hold's key last logged (stop_go_vision_wait)
     self.vision_creep_tried = False  # V9: the creep for a view started on a reach-only wait
     # the creep for a view has reached its limit (_view_limit: no room for another step, no latch to creep from, a step that
@@ -1603,11 +1611,22 @@ class StopGo:
       self.would_go_logged = True
       cloudlog.event("turnpilot.stop_go_would_go", key=list(self.key), acting=acting, why=why, t=round(self.t, 2), pos=round(pos, 2))
     # vision's go is said first (guard 5): its line and chime on VISION_ANNOUNCE_S of acting, engaged frames in a row before it,
-    # a frame that can't say it (a hold, openpilot disengaged, as shadow) ending the line; V7's later no-lift goes say nothing
+    # a frame that can't say it (a hold but a view's, below; openpilot disengaged; as shadow; a creep) ending the line; V7's
+    # later no-lift goes say nothing
     said = self.vision and not (self.no_lift and self.no_lift_said)
-    if said and acting and f.enabled and not holds and not creeping and self.clear_s >= need_s - sr.VISION_ANNOUNCE_S - 1e-6:
+    # a line said stays said while its window runs on or starts again for a view catching up (need_s steps with the views'
+    # extra_age_s at every side run; a lane's reach or a view lapsing for a run): never un-said and said again for those,
+    # for PROMPT_REPEAT_S at most. Any other hold un-says it, and the next line inside PROMPT_REPEAT_S of a chimed one is
+    # shown, not chimed (quiet: the line's waitingForCross form, as V7's silent go)
+    up = self.said_t is not None
+    ride = up and self.t - self.said_t < PROMPT_REPEAT_S - 1e-6 and all(h.key in LINE_RIDE_HOLDS or h.key.startswith('reach:')
+                                                                        for h in holds)
+    if said and acting and f.enabled and not creeping and \
+       ((not holds and (up or self.clear_s >= need_s - sr.VISION_ANNOUNCE_S - 1e-6)) or (holds and ride)):
       self._announce(d, need_s)
     else:
+      # un-said by a hold (not by the driver, a creep or shadow): the next line inside PROMPT_REPEAT_S is quiet (_announce)
+      self.unsaid_held = (up and bool(holds) and said and acting and f.enabled and not creeping) or (self.unsaid_held and not up)
       self.said_t = None
     heard = not said or (self.said_t is not None and self.t - self.said_t >= sr.VISION_ANNOUNCE_S - 1e-6)
     if not go or not acting or not f.enabled or not heard:
@@ -1645,6 +1664,7 @@ class StopGo:
     d.release = (self.key, 'clear') if ctl is not None else None
     d.go_cause = 'none' if self.no_lift else 'stopSign'  # V7: at a signal head no G5 lift, the model goes or holds by itself
     d.prompt, d.reason, d.action, d.ledger = 'stopGo', GOING_REASON, 'going', 'none'
+    self._quiet(d)
     if silent:
       d.prompt, d.reason = 'waitingForCross', "Waiting: " + NO_LIFT_REASON
     self.no_lift_said = self.no_lift_said or self.no_lift
@@ -1676,6 +1696,7 @@ class StopGo:
     self.box_next = STALL_BOX_S
     d.release = (self.key, 'clear') if ctl is not None else None
     d.go_cause, d.prompt, d.reason, d.ledger = 'clearBox', 'stopGo', GOING_REASON, 'none'
+    self._quiet(d)
     d.action, d.committed, d.detector_view, d.stops = 'committed', True, 'stopSweepGo', []
     self.said_t = None
     cloudlog.event("turnpilot.stop_go_rest_go", key=list(self.key), pos=round(pos, 2), room=round(room, 2), n=self.clear_boxes,
@@ -1698,16 +1719,29 @@ class StopGo:
   def _announce(self, d: StopGoDecision, need_s: float) -> None:
     """Vision's go said before it comes (guard 5): the stopGo prompt (its chime) with "Going", or "Look both ways" for the
     long look and for a go on a limited view (_limited_now) so the supervisor checks both ways; a hold inside it starts the
-    window again and the wait's words come back. Each line is logged once, a re-engage's its own."""
+    window again and, but for a view catching up (LINE_RIDE_HOLDS), the wait's words come back. A line said again inside
+    PROMPT_REPEAT_S of a chimed one, after a hold or a withdrawn go, is quiet (_quiet). Each line is logged once, a re-engage's
+    its own."""
+    if self.said_t is None:
+      # a line again inside PROMPT_REPEAT_S of the last chimed one, after a hold un-said it: shown, not chimed (quiet)
+      self.quiet = self.unsaid_held and self.chimed_t is not None and self.t - self.chimed_t < PROMPT_REPEAT_S - 1e-6
+      self.chimed_t = self.chimed_t if self.quiet else self.t
     d.prompt, d.reason = 'stopGo', LOOK_REASON if self.long_look or self._limited_now() else GOING_REASON
+    self._quiet(d)
     if self.said_t is None:
       self.said_t = self.t
       cloudlog.event("turnpilot.stop_go_vision_announce", key=list(self.key), clear_s=round(self.clear_s, 2), need_s=need_s,
-                     reason=d.reason, longLook=[(r, round(lim / sr.MPH, 1)) for r, lim in self.long_look])
+                     reason=d.reason, longLook=[(r, round(lim / sr.MPH, 1)) for r, lim in self.long_look], quiet=self.quiet)
+
+  def _quiet(self, d: StopGoDecision) -> None:
+    """A quiet line (_announce), and the go it says: its words on the waitingForCross prompt, the info chime off (silent)."""
+    if self.quiet and d.prompt == 'stopGo':
+      d.prompt, d.chime = 'waitingForCross', False
 
   def _going(self, f: Frame, d: StopGoDecision, pos: float) -> None:
     g = self.go
     d.detector_view, d.action, d.prompt, d.reason = 'stopSweep', 'going', 'stopGo', GOING_REASON
+    self._quiet(d)
     d.speed_cap = sr.STOP_GO_V_MAX
     d.go_t = self.t - g['t']
     if f.model_v2 is not None and self.takeover.update(f.model_v2, f.dt) and self.takeover_s < 0.:
@@ -3225,6 +3259,7 @@ class StopGo:
     self.go = None
     self.aborting = {'to': self.edges.d_min - sr.M_EDGE if to is None else to, 'why': detail or why}
     self.state, self.clear_s = 'observe', 0.
+    self.unsaid_held = True  # its next line inside PROMPT_REPEAT_S of the chimed one is quiet (_announce), as a hold's
     d.withdraw, d.prompt, d.speed_cap, d.action = why, 'waitingForCross', NO_SPEED_CAP, 'waitingCross'
     d.reason = f"Stopping short: {detail or why}"
     d.stops = [self._abort_stop(f, pos)]

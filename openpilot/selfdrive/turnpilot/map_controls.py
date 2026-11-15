@@ -449,6 +449,16 @@ CAMERA_RANGE_MAX = 150.
 # 60 m). One run's range moves about 1 m at 60 m and 2 m at 100 m for a pixel of the box
 HEAD_PLACE_M = 5.
 HEAD_PLACE_DEG = 1.
+# ...and by the reader's id only where its range reads no further than this times where the last read put it less the metres
+# driven since, and a pixel of the box (HEAD_RANGE_PX_M: about 2 m at 100 m, above): one head's own error, the most of it its
+# lit lamp's glow boxed alone moving from the top lamp to the bottom one as it turns green (two lamps of light_state.HEAD_M,
+# 0.71 m, under the 4.28 m from the camera to ASSUMED_HEAD_M: 1.20; route 29's red heads read green again 1.16 further at
+# most). A read at the reader's farthest (CAMERA_RANGE_MAX, a range it could not say) is never a head read nearer before.
+# The reader's voter holds a head to light_state.SAME_HEAD_RANGE_OUT without the car's motion; it gave a lost red head's id,
+# and its votes, to the next junction's green first boxed 1.22-1.35 times as far 0.1-1.4 s later at 11 m/s, and that green
+# let this line's camera red go on the approach (same_head, _red_heads, _red_heads_read)
+HEAD_RANGE_OUT = 1.2
+HEAD_RANGE_PX_M = 2.
 # A signal's state is its movement's (movement_state): of its heads that read a colour, those within this of the nearest one
 # (a line's heads hang from its line to CAMERA_ASSOC_PAST_M past it; a head further on is the next junction's and has no say
 # while this line's own read a colour)
@@ -1161,12 +1171,24 @@ class GreenReads:
       self.last_t <= CAMERA_STALE_S + 1e-9 and not self.dormant and (not self.bridged or self.k >= CAMERA_GREEN_BURST)
 
 
-def same_head(a, b) -> bool:
-  """Two reads (reader id or None, m, bearing or None) of the car standing are one head: the reader's id, or its place
-  (HEAD_PLACE_M, HEAD_PLACE_DEG where both carry a bearing: the reader gives a head unboxed HEAD_DROP_S a new id)."""
-  if a[0] is not None and a[0] == b[0]:
+def same_head(a, b, driven: float = 0.) -> bool:
+  """Two reads (reader id or None, m, bearing or None) are one head, b the earlier and driven the metres driven since it
+  (HEAD_PLACE_M). By its place: its range within HEAD_PLACE_M of b's less driven, and its bearing within HEAD_PLACE_DEG of
+  b's as seen from there (a head beside the road opens out as the car nears it) where both carry one; the reader gives a head
+  unboxed HEAD_DROP_S a new id. By the reader's id only where it ranges no further than one head can from there
+  (HEAD_RANGE_OUT, HEAD_RANGE_PX_M): an id never follows a box out to another mast. A read at CAMERA_RANGE_MAX is never
+  a head b read nearer."""
+  if a[1] >= CAMERA_RANGE_MAX - 1e-6 > b[1]:
+    return False
+  expect = b[1] - driven
+  if a[0] is not None and a[0] == b[0] and a[1] <= max(expect, 0.) * HEAD_RANGE_OUT + HEAD_RANGE_PX_M:
     return True
-  return abs(a[1] - b[1]) <= HEAD_PLACE_M and (a[2] is None or b[2] is None or abs(a[2] - b[2]) <= HEAD_PLACE_DEG)
+  if abs(a[1] - expect) > HEAD_PLACE_M:
+    return False
+  if a[2] is None or b[2] is None:
+    return True
+  bearing = math.degrees(math.atan2(b[1] * math.tan(math.radians(b[2])), max(expect, 1.)))
+  return abs(a[2] - bearing) <= HEAD_PLACE_DEG
 
 
 @dataclass
@@ -1467,8 +1489,8 @@ class MapControlPolicy:
     in_force = next((c.state for c in self.all_controls() if c.kind == 'signal' and signal_stopping(c.state) and
                      distance - PROTECT_BEFORE_M <= c.d <= distance + PROTECT_PAST_M), None)
     if in_force is not None:
-      # 'red' for a yellow's stop too: a yellow decided a stop is red by the time its read is lost (st.yellow is never cleared
-      # by the red after it), and the left waits for either the same way (LIGHT_WAIT_REASON)
+      # 'red' for a yellow's stop too: a yellow decided a stop is red by the time its read is lost (a lost read keeps
+      # st.yellow), and the left waits for either the same way (LIGHT_WAIT_REASON)
       return 'red'
     if self._left_red is not None and self._left_red[0] == maneuver_id:
       return 'red'  # a red or yellow read at its junction with no signal mapped there, no steady green since (_left_red_latch)
@@ -2273,9 +2295,7 @@ class MapControlPolicy:
       hid = camera.ids[i] if camera.ids is not None else None
       brg = camera.bearings[i] if camera.bearings is not None else None
       for rec in st.red_heads:
-        there = abs(dist - (rec[1] - (run_odo - rec[2]))) <= HEAD_PLACE_M and \
-          (brg is None or rec[3] is None or abs(brg - rec[3]) <= HEAD_PLACE_DEG)
-        if (hid is not None and hid == rec[0]) or there:
+        if same_head((hid, dist, brg), (rec[0], rec[1], rec[3]), run_odo - rec[2]):
           out.append(i)
           if new_run:
             rec[:] = [hid if hid is not None else rec[0], dist, run_odo, brg]
@@ -2287,7 +2307,10 @@ class MapControlPolicy:
     (ControlState.red_heads) unless already there (_red_heads placed them): the last RED_HEADS_KEPT."""
     known = set(self._red_heads(st, camera, False))
     run_odo = self._odo - self._latch_run_m
+    kept_ids = {rec[0] for rec in st.red_heads if rec[0] is not None}
     for i in idx:
+      if camera.ids is not None and camera.ids[i] in kept_ids and i not in known:
+        continue  # a kept head's reader id read at another place (same_head): its red is that head's votes, never this box's own
       if i not in known:
         st.red_heads.append([camera.ids[i] if camera.ids is not None else None, camera.heads[i][1], run_odo,
                              camera.bearings[i] if camera.bearings is not None else None])
@@ -2885,10 +2908,32 @@ class MapControlPolicy:
       cause = 'green' if st.green_t >= GREEN_STEADY_S - 1e-9 else self._camera_releases(st)
       self._signal_go(c)
       cloudlog.event("turnpilot.map_stop_released", kind=c.kind, key=list(c.key), cause=cause, d=round(c.d, 1), v=round(v, 2))
+    elif st.mode == SIGNAL_STOP and st.yellow and st.light == 'red':
+      # a stop decided on a yellow whose light now reads red is decided again as a red first read here, whatever colour
+      # raised it: a red's stop (its floor and reach, _floor, _past: -RED_DECEL, RED_PAST_M, and its re-engage rule,
+      # _approach) where one fits (red_stop_fits, or no faster than COMMIT_SPEED), else through it, said, as a late red,
+      # never a stop that ends beyond RED_PAST_M (a yellow's stop still braked here fits always: v^2/4 m to its line
+      # leaves a red's stop v^2/12 + 4 - v/2 m to spare). A lost read keeps the yellow's
+      st.yellow = False
+      if v <= COMMIT_SPEED or red_stop_fits(v, c.d):
+        if c.engaged:
+          self._check(c, v, 'red')
+        cloudlog.event("turnpilot.map_signal_decided", decision='stop', light=st.light, d=round(c.d, 1), v=round(v, 2),
+                       camera=st.camera_added, turn=st.turn_id, why='yellowToRed')
+      else:
+        st.mode, st.red_late, st.cap, st.infeasible, c.engaged = SIGNAL_COMMITTED, True, NO_SPEED_CAP, False, False
+        held_on = self._turn_stops(c)
+        if not held_on:
+          self._transient('cannotStopComfortably')
+        cloudlog.event("turnpilot.map_signal_decided", error=not held_on, decision='go', light=st.light, d=round(c.d, 1),
+                       v=round(v, 2), turn_hold=held_on, why='yellowToRed')
     elif st.light == 'red' and ((st.mode == SIGNAL_GO and (v <= COMMIT_SPEED or red_stop_fits(v, c.d))) or
-                                (st.mode == SIGNAL_COMMITTED and st.red_late and v <= COMMIT_SPEED and c.d > -RED_PAST_M)):
+                                (st.mode == SIGNAL_COMMITTED and st.red_late and v <= COMMIT_SPEED and c.d > -RED_PAST_M and
+                                 red_stop_fits(v, c.d))):
       # decided once where it is first read; a red too late to stop for that the car slows to COMMIT_SPEED short of
-      # RED_PAST_M past its line for after all (the driver's brake, the model's own) is its stop there
+      # RED_PAST_M past its line for after all (the driver's brake, the model's own) is its stop there, where that stop still
+      # ends inside RED_PAST_M (red_stop_fits): never one beyond it (an unprotected left's own hold past the line then
+      # holds the car, its latch the left's)
       st.mode, st.yellow, st.red_late, st.right_reread = SIGNAL_STOP, False, False, False
       st.accepted_stop = st.accepted == 'red'
       st.camera_added = not st.accepted_stop  # raised by the camera (add-only): its green or its red gone ends it
@@ -2985,8 +3030,9 @@ class MapControlPolicy:
       not tc.state.infeasible and not tc.state.override
 
   def _floor(self, c) -> float:
-    """The accel cap's floor of c's stop: -RED_DECEL for a read red's, MAP_DECEL_MAX for any other's (a yellow's, and a
-    curb-side turn's stop at a light nobody reads, turn_stop, too)."""
+    """The accel cap's floor of c's stop: -RED_DECEL for a read red's (one decided on a yellow too, once a red is read for it:
+    _signal_mode), MAP_DECEL_MAX for any other's (a yellow's still yellow, and a curb-side turn's stop at a light nobody
+    reads, turn_stop, too)."""
     red = c.kind == 'signal' and c.state.mode == SIGNAL_STOP and not c.state.yellow and not c.state.turn_stop
     return -RED_DECEL if red else MAP_DECEL_MAX
 

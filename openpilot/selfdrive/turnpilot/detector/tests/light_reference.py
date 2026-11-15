@@ -238,7 +238,7 @@ class ReferenceReader(LightReader):
       if r.state != 'unknown':
         self.colour_counts[r.state] += 1
       reads.append((norm, float(box[4]), r))
-    heads = self.voter.update(t, [(norm, r.state) for norm, _, r in reads])
+    heads = self.voter.update(t, [(norm, r.state, r.distance) for norm, _, r in reads])
     # the low-confidence boxes within the governing bearing past GREEN_LOW_MAX: read on a run a head reads or votes green
     # (at any confidence: the green map_controls would count), for a red or yellow among them (never a head: a third green
     # there is left unpublished too); else left unread

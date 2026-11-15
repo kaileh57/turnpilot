@@ -245,8 +245,8 @@ from openpilot.selfdrive.turnpilot.map_controls import (CAMERA_OFF_REASON, CAMER
                                                          turn_stop_feasible, unprotected_turn)
 from openpilot.selfdrive.turnpilot import stop_rules as sr
 from openpilot.selfdrive.turnpilot.control_tracker import OFF_ROUTE
-from openpilot.selfdrive.turnpilot.stop_go import MODE_DEFAULT, STOP_SWEEP_M, Frame, SignalJunctions, StopGo, StopGoDecision, junction_point, \
-  mode_for, settled_spread, side_views_live
+from openpilot.selfdrive.turnpilot.stop_go import MODE_DEFAULT, STAND_V, STOP_SWEEP_M, Frame, SignalJunctions, StopGo, StopGoDecision, \
+  junction_point, mode_for, settled_spread, side_views_live
 from openpilot.selfdrive.turnpilot.car_signals import (TurnSignalIntent, TurnSignalOut, driver_signals_for, identity_for,
                                                         read_mode, record_matches, vehicle_can_seen)
 from openpilot.selfdrive.turnpilot.lane_planner import (SAMPLE_IDX, LanePlanner, Phase, keep_blocker, lane_change_window,
@@ -1129,6 +1129,8 @@ class TurnPilot:
       self.go_lead_s = 0.                  # ...and behind a corroborated lead (NO_MOVE_MAX_S with go_wait_s)
       self.go_withdrawn = False            # the go withdrawn: the car held standing, handed back (cantStartTakeControl)
       self.left_unfollowed = False         # the left's unlifted go not followed, the model holding: back to its wait (LS-2)
+      self.left_scene_gap = False          # the left's lifted go ended by a gap in the scene (go_blocked 'scene'): its hold
+      self.left_gap_id: int | None = None  # ...that go's id (unprotected_left)
       self.go_launch_s = 0.                # s an unlifted left's go stood with the model planning motion (no_move)
       self.go_in_junction = False          # the go came with the car in the junction (go_at_line): never withdrawn
       self.go_lifted = False               # ...certified for plannerd's lift (certify_go)
@@ -1485,7 +1487,7 @@ class TurnPilot:
     elif engaged and upcoming is None:
       turn = KEEP_TURN  # the route gone with the handback: it carries on, dead-reckoned
     left_cmd = self.unprotected_left(turn, upcoming, rf, v_ego, acting, objects, raw, raw_far, enabled=bool(sm['carControl'].enabled),
-                                     model=model)
+                                     model=model, available=available)
     # the stop-sign decider before map_update, so its release, the end of shouldStop and its go land in one plan
     sg = self.sg_now = self.stop_go_update(sm, cs, model, v_ego, acting, objects, rf)
     # the stop-sign ladder's other turn in hand (stop_go: 7.1 rung 2, O12), or done in place of the route's turn here: the route's
@@ -2762,10 +2764,18 @@ class TurnPilot:
     return left_reach(*self.left_ranges(), self.far_live(route))
 
   def unprotected_left(self, turn, upcoming, rf, v_ego: float, acting: bool, objects, raw, raw_far=None,
-                       enabled: bool = True, model=None) -> LeftCommand | None:
+                       enabled: bool = True, model=None, available: bool = True) -> LeftCommand | None:
     """This frame's autonomous unprotected left (unprotected_left.py; left_now) for the route's unprotected turn the car is
     taking (turn, map_controls' tuple), and its command for the hold line's latch. TurnPilotAutoLeft off, or TurnPilot not
-    acting (handed back): off, the latch handed back as G1's. Fed the last frame's latch and scene (whether they held)."""
+    acting (handed back): off, the latch handed back as G1's. Fed the last frame's latch and scene (whether they held).
+    available: the scene this frame. The left's lifted go ended by a gap in it (go_blocked 'scene') is a hold of the scene's
+    to the left once the car is at rest (STAND_V) with that go still out where a go can be lifted (LEFT_LIFT_ROOM_M short of
+    the oncoming lanes; scene_clear false: withdrawn where it stands, a fresh window, the next go lifted again), until the
+    scene is back and the left out of its go: the lift is never given again on a go certified before the gap. A car still
+    rolling on is a go under way, as through any detector gap (the model's takeover, the left's own re-checks while it can
+    stop), and one come to rest nearer than that room is no_move's as before: withdrawn while rolling, a car that answers its
+    plan late (0.7-1.0 s) stopped up to 1 m on, inside the room, where its next go is never lifted and a model that holds
+    kept it standing for good."""
     self.far_ran = self.far_ran or raw_far is not None
     mode = self.auto_left if acting else OFF
     if not isinstance(turn, tuple) or mode == OFF:
@@ -2791,9 +2801,17 @@ class TurnPilot:
     range_m, far_range_m = self.left_ranges()  # the full pass's and the far slot's (review 2026-11-07, LN-2)
     far_edge_m, far_line_m = self.left_far_side(model, upcoming.side, rf.distance)  # the model's far side of the road
     roll_light, roll_run = self.left_roll_light(rf.maneuver_id, rf.distance)
+    gc = self.go_cert
+    if self.go_left and self.go_lifted and not gc.active and gc.end == 'scene' and gc.id == self.go_cert_id and \
+       gc.id != self.left_gap_id:
+      self.left_scene_gap, self.left_gap_id = True, gc.id
+    elif self.left_scene_gap and ((available and self.left.state != 'go') or self.left.state == 'committed'):
+      self.left_scene_gap = False
     inp = LeftInput(mode, rf.maneuver_id, upcoming.side, rf.distance, v_ego, held or stray, raw, objects, self.approach_yaw_deg,
                     upcoming.opposing_speed or None, upcoming.opposing_lanes or None, range_m,
-                    scene_clear=scene.junction is None and not scene.carried and scene.person_front is None,
+                    scene_clear=scene.junction is None and not scene.carried and scene.person_front is None and
+                    not (self.left_scene_gap and (self.left.state != 'go' or
+                                                  (v_ego < STAND_V and rf.distance - ONCOMING_ENTRY_M >= LEFT_LIFT_ROOM_M))),
                     junction_uncertain=rf.junction_spread > UNCERTAIN_M or stray,
                     go_withdrawn=self.go_withdrawn, committed=rf.maneuver_id == scene.committed_id,
                     released=rf.maneuver_id == scene.released_id,

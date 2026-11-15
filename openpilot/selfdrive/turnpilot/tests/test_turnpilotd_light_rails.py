@@ -6,6 +6,7 @@ import pytest
 from openpilot.cereal import log, messaging
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.turnpilot import map_controls as mc
+from openpilot.selfdrive.turnpilot.hooks import plan_accel
 from openpilot.selfdrive.turnpilot.tests.shipped import shipped
 from openpilot.selfdrive.turnpilot.tests.synthetic import junction_of
 from openpilot.selfdrive.turnpilot.tests.test_turnpilotd import Sim
@@ -331,3 +332,72 @@ def test_far_side_greens_the_map_cant_tie_to_the_light_hold_it_and_say_so_for_go
   alerts = [str(p.controlAlert) for t, v, g, p in rows if t >= t_green]
   onsets = [a for k, a in enumerate(alerts) if a != 'none' and (k == 0 or alerts[k - 1] != a)]
   assert onsets in ([], ['signalUnseen']), onsets
+
+
+@pytest.mark.parametrize('before', ['yellow', 'green'])
+def test_a_red_after_a_yellow_stop_is_stopped_as_a_red_when_the_driver_engages_again_near_the_line(before):
+  """The driver cancels 25 m before the signal's line and holds 6.9 m/s; the light reads red from 22 m out (after a yellow,
+  or straight from green); he engages again 7.7 m before the line on the read red, where a firm stop for it fits
+  (red_stop_fits). The car stands within RED_PAST_M of the line. A stop decided on the yellow kept the yellow's -2.0 floor
+  and no reach past the line through the red: it overran 2.2 m past the line and the car turned right through the red at
+  3 m/s (the closed-loop matrix, gate2)."""
+  line, head = 291., 315.
+  sim = shipped(Sim([(300., "turn", "right", junction_of("right")), (1500., "turn", "left", junction_of("left"))],
+                    controls=[(line, 'signal')], cruise=10.))
+  sim.answers_prompt = True
+
+  def light(s):
+    d = line - s.s
+    return 'green' if d > 70. else before if d > 22. else 'red'
+  camera(sim, lambda s: [(light(s), head)])
+  phase, engage, stood = 'on', None, False
+  sim.accel = lambda s, plan: 0. if phase == 'off' else \
+    min(plan_accel(plan.accelCap, plan.speedCap, s.v), (s.cruise - s.v) / 2., 1.5, -1. if plan.shouldStop else 1.5)
+  for _ in range(int(60. / DT_MDL)):
+    d = line - sim.s
+    if phase == 'on' and d <= 25.:
+      phase, sim.v = 'off', 6.9  # the driver's foot: openpilot off, the speed held
+    elif phase == 'off' and light(sim) == 'red' and d <= 7.7:
+      phase, engage = 'again', (d, sim.v)
+    sim.step(engaged=phase != 'off', lat_active=phase != 'off')
+    if phase == 'again' and sim.v < 0.05:
+      stood = True
+      break
+    if sim.s > line + 12.:
+      break
+  assert engage is not None and mc.red_stop_fits(engage[1], engage[0]), engage
+  went = f"went to {sim.s - line:+.1f} m past the line at {sim.v:.1f} m/s without standing"
+  assert stood and sim.s <= line + mc.RED_PAST_M, \
+    f"engaged again {engage[0]:.1f} m before the line at {engage[1]:.1f} m/s on a read red ({before} before it): the car {went}"
+
+
+def test_a_lefts_yellow_stop_meeting_its_red_at_the_line_goes_as_a_late_red_never_a_stop_past_its_reach():
+  """The matrix's gyr25|reengage lefts: decided on the yellow, the driver takes over 25 m before the signal's line and rolls
+  to it at 4.8 m/s, handing back on the red he sees; the camera's red is read a run later at the line, where no red's stop
+  fits (red_stop_fits). The signal goes through as a late red (unsaid where the left's own hold past it stops the car); it is a stop again only where
+  the car slows to COMMIT_SPEED inside RED_PAST_M (a late red's rule), never one holding it beyond. The left's own
+  handback past its hold here is HEAD's (the left's procedure, not the signal). Made a red's stop there, the signal stopped the
+  car 4.4 m past its line, beyond RED_PAST_M (the matrix's left then stood there handed back for good)."""
+  line, head = 291., 315.
+  sim = shipped(Sim([(300., "turn", "left", junction_of("left")), (1500., "turn", "right", junction_of("right"))],
+                    controls=[(line, 'signal')], cruise=10.))
+  sim.answers_prompt = True
+  camera(sim, lambda s: [('green' if line - s.s > 40. else 'yellow' if line - s.s > 0.3 else 'red', head)])
+  phase = 'on'
+  sim.accel = lambda s, plan: 0. if phase == 'off' else \
+    min(plan_accel(plan.accelCap, plan.speedCap, s.v), (s.cruise - s.v) / 2., 1.5, -1. if plan.shouldStop else 1.5)
+  modes = []
+  for _ in range(int(45. / DT_MDL)):
+    d = line - sim.s
+    if phase == 'on' and d <= 25.:
+      phase, sim.v = 'off', 4.8
+    elif phase == 'off' and d <= 0.8:
+      phase = 'again'
+    sim.step(engaged=phase != 'off', lat_active=phase != 'off')
+    sig = [c for c in sim.tp.map_controls.tracker.controls.values() if c.kind == 'signal']
+    if sig and sig[0].state is not None and sim.s > line:
+      modes.append((sig[0].state.mode, sig[0].held, sim.s - line))
+  assert modes and modes[0][0] == mc.SIGNAL_COMMITTED, modes[:1]  # unsaid here: the left's own hold stops the car (turn_hold)
+  held_past = [m[2] for m in modes if m[1] and m[2] > mc.RED_PAST_M + 0.05]
+  assert not held_past, f"the signal held the car {max(held_past):.1f} m past its line"
+

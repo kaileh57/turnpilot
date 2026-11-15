@@ -204,3 +204,20 @@ def test_the_far_greens_count_only_toward_a_stop_the_cameras_red_raised():
   car.run_until(lambda out, dec: car.s > LINE - 3., max_s=20., lights=lit)
   st = car.policy.tracker.controls[(1, 0)].state
   assert st.mode == 'go' and st.camera_green.n == 0 and not st.cam_green
+
+
+@pytest.mark.parametrize("heads", [[('green', 28., CAMERA_RANGE_LONG), ('green', 34., CAMERA_RANGE_LONG)],
+                                   [('green', 24., 1.), ('green', 28., 1.)]], ids=['farSide', 'inWindow'])
+def test_a_far_side_greens_release_lifts_the_model_exactly_as_a_window_green_does_never_on_the_camera_alone(heads):
+  # gate2: with a model that holds a standstill until lifted, a far_green release stood 20 s and handed back
+  # (go_not_certified why light). So does a release by the camera's green read in the window: the go's light for plannerd's
+  # lift (release_light, turnpilotd.release_blocked) takes a green only from an accepted source, the camera being add-only
+  # (it may add a stop, never lift the car into a phantom green). Both releases leave the same light: no lift on either
+  lights, seen = red_then(paced(45., heads)), []
+
+  def at_release(car):
+    if (1, 0) in car.policy.tracker.controls and released(car) and LINE - car.s > 0.:
+      seen.append(car.policy.release_light(LINE - car.s))
+    return lights(car)
+  car, out, dec = approach(at_release, CLEAR_LOOK_M)
+  assert released(car) and seen and set(seen) == {'unknown'}, seen
