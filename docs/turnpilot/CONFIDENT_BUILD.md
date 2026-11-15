@@ -127,8 +127,11 @@ Needs the car:
 Known and left as they are:
 
 - A stand at a green whose only read heads hang on the far side is released by `far_green` only where the map clears the
-  road beyond the junction, which needs the map server's shards to carry the OSM signal layer. Without it the car stands,
-  says "Stopped at signal: far green not matched, gas to go", and the driver's gas releases it.
+  road beyond the junction, which needs the region's shards on the map server to carry the OSM signal layer (the test
+  region's do since 2026-11-14; a corridor saved on the car before then does not until it is fetched again). Where the
+  map cannot say, the car stands, says "Stopped at signal: far green not matched, gas to go", and the driver's gas
+  releases it. Where the map itself misses a junction that has signals, that junction's green read short can release this
+  line's red: the release is only as good as the map.
 - A next junction's green 50-60 m past the line that reads a quarter short falls inside the 40 m match and can release a
   camera red whose own heads read nothing. Narrowing the match by the map was built and not landed: on the logged drive it
   delayed one stand's release 2.5 s and held a left through its green.
