@@ -13,6 +13,7 @@ the local tiles' own directory (osm_controls/ and meta.json); a valhalla_service
 always expected: a missing or stale one makes the controls' status partial, out loud. Their junctions are read against
 the surveys (maps/surveyed_junctions.json) and TurnPilotJunctionOverrides, read for each lookup (routing/junctions.py).
 """
+import shutil
 import time
 import uuid
 from collections import deque
@@ -21,8 +22,8 @@ from pathlib import Path
 
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.turnpilot.maps import corridor
-from openpilot.selfdrive.turnpilot.maps.client import MapClient, MapError, Throttle, storage_error
-from openpilot.selfdrive.turnpilot.maps.coverage import CoverageCache, check_trip, no_coverage, refresh
+from openpilot.selfdrive.turnpilot.maps.client import MapClient, MapError, Throttle, storage_error, write_atomic
+from openpilot.selfdrive.turnpilot.maps.coverage import CoverageCache, check_trip, coverage_path, no_coverage, refresh
 from openpilot.selfdrive.turnpilot.maps.geofence import Region
 from openpilot.selfdrive.turnpilot.maps.paths import maps_dir
 from openpilot.selfdrive.turnpilot.maps import surveys
@@ -33,6 +34,7 @@ from openpilot.selfdrive.turnpilot.routing.valhalla_source import ValhallaSource
 from openpilot.selfdrive.turnpilot.stop_rules import MAX_AVOID_ITER
 
 PACKS_DIR = 'corridors'
+BUILD_FILE = 'build'  # the build (GitCommit) the saved maps were fetched under (clear_on_update)
 CONFIG_KEYS = ('TurnPilotMapHost', 'TurnPilotMapKey', 'TurnPilotMapCert')
 RETRY_SECONDS = 30.  # between downloads after one that could work on a retry (a network blip)
 REFUSED_RETRY_SECONDS = 300.  # after a refusal (422, bad key, bad TLS, bad pack, comma storage), unless the destination or settings change
@@ -72,12 +74,40 @@ def cancelled_error() -> MapError:
   return MapError(CANCELLED, "The destination changed during the map download.", 'Map download cancelled')
 
 
+def clear_on_update(params, directory: Path | None = None) -> bool:
+  """An updated build starts with no saved maps: the saved corridors and the cached coverage go when the build (GitCommit)
+  is not the one they were fetched under, so the next route downloads its corridor afresh with whatever the map server
+  carries now (a saved pack is otherwise reused for the same trip for as long as the map's coverage version stands, and a
+  new build may read layers an old pack lacks). The map server's settings and certificate stay. Nothing is cleared while
+  the build is unknown. Returns whether it cleared."""
+  root = directory or maps_dir()
+  commit = params.get('GitCommit') or ''
+  commit = commit.decode(errors='replace') if isinstance(commit, bytes) else str(commit)
+  marker = root / BUILD_FILE
+  try:
+    was = marker.read_text().strip()
+  except (OSError, ValueError):
+    was = ''
+  if not commit or was == commit:
+    return False
+  try:
+    shutil.rmtree(root / PACKS_DIR, ignore_errors=True)
+    coverage_path(directory).unlink(missing_ok=True)
+    write_atomic(marker, commit.encode())
+  except OSError as e:  # the comma's storage: the saved maps stay as they are, tried again at the next start
+    cloudlog.error(f"turnpilot maps: could not clear the saved maps for the new build: {type(e).__name__}: {e}")
+    return False
+  cloudlog.event("turnpilot.maps_cleared_for_build", was=was[:12], build=commit[:12])
+  return True
+
+
 class MapRouter:
   """navd's route source. route() returns the steps or raises a MapError; the status param says what happened."""
 
   def __init__(self, params, directory: Path | None = None, client_factory=MapClient.from_params, valhalla=ValhallaSource):
     self.params = params
     self.directory = directory
+    clear_on_update(params, directory)  # before the coverage cache reads what is saved
     self.client_factory = client_factory
     self.valhalla = valhalla
     self.status = NavStatus(params)

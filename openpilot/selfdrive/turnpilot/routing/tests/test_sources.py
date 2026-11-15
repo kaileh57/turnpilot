@@ -914,3 +914,33 @@ def test_an_override_is_added_to_what_is_there_and_never_written_over_a_value_th
   assert not ok and 'unknown' in why
   assert write_override(None, seen)[0] is False
   assert write_override(real, [{'approach': 'nope', 'kind': 'signalSeen'}])[0] is False
+
+
+def test_an_updated_build_starts_with_no_saved_maps_and_the_same_build_keeps_them(tmp_path):
+  """Owner, 2026-11-14: clear all map data when the car updates. A corridor saved under another build is otherwise reused
+  for the same trip, without the layers the map server has gained since (the signal layer the far-side green needs)."""
+  from openpilot.selfdrive.turnpilot.maps.coverage import coverage_path
+  from openpilot.selfdrive.turnpilot.routing.sources import BUILD_FILE, PACKS_DIR, clear_on_update
+
+  def saved():
+    pack = tmp_path / PACKS_DIR / 'abc'
+    pack.mkdir(parents=True, exist_ok=True)
+    (pack / 'manifest.json').write_text('{}')
+    coverage_path(tmp_path).write_text('{}')
+    (tmp_path / 'cert.pem').write_text('pem')
+    return pack
+  pack = saved()
+  assert not clear_on_update(params_of({}), tmp_path) and pack.exists()  # the build unknown: nothing cleared
+  assert clear_on_update(params_of({'GitCommit': 'a' * 40}), tmp_path)   # the first start of a build: cleared
+  assert not (tmp_path / PACKS_DIR).exists() and not coverage_path(tmp_path).exists()
+  assert (tmp_path / 'cert.pem').read_text() == 'pem' and (tmp_path / BUILD_FILE).read_text() == 'a' * 40
+  pack = saved()
+  assert not clear_on_update(params_of({'GitCommit': 'a' * 40}), tmp_path) and pack.exists()  # the same build: kept
+  assert clear_on_update(params_of({'GitCommit': b'b' * 40}), tmp_path) and not pack.exists()  # another build: cleared
+
+
+def test_the_router_clears_the_saved_maps_of_another_build_when_it_starts(tmp_path):
+  from openpilot.selfdrive.turnpilot.routing.sources import PACKS_DIR, MapRouter
+  (tmp_path / PACKS_DIR / 'abc').mkdir(parents=True)
+  MapRouter(params_of({'GitCommit': 'c' * 40}), tmp_path, valhalla=None)
+  assert not (tmp_path / PACKS_DIR).exists()
