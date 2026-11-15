@@ -21,7 +21,10 @@ Desire = log.Desire
 
 
 def right_turn():
-  sim = shipped(Sim([(JUNCTION, "turn", "right", junction_of("right")), (1900., "turn", "left", junction_of("left"))], controls_status='ok'))
+  # a right into a side road (navd: the one other road straight on): the look leaves it at its corner speed, so it crosses
+  # its hold line committed as the premise below needs (junction_of("right") until 2026-11-14: the look walks that one in)
+  sim = shipped(Sim([(JUNCTION, "turn", "right", junction_of("right", branches=1)), (1900., "turn", "left", junction_of("left"))],
+                    controls_status='ok'))
   sim.answers_prompt = True
   return sim
 

@@ -114,7 +114,7 @@ def test_skip_ends_with_the_maneuver():
 def test_following_the_cap_never_skips(modifier, angle, cruise):
   # from town or highway speed, a car that follows the turn speed cap is always under the feasibility curve
   sim = Sim([left_at(800., angle, modifier=modifier), left_at(2500., angle, modifier=modifier)], cruise=cruise)
-  sim.run(80., turn_at=800.)
+  sim.run(90., turn_at=800.)  # (80 s until 2026-11-14: a right at a junction nothing controls walks its look, about 5 s)
   assert sim.s > 820.
   assert not any(plan.tooFastToTurn for _, _, plan in sim.trace)
   desire = Desire.turnLeft if modifier == "left" else Desire.turnRight

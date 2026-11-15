@@ -158,7 +158,7 @@ def test_a_t_stems_left_through_a_gap_in_the_route_pulses_and_holds_for_cross_tr
   # the matrix's +3 R2 against 31581b3dd (left_nocontrol_T|crossL/crossR|navInvalid25): its turn desire's repeat and entry
   # edges with the cross car tracked are the route-valid run's, 0.6 s later (the first pulse waits for the route back); the
   # older tree skipped this turn in the gap, so it had none to flag. The cross hold stays in force
-  from openpilot.selfdrive.turnpilot.scene_policy import CROSS_REASON
+  from openpilot.selfdrive.turnpilot.scene_policy import CROSS_REASON, LOOK_REASON
   from openpilot.selfdrive.turnpilot.tests import test_turnpilotd_cross_traffic as ct
   cross_at = ct.meets('left', frm)
 
@@ -178,10 +178,15 @@ def test_a_t_stems_left_through_a_gap_in_the_route_pulses_and_holds_for_cross_tr
   _, valid, valid_rises = run(False)
   sim, rows, rises = run(True)
   assert not any(rows[k][4] for k in rises)  # nothing pulsed while the route is gone
-  assert len(rises) == len(valid_rises)
-  edge = ct.JUNCTION - 3.6
+  # the same edges but for the last: at the look's walking pace (scene_policy, 2026-11-14) the desire repeats on its own clock
+  # four or five times on the approach, and the gap's 0.6 s shift can move the last repeat past the run's end
+  assert abs(len(rises) - len(valid_rises)) <= 1, (len(rises), len(valid_rises))
+  # short of the lane the cross car comes along: for one in the far lane its centre line (until 2026-11-14 the near edge: the
+  # look now walks the left into the near lane before a car SEEN_S out is tracked, and stops it short of the far lane)
+  edge = ct.JUNCTION - 3.6 if frm == 'left' else ct.JUNCTION
   for r in (valid, rows):
     assert ct.bumper_as_it_crosses([x[:4] for x in r], cross_at) < edge
-    held = [x for x in r if str(x[3].reason) == CROSS_REASON]
+    # held by the hold or, for a far-lane car past the hold's commit point, by the look's own stop ("Look both ways")
+    held = [x for x in r if str(x[3].reason) == CROSS_REASON or (str(x[3].reason) == LOOK_REASON and float(x[3].speedCap) < 1.)]
     assert held and held[0][0] < cross_at - 2.5
   assert sim.s >= ct.JUNCTION + 20. and not said([x[3] for x in rows])

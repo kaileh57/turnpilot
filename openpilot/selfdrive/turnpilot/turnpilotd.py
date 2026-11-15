@@ -265,11 +265,13 @@ from openpilot.selfdrive.turnpilot.junction_watch import (SWEEP_V_MAX, JunctionW
 from openpilot.selfdrive.turnpilot import visibility_table
 from openpilot.selfdrive.turnpilot.maps import surveys as survey_file
 from openpilot.common.time_helpers import system_time_valid
-from openpilot.selfdrive.turnpilot.scene_policy import (CONFIRM_STEADY_HITS, CROSSWALK_REASON, CROSSWALK_X_AFTER_M, CROSSWALK_X_BEFORE_M,
+from openpilot.selfdrive.turnpilot.scene_policy import (CONFIRM_STEADY_HITS, CROSS_ENTRY_M, CROSSWALK_REASON, CROSSWALK_X_AFTER_M, CROSSWALK_X_BEFORE_M,
                                                          CROSSWALK_Y_FAR_M, CROSSWALK_Y_NEAR_M, CURB_PED_CAP_DEFAULT, CURB_PED_EDGE_M, CURB_PED_X_M,
-                                                         HOLD_LINE_M, NO_ACCEL_CAP, ONCOMING_ENTRY_M, PATH_HALF_WIDTH_M, PERSON_FRONT_BUMPER_M,
+                                                         HOLD_LINE_M, LOOK_FIRST_S, LOOK_M, LOOK_MAX_S, LOOK_REASON, LOOK_RUNS, NO_ACCEL_CAP, ONCOMING_ENTRY_M,
+                                                         PATH_HALF_WIDTH_M, PERSON_FRONT_BUMPER_M,
                                                          PERSON_FRONT_HALF_M, PERSON_FRONT_NOTE, PERSON_FRONT_X_M, STOP_DECEL, VEHICLES, ScenePolicy,
-                                                         cross_hold_stop, far_side_turn, in_path, velocity_trusted)
+                                                         cross_hold_stop, far_side_turn, in_path, look_blocks, look_cap, look_end_m, look_junction,
+                                                         look_stop, look_tracks_block, look_views, velocity_trusted)
 from openpilot.selfdrive.turnpilot.turn_skip import (CURB_FIRST_PULSE_M, STOP_BEFORE_TURN_M, SkipState, TurnSkip,
                                                       can_make_turn)
 from openpilot.selfdrive.turnpilot.turn_speed import (LEFT_GO_PROFILE, NO_SPEED_CAP, POST_GO_DEFAULT, POST_GO_PROFILES, TURN_CAP_LEAD_M, PostGo,
@@ -937,6 +939,9 @@ class TurnPilot:
     self.go_own_cap: float | None = None  # m/s: a creep go's own creep cap, which isn't a hold that blocks it (go_blocked)
     self.sweeping = False  # the last plan asked modeld for a stop sweep (stopSweep, stopSweepGo) or a side look: the tracker coasts longer
     self.cross_look = False  # this frame: a turn at an uncontrolled junction whose cross-traffic hold could stand the car
+    self.look: dict | None = None  # the look of the turn at an uncontrolled junction (cross_look_state), its maneuver's
+    self.look_branch: tuple | None = None  # (maneuver id, navd's maneuverBranches for it) once read for that maneuver
+    self.look_reason = ''  # this frame: the look's status line (scene_policy.LOOK_REASON) while it slows the car or waits
     self.driven_node: tuple | None = None  # (key, m from its stop point to its node) of a stop line the driver crossed
     self.side_look_on = False  # the last plan asked for the side look
     self.right_side_runs: dict = {}  # side view -> its runs in a row that saw the right-on-red look's lanes clear
@@ -1658,8 +1663,13 @@ class TurnPilot:
     # the cross-traffic hold of a turn at an uncontrolled junction could stand the car here: its side look's frames
     self.cross_look = (cross_yield and bool(cross_hold_stop(scene_m, scene_d, v_ego))) or \
       (cross_at is not None and bool(cross_hold_stop(*cross_at[:2], v_ego)))
+    # ...and the look of the turn TurnPilot is taking there (its corner cap's): a yield, walking pace, the side views asked
+    # (through a route gap on the corner cap kept for it, as the cap is: never sped up into the junction by the gap)
+    look_m = cap_on if (cross_yield and cap_on is scene_m) or (not rf.valid and self.gap_cap is not None and not alt_on) else None
+    look_stops, look_v = self.cross_look_state(sm, rf.maneuver_id, look_m, cap_d, v_ego, objects, right_hand_traffic, scene_yaw)
+    self.cross_look = self.cross_look or (self.look is not None and look_v < NO_SPEED_CAP)
     decision = self.scene_now = self.scene.update(objects, available, scene_m, scene_d, v_ego, right_hand_traffic, scene_id,
-                                                 took_over, extra_stops=mapd.stops + left_stops + sg.stops, heading_deg=scene_yaw,
+                                                 took_over, extra_stops=mapd.stops + left_stops + sg.stops + look_stops, heading_deg=scene_yaw,
                                                  path=predicted_path(model), extra_objects=extra_objects if available else (),
                                                  driver=not sm['carControl'].enabled or cs.gasPressed,
                                                  raw_people=self.people_in_front(model),
@@ -1860,7 +1870,7 @@ class TurnPilot:
       self.gap_ahead = (rf.ahead, rf.ahead_distance, 0.) if ahead_on and rf.ahead is not None else None
     ahead_cap = turn_speed_cap(ahead_m, ahead_d, v_ego, right_hand_traffic) if ahead_on else NO_SPEED_CAP
     plan.speedCap = min(decision.speed_cap, turn_speed_cap(cap_on, cap_d, v_ego, right_hand_traffic), ahead_cap, gap_cap,
-                        NO_SPEED_CAP if self.hold_v is None else self.hold_v)
+                        NO_SPEED_CAP if self.hold_v is None else self.hold_v, look_v)
     plan.shouldStop = decision.should_stop
     # a go's post-go profile is its turn's: the turn skipped since (a signal veto, its lane, too late), the car goes straight on
     # the model and the skip's own cap holds it (skip_cap_id: the corner cap to the pass where its desire was out or it was in
@@ -2021,7 +2031,7 @@ class TurnPilot:
     reader = mapd.reason if reader_line else ''
     onset = reader if reader_line == 'onset' and not decision.hard_brake else ''
     plan.reason = onset or decision.reason or (TURN_MISSED_REASON if plan.turnMissed else "") or reader or lane_reason or \
-      mapd.reason or (HAZARDS_REASON if hazards_hold else "") or (NO_JUNCTION_DATA_REASON if no_junction_data else "")
+      mapd.reason or (HAZARDS_REASON if hazards_hold else "") or self.look_reason or (NO_JUNCTION_DATA_REASON if no_junction_data else "")
     fill_map_control(plan, mapd)
     self.route_starting(sm, plan, v_ego)
     self.fill_left(plan, decision)
@@ -3943,6 +3953,96 @@ class TurnPilot:
        any(distance - PROTECT_BEFORE_M <= c.d <= distance + PROTECT_PAST_M for c in mc.tracker.controls.values()):
       return False
     return not self.left_heads_here(distance)
+
+  def look_branches(self, sm, maneuver_id: int, maneuver) -> int | None:
+    """navd's maneuverBranches for the follower's maneuver (its bearings navd's this message's), kept for its id; None not known."""
+    ni = sm['navInstruction']
+    if sm.valid['navInstruction'] and ni.maneuverGeometryValid and maneuver.geometry and len(maneuver.bearings) == 2 and \
+       abs(float(ni.maneuverBearingBefore) - maneuver.bearings[0]) < 0.5 and abs(float(ni.maneuverBearingAfter) - maneuver.bearings[1]) < 0.5:
+      self.look_branch = (maneuver_id, int(ni.maneuverBranches))
+    return self.look_branch[1] if self.look_branch is not None and self.look_branch[0] == maneuver_id else None
+
+  def cross_look_state(self, sm, maneuver_id: int, maneuver, distance: float, v_ego: float, objects, right_hand_traffic: bool,
+                       heading_deg: float) -> tuple[list, float]:
+    """The look of a turn TurnPilot is taking at a junction nothing is known to control (uncontrolled_turn) into or across a road
+    whose traffic it has no priority over (scene_policy.look_junction; module docstring there): (its stops, its speed cap).
+    Walking pace (look_cap) from LOOK_M until it is done, the side views asked (cross_look, its runs counted while the last
+    plan asked them); done once each side view that matters (look_views) has had LOOK_RUNS runs in a row boxing no cross car
+    (look_blocks), the cap gone from there. Until then a stop short of the cross road's near lane (look_stop), unless every
+    view not done has given no run for CADENCE_FRESH_MAX_S (its first LOOK_FIRST_S; no room on the device), or the look has
+    waited LOOK_MAX_S: then
+    walking pace alone, on the forward passes, until the car is in the lane it turns into (look_end_m), the stop only while a
+    track the look waits for is tracked (look_tracks_block) and the car not yet committed (look_stop). Not an unprotected
+    turn's (map_controls.unprotected_turn: a far-side turn across an oncoming approach, its own line, gap and go, whether the
+    autonomous left drives it or its line's latch holds it), nor one the left has in hand."""
+    self.look_reason = ''
+    end = look_end_m(maneuver, right_hand_traffic) if maneuver is not None else 0.
+    lk = self.look if self.look is not None and self.look['id'] == maneuver_id else None
+    if lk is not None and lk['d0'] is not None:
+      # the junction no nearer than its reading where the look first slowed the car, dead-reckoned: a GPS jump forward never
+      # ends the look short of it (the follower's distance read 8 m past a T's left 14 m out under a 20 m jump, and the look let
+      # the car go at its corner speed). Anchored there, 20-30 m out, not where the turn came up: the odometer's drift stays small
+      distance = max(distance, lk['d0'] - (self.scene.odo - lk['odo0']))
+    on = maneuver is not None and maneuver.kind == TURN and distance >= end and \
+      not unprotected_turn(maneuver, right_hand_traffic) and not (self.left_now is not None and self.left_now.state != 'off') and \
+      self.uncontrolled_turn(maneuver, distance) and \
+      look_junction(maneuver, self.look_branches(sm, maneuver_id, maneuver))
+    if not on:
+      if self.look is not None and self.look['id'] == maneuver_id and not self.look['done'] and distance < end:
+        cloudlog.event("turnpilot.cross_look_end", why='inLane', look_s=self.look['t'], runs=self.look['runs'], v_ego=round(v_ego, 2))
+        self.look['done'] = True
+      if self.look is not None and self.look['id'] != maneuver_id:
+        self.look = None
+      return [], NO_SPEED_CAP
+    if lk is None:
+      # one first known inside the cross road's near lane (a light head read behind the car until then: left_heads_here) is
+      # none: its walk would only brake the car in the lanes (matrix left_right_60: 3.0 to 1.5 m/s at the node)
+      lk = self.look = {'id': maneuver_id, 't': None, 'runs': {}, 'age': {}, 'done': distance < CROSS_ENTRY_M, 'blind': False,
+                        'd0': None, 'odo0': 0.}
+    if not lk['done'] and self.scene.released_id == maneuver_id:  # the driver took over at it: his, as its junction holds are
+      lk['done'] = True
+      cloudlog.event("turnpilot.cross_look_end", why='driver', look_s=lk['t'], distance=round(distance, 1), v_ego=round(v_ego, 2))
+    if lk['done']:
+      return [], NO_SPEED_CAP
+    views = look_views(maneuver, right_hand_traffic)
+    if self.side_look_on:
+      if lk['t'] is None:
+        cloudlog.event("turnpilot.cross_look", maneuver_id=maneuver_id, distance=round(distance, 1), v_ego=round(v_ego, 2), views=list(views))
+      lk['t'] = 0. if lk['t'] is None else lk['t'] + DT_MDL
+      for view in views:
+        lk['age'][view] = lk['age'].get(view, 0.) + DT_MDL
+      for run in self.runs_now:
+        view, raw = run[0], run[2]
+        if view in views and raw is not None:
+          blocked = look_blocks(raw.boxes, objects, maneuver, distance, v_ego, right_hand_traffic, heading_deg)
+          lk['runs'][view] = 0 if blocked else lk['runs'].get(view, 0) + 1
+          lk['age'][view] = 0.
+    tracked = look_tracks_block(objects, maneuver, distance, v_ego, right_hand_traffic, heading_deg)
+    if all(lk['runs'].get(v, 0) >= LOOK_RUNS for v in views) and not tracked:
+      lk['done'] = True
+      cloudlog.event("turnpilot.cross_look_end", why='clear', look_s=round(lk['t'], 2), distance=round(distance, 1), v_ego=round(v_ego, 2))
+      return [], NO_SPEED_CAP
+    blind = lk['t'] is not None and (lk['t'] > LOOK_MAX_S or
+                                     all(lk['runs'].get(v, 0) >= LOOK_RUNS or
+                                         lk['age'].get(v, 0.) > (CADENCE_FRESH_MAX_S if v in lk['runs'] else LOOK_FIRST_S) for v in views))
+    if blind and not lk['blind']:
+      cloudlog.event("turnpilot.cross_look_blind", look_s=round(lk['t'], 2), distance=round(distance, 1), runs=lk['runs'],
+                     waited=lk['t'] > LOOK_MAX_S)
+    lk['blind'] = blind
+    cap = look_cap(distance, v_ego)
+    if lk['d0'] is None and (cap < v_ego + 0.5 or distance <= LOOK_M):
+      lk['d0'], lk['odo0'] = distance, self.scene.odo
+    # from where the car walks (its line said from there): short of the near lane until the look is done (blind: only while a
+    # track the look waits for is tracked), and short of a far-side turn's far lane while only a far-lane car is
+    stops = []
+    if distance <= LOOK_M:
+      if tracked == 'near' or (tracked == '' and not blind):
+        stops += look_stop(distance, v_ego)
+      if tracked == 'far':
+        stops += look_stop(distance, v_ego, True) + ([] if blind else look_stop(distance, v_ego))
+    if stops or cap < v_ego + 0.5 or distance <= LOOK_M:
+      self.look_reason = LOOK_REASON
+    return stops, cap
 
   def driven_stop_cross(self, maneuver, distance: float, heading_deg: float, right_hand_traffic: bool, engaged: bool):
     """A stop sign's line the driver took the car over (map_controls.Driven, driver: his pedal, openpilot off; its crossing

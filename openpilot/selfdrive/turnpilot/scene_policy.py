@@ -59,6 +59,19 @@ the oncoming one, the car to stop short of the cross road's near lane (cross_hol
 a vehicle is tracked and CROSS_CLEAR_S after the last one seen closing by its own motion (the go's clear window), so an
 empty road never stands the car and nothing is handed back for it. A stop sign's line the driver took the car over (openpilot
 off, his crossing never said) is, re-engaged, such a junction for its cross traffic too (update's cross_at, _driven_cross).
+The look: such a turn is approached as a yield wherever it enters or crosses a road whose traffic it has no priority over
+(look_junction: every junction but a turn off the car's own road into a side street that ends there, as navd's junction data
+says; in doubt, looked), an unprotected turn's own procedure excepted (its line, gap and go: turnpilotd.cross_look_state). On a collision course a
+crossing car keeps one bearing, atan(its speed / ours): at a right's 3.0 m/s or a left's 4.6 m/s a car on the cross road at
+9-13 m/s stays at 70-77 deg the whole way in, past the wide camera's view, and the side views, which see it, run only at
+walking pace. So the car comes down to LOOK_V (under modeld's SIDE_VIEW_V_MAX, so the side look is asked and runs) by LOOK_M
+(look_cap), LOOK_S before LOOK_STOP_M, where a stop from LOOK_V still ends short of the cross road's near lane; while it looks,
+cross_stops holds it for every crossing car tracked, as ever ("waiting for cross traffic"), and the status line says
+LOOK_REASON, no chime, no prompt. It goes on, never having stopped if nothing is seen, once each side view that matters
+(look_views) has had LOOK_RUNS runs in a row with no cross car boxed (look_blocks); until then it stops short of the lane
+(look_stop), at most LOOK_MAX_S. A side view giving no run for visibility.CADENCE_FRESH_MAX_S (no room on the device) is not
+waited for: the car goes on at LOOK_V on the forward passes until it is in the lane it turns into (look_end_m), so an unseen
+car meets a car at walking pace that the driver can stop.
 
 Objects are TurnpilotScene.TrackedObject (or anything with the same fields): x m forward, y m LEFT in the
 calibrated frame, vx/vy over-ground velocity in that frame (ego motion removed), cls compared by name, inPath
@@ -254,6 +267,10 @@ CROSS_Y_NEAR_M = 13.
 # m before the maneuver point the car stops by, short of the cross road's near lane: a lane's width from the node (3.7) and
 # the camera's setback from the bumper (1.9). Past where it can, on the comfortable curve, it finishes the turn
 CROSS_ENTRY_M = 6.
+# ...and, for a far-side turn's car coming along the cross road's far lane, short of that lane: the node (the far lane's near
+# edge on a two-lane road) and the camera's setback (look_stop). A walking far-side turn is committed by ONCOMING_ENTRY_M
+# (committed_past_line), the hold let go, and walked on into the far lane ahead of the car it held for (Sim, 2026-11-14)
+CROSS_FAR_ENTRY_M = 2.
 CROSS_CLEAR_S = sr.VISION_CLEAR_S  # s with no vehicle closing before the hold lets go: the stop-sign go's clear window
 # a junction the car is in (ScenePolicy._driven_cross): for its first DRIVEN_DOUBT_S (the held cycle's VEL_TRUST_HITS) a new
 # track off our own road's lanes (one lane each way and the half lane to the path's edge: DRIVEN_NEAR_M) holds as one
@@ -261,6 +278,28 @@ CROSS_CLEAR_S = sr.VISION_CLEAR_S  # s with no vehicle closing before the hold l
 DRIVEN_DOUBT_S = 2.5
 DRIVEN_NEAR_M = 6.
 DRIVEN_OVERRUN_M = 1.           # m past its decided stop point the comfortable curve may carry the car before it is judged afresh
+# the look (module docstring: a turn into or across a road with no control known is a yield; turnpilotd.cross_look_state)
+LOOK_REASON = "Look both ways"
+LOOK_V = sr.STOP_GO_V_MAX - 0.5  # m/s: under modeld's SIDE_VIEW_V_MAX (2.0), less the car's trail of a speed cap
+LOOK_RUNS = 3                    # side runs in a row of each side view that matters seeing no cross car (map_controls.RIGHT_RED_SIDE_RUNS)
+LOOK_RUN_S = 0.5                 # s between one side view's runs on the shipping stand schedule (0.40-0.50 s)
+LOOK_S = (LOOK_RUNS + 1) * LOOK_RUN_S  # s the look takes: the first run's slot, then LOOK_RUNS runs
+# m before the maneuver point the look must be done by: a stop from LOOK_V on the comfortable curve (the curve's lead
+# STOP_LAG_S, then STOP_DECEL) still ends short of the cross road's near lane (CROSS_ENTRY_M): 8.25 m
+LOOK_STOP_M = CROSS_ENTRY_M + LOOK_V * STOP_LAG_S + LOOK_V ** 2 / (2. * STOP_DECEL)
+LOOK_M = LOOK_STOP_M + LOOK_V * LOOK_S  # m: at LOOK_V by here, LOOK_S before LOOK_STOP_M: 11.25 m
+LOOK_LEAD_S = 1.5                # s the look cap's curve leads the car (look_cap)
+# m past the maneuver point (negative: before it) a look with no side view arriving walks the car to: into the lane it turns
+# into, the cross road's near lane for a curb-side turn (the node), its far lane for a far-side one (a lane past the node).
+# Lifted at the cross hold's commit point (ONCOMING_ENTRY_M) the car met an unseen car at 2.4-4.5 m/s, accelerating to its
+# corner speed while still in the lanes (rails sweep, noroom)
+LOOK_END_CURB_M = 0.
+LOOK_END_FAR_M = -sr.LANE_W_MAX
+LOOK_MAX_S = 6.                  # s a look waits on side boxes no hold is for (a standing car is side-trusted within about 4 s)
+# s a side view's first run may take after the look is asked before the view is taken as not arriving (CADENCE_FRESH_MAX_S
+# after that): modeld's stand schedule starts STAND_STARVED_S (0.3 s) after the ask, and a drive's first side maps take
+# 0.55-1.35 s to upload (matrix stand10: the first side runs 1.5 s after the ask)
+LOOK_FIRST_S = 1.5
 
 # the curb-pedestrian speed cap (module docstring): TurnPilotCurbPedCap (turnpilotd main()), ScenePolicy.curb_cap
 CURB_PED_CAP_DEFAULT = True
@@ -623,6 +662,104 @@ def cross_stops(objects, maneuver, distance, v_ego, right_hand_traffic, may_hard
     if trusted or not holds:  # the hold says which vehicle it is for: one whose motion is the tracker's before a new track
       holds = hold(False, track_evidence(obj))
   return holds
+
+
+def look_junction(maneuver, branches: int | None) -> bool:
+  """A turn's junction has a road whose traffic crosses or enters the turn's path, so a turn there with no control known is
+  looked (module docstring): every junction but one where navd's junction data says the one other road is the car's own
+  going on straight (opposing present, one branch besides the roads the route comes in and leaves by), a turn off it into a
+  side street that ends there. branches: navd's maneuverBranches for this maneuver, None not known: in doubt, looked."""
+  if maneuver is None or maneuver.kind != TURN:
+    return False
+  return not (maneuver.geometry and maneuver.opposing == 'present' and branches == 1)
+
+
+def look_views(maneuver, right_hand_traffic: bool) -> tuple:
+  """The side views a turn's look needs runs of: those of cross_stops' sides, both for a far-side turn, the side away from the
+  turn for a curb-side one."""
+  if far_side_turn(maneuver, right_hand_traffic):
+    return ('sideLeft', 'sideRight')
+  return ('sideRight',) if maneuver.side == LEFT else ('sideLeft',)
+
+
+@dataclass
+class LookBox:
+  """A side view's vehicle box taken as a new track (cross_stops' fields), for look_blocks."""
+  x: float
+  y: float
+  cls: str
+  vx: float = 0.
+  vy: float = 0.
+  age: int = 0
+  trackId: int = -1
+  conf: float = 0.
+  camera: str = 'wide'
+  inPath: bool = False
+
+
+LOOK_BOX_MATCH_M = 3.  # m a side view's box is from the track it is taken for (map_controls.RIGHT_RED_BOX_MATCH_M)
+
+
+def look_tracks_block(objects, maneuver, distance: float, v_ego: float, right_hand_traffic: bool, heading_deg: float = 0.) -> str:
+  """A published vehicle track the look waits for: one cross_stops would hold for, a new one taken as closing from DRIVEN_NEAR_M
+  off our axis rather than CROSS_Y_NEAR_M. The hold's near band is for a car "too late for the comfortable curve to matter",
+  true at a corner speed and not at LOOK_V, which stops in 2.25 m: at walking pace the wide pass first boxes a car crossing
+  from the side about 12 m up its road (matrix stand10, a car first side-boxed 18 m up: the hold let it go at 12 m, 1.3 s
+  from our path, and the look ended with it in front of the car), as _driven_cross's doubt takes it. A far-side turn's car
+  along the far lane (from the side away from the turn) is judged to CROSS_FAR_ENTRY_M: the turn is committed past
+  ONCOMING_ENTRY_M (committed_past_line), still short of that lane. 'near' when any track but those holds, 'far' when only
+  far-lane ones do, '' none."""
+  v, far_side = max(v_ego, 0.), far_side_turn(maneuver, right_hand_traffic)
+  far = [o for o in objects if far_side and o.y * maneuver.side < 0.]
+  near = [o for o in objects if not (far_side and o.y * maneuver.side < 0.)]
+  if near and cross_stops(near, maneuver, distance, v, right_hand_traffic, lambda obj: False, heading_deg, DRIVEN_NEAR_M):
+    return 'near'
+  if far and distance >= CROSS_FAR_ENTRY_M and \
+     cross_stops(far, maneuver, distance, v, right_hand_traffic, lambda obj: False, heading_deg, DRIVEN_NEAR_M, distance - CROSS_FAR_ENTRY_M):
+    return 'far'
+  return ''
+
+
+def look_blocks(boxes, objects, maneuver, distance: float, v_ego: float, right_hand_traffic: bool, heading_deg: float = 0.) -> bool:
+  """A side view's run saw a vehicle the look would wait for taking its box as a new track (look_tracks_block), and no published
+  track within LOOK_BOX_MATCH_M of it that the hold finds clear by its own motion explains it: a car boxed on one run and not yet
+  published, or boxed again after a missed pass, is a car."""
+  for b in boxes:
+    if str(b.cls) not in VEHICLES or b.xy is None:
+      continue
+    x, y = float(b.xy[0]), float(b.xy[1])
+    if not look_tracks_block([LookBox(x, y, str(b.cls))], maneuver, distance, v_ego, right_hand_traffic, heading_deg):  # '' none
+      continue
+    near = [o for o in objects if str(o.cls) in VEHICLES and math.hypot(o.x - x, o.y - y) < LOOK_BOX_MATCH_M]
+    if not any(velocity_trusted(o) and not look_tracks_block([o], maneuver, distance, v_ego, right_hand_traffic, heading_deg) for o in near):
+      return True
+  return False
+
+
+def look_end_m(maneuver, right_hand_traffic: bool) -> float:
+  """m to the maneuver point the look's walking pace ends at with no side view arriving (LOOK_END_CURB_M, LOOK_END_FAR_M)."""
+  return LOOK_END_FAR_M if far_side_turn(maneuver, right_hand_traffic) else LOOK_END_CURB_M
+
+
+def look_cap(distance: float, v_ego: float) -> float:
+  """The look's speed cap: LOOK_V by LOOK_M before the maneuver point, on the comfortable curve led by LOOK_LEAD_S: the car
+  trails a speed cap, and led by STOP_LAG_S alone it was still at 1.85 m/s at LOOK_M (the Sim), at the side views' edge; led so,
+  1.65, the side look asked from about 13 m."""
+  return math.sqrt(LOOK_V ** 2 + 2. * STOP_DECEL * max(distance - LOOK_M - max(v_ego, 0.) * LOOK_LEAD_S, 0.))
+
+
+def look_stop(distance: float, v_ego: float, far_lane: bool = False) -> list[Stop]:
+  """The look not yet done: a stop short of the cross road's near lane (CROSS_ENTRY_M) on the comfortable curve, never harder
+  (unconfirmed); past where that curve ends short of it, where it can, as cross_hold_stop's, and none once the car is
+  committed (inside ONCOMING_ENTRY_M, or faster than COMMIT_SPEED). far_lane: for a car along a far-side turn's far lane
+  alone, short of that lane (CROSS_FAR_ENTRY_M) as cross_hold_stop's."""
+  entry_m, commit_m = (CROSS_FAR_ENTRY_M, CROSS_FAR_ENTRY_M) if far_lane else (CROSS_ENTRY_M, ONCOMING_ENTRY_M)
+  d, comfortable = distance - entry_m, v_ego ** 2 / (2. * STOP_DECEL)
+  if d < comfortable:
+    if distance < commit_m or v_ego > COMMIT_SPEED:
+      return []
+    d = comfortable
+  return [stop(v_ego, d, LOOK_REASON, False)]
 
 
 def late_walkers(objects, maneuver, distance, v_ego, right_hand_traffic, is_walker=crosswalk_walker, may_leave=confirmed_track,

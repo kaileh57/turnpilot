@@ -905,7 +905,9 @@ def test_a_veto_at_rest_in_the_junction_the_scene_committed_to_finishes_the_turn
   PROTECT_PAST_M of its maneuver point, leaves it started. A veto there finishes the turn and says so, never a skip that
   sends the car straight on from inside the junction."""
   from openpilot.selfdrive.turnpilot.map_controls import PROTECT_PAST_M
-  sim = Sim([(300., "turn", "right"), (1500., "turn", "left")], driver_signals=None)
+  # a right into a side road (navd: the one other road straight on), which the look leaves at its corner speed: one the look
+  # walks crosses its hold line under COMMIT_SPEED and is never committed there (no junction data until 2026-11-14)
+  sim = Sim([(300., "turn", "right", junction_of("right", branches=1)), (1500., "turn", "left")], driver_signals=None)
   sim.tp.car_signal_flags, sim.tp.car_signal_mode, sim.tp.car_signal_proven = int(TeslaFlags.CAR_SIGNALS), 'on', True
   state = {'driver': 'none'}
   sim.car_signal = overruling_port(state)
@@ -1532,7 +1534,7 @@ def test_hazards_holding_the_port_off_say_so_on_the_reason_line(turn, at):
   t = turn_of(turn)
   sim = signal_sim(maneuvers=t.maneuvers if turn == 'tleft' else RIGHT_TURN)
   plans = drive_to(sim, at)
-  assert sim.tp.desires.started and sim.v > 2. and plans[-1].turnSignal.side == t.side
+  assert sim.tp.desires.started and sim.v > 1. and plans[-1].turnSignal.side == t.side  # (2 until 2026-11-14: the look walks the right in)
   assert plans[-1].reason != "Hazards on: car not signalling"
   sim.port_state = {'status': 'ready', 'block': 'hazard', 'hazard': True, 'leftLamp': True, 'rightLamp': True}
   hazards = [sim.step(engaged=True) for _ in range(int(1. / DT_MDL))]

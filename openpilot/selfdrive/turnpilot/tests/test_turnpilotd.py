@@ -18,7 +18,7 @@ from openpilot.selfdrive.turnpilot.desire_timing import (CURB_FIRST_PULSE_M, CUR
                                                          TURN_DESIRE_LEAD_M)
 from openpilot.selfdrive.turnpilot.turn_skip import MIN_FIRST_PULSE_M
 from openpilot.selfdrive.turnpilot.route_follower import Maneuver, classify
-from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, POST_GO_PROFILES, V_TURN_MIN
+from openpilot.selfdrive.turnpilot.turn_speed import NO_SPEED_CAP, POST_GO_PROFILES, V_CORNER, V_TURN_MIN
 from openpilot.selfdrive.turnpilot.turnpilotd import (CAR_UNKNOWN_REASON, DETECTOR_DEADLINE_S, DETECTOR_START_DEADLINE_S, NO_LONG_REASON,
                                                        GAS_DISENGAGE_REASON, GO_LINE_M, LEFT_NO_MOVE_S, NEAR_CONTROL_STAND_S, NO_MOVE_REASON, NO_MOVE_S,
                                                        LIGHT_UNREAD_S, LIGHT_WAIT_NOTE, PAUSED_REASON,
@@ -313,7 +313,8 @@ def test_oncoming_car_holds_unprotected_left():
 
   def oncoming(sim):
     if 'x' not in spawn and sim.distance() < 40.:
-      spawn['x'], spawn['t'] = 300. + 72., sim.t  # reaches the junction 8 s later, just as the car would
+      # reaches the junction 14 s later, just as the car would at the look's walking pace (8 s at the corner speed until 2026-11-14)
+      spawn['x'], spawn['t'] = 300. + 9. * 14., sim.t
     if 'x' not in spawn:
       return ()
     x_world = spawn['x'] - 9. * (sim.t - spawn['t'])
@@ -324,7 +325,7 @@ def test_oncoming_car_holds_unprotected_left():
   sim.run(60., objects=oncoming, turn_at=300.)
   assert any(plan.reason == "waiting for oncoming" and plan.state == State.holding for _, _, plan in sim.trace)
   # the car stopped at the hold line while the oncoming car was less than 5 s out, then took the turn
-  arrive = spawn['t'] + 72. / 9.
+  arrive = spawn['t'] + 14.
   for i, (s, _, _) in enumerate(sim.trace):
     t = (i + 1) * DT_MDL
     if arrive - ONCOMING_TTA_S < t < arrive - 1.:
@@ -920,7 +921,9 @@ def test_dropped_turn_taken_up_or_skipped_with_its_pulse_cleared():
   # make the turn and for a pulse to be taken (ENTRY_M out): a fresh pulse, and the turn driven. Too close: skipped out
   # loud, its pulse cleared from the model, and the turn cap kept until the car is past the junction (never turning
   # from the old pulse at speed, never speeding up into the junction)
-  for lat_off, loss, pulse in ((1.5, 2.5, True), (3.0, 4.0, True), (3.2, 3.6, True), (4.4, 5.0, False)):
+  # (the last (4.4, 5.0) until 2026-11-14: the look walks a T's stem's left in, so 5 s on the car is still 14 m out, room
+  # for a fresh pulse; 8 s puts it 9 m out, too close)
+  for lat_off, loss, pulse in ((1.5, 2.5, True), (3.0, 4.0, True), (3.2, 3.6, True), (7.0, 8.0, False)):
     sim = Sim([(300., "turn", "left", T_LEFT), (1500., "turn", "right", junction_of("right"))], cruise=13.)
     while sim.distance() > 38. or sim.s < 10.:
       sim.step()
@@ -931,7 +934,9 @@ def test_dropped_turn_taken_up_or_skipped_with_its_pulse_cleared():
       sim.step()
     after = [(s, v, p) for s, v, p in sim.trace[back:]]
     to_junction = [(v, p) for s, v, p in after if s < 300.]
-    assert all(b[0] <= a[0] + 1e-6 for a, b in zip(to_junction, to_junction[1:], strict=False)), (lat_off, loss)
+    # never sped up into the junction on its pulse; a turn skipped at the look's walking pace goes straight on under its kept
+    # corner cap (the look is a turn's, not going straight's), so that one is checked against the cap below
+    assert not pulse or all(b[0] <= a[0] + 1e-6 for a, b in zip(to_junction, to_junction[1:], strict=False)), (lat_off, loss)
     if pulse:
       assert after[0][2].desire == Desire.turnLeft and not any(p.tooFastToTurn for _, _, p in after), (lat_off, loss)
     else:
@@ -1049,14 +1054,15 @@ def test_model_fallback_outlives_turnpilotd():
   assert sim.step().handback == Handback.none and not sim.tp.fell_back
 
 
-def oncoming_at(junction_s: float, after_s: float):
-  """An oncoming car that reaches the left at junction_s 8 s after the car is 40 m from it (none before after_s)."""
+def oncoming_at(junction_s: float, after_s: float, lead_s: float = 8.):
+  """An oncoming car that reaches the left at junction_s lead_s after the car is 40 m from it (none before after_s): 8 s, as
+  the car would at its corner speed; a T's stem's left, which the look walks in (scene_policy), takes 14 s from there."""
   spawn = {}
   def objects(sim):
     if sim.s < after_s:
       return ()
     if 'x' not in spawn and junction_s - sim.s < 40.:
-      spawn['x'], spawn['t'] = junction_s + 72., sim.t
+      spawn['x'], spawn['t'] = junction_s + 9. * lead_s, sim.t
     if 'x' not in spawn:
       return ()
     return ({'cls': 'car', 'x': spawn['x'] - 9. * (sim.t - spawn['t']) - sim.s, 'y': 5., 'vx': -9.},)
@@ -1069,7 +1075,7 @@ def test_fault_keeps_the_next_turns_junction_hold():
   # (or a gas release) can't be read as the next one's
   for fault in (False, True):
     sim = Sim([(300., "turn", "left", T_LEFT), (700., "turn", "left", (270., 180., 2, 'none')), (2500., "turn", "right")])
-    oncoming = oncoming_at(700., 400.)
+    oncoming = oncoming_at(700., 400., lead_s=14.)  # a T's stem's left: the look's walk (8 s until 2026-11-14)
     for _ in range(int(100. / DT_MDL)):
       if fault and 500. < sim.s and not getattr(sim, 'faulted', False):
         sim.faulted = True
@@ -1236,12 +1242,17 @@ def drive_through_the_left(sim, n):
   skip. The left is round (80 of its 90 degrees) about 10 m past the junction."""
   turn = sim.tp.follower.maneuver_id
   while sim.s < 325.:
-    sim.step(yaw_rate=0.5 if 298. < sim.s < 312. else 0.)
+    # turned by the metre as at its corner speed (0.5 rad/s at V_CORNER): at the look's walking pace a yaw by the second had
+    # it round 3 m past the junction (until 2026-11-14 0.5 rad/s whatever the speed)
+    sim.step(yaw_rate=0.5 * min(sim.v / V_CORNER, 1.) if 298. < sim.s < 312. else 0.)
     if sim.s < 300.:
       assert sim.tp.follower.maneuver_id == turn
   assert_turn_held(sim, n)
   v_n = sim.trace[n - 1][1]
-  assert max(v for s, v, _ in sim.trace[n:] if s < 305.) <= v_n + 0.05
+  # not sped up into it: to its point, and past it never over its corner speed (until 2026-11-14 to 5 m past it at v_n: the
+  # look walks a T-stem's left a lane past its point, scene_policy.LOOK_END_FAR_M, and the corner cap takes it on from there)
+  assert max(v for s, v, _ in sim.trace[n:] if s < 300.) <= v_n + 0.05
+  assert max(v for s, v, _ in sim.trace[n:] if s < 305.) <= max(v_n, V_CORNER) + 0.05
   assert all(p.desire != CLEAR_DESIRE for s, _, p in sim.trace[n:] if s < 305.)
   assert not any(p.tooFastToTurn for _, _, p in sim.trace)
 
@@ -1345,14 +1356,16 @@ def test_gps_outlier_that_brings_the_turns_first_pulse_out_doesnt_hold_its_junct
   J = 400.
   nxt = 'left' if side == 'right' else 'right'
   turn = Desire.turnRight if side == 'right' else Desire.turnLeft
-  mans = [(J, "turn", side, junction_of(side)), (J + 1200., "turn", nxt, junction_of(nxt, 2))]
+  # a junction the look leaves to the corner speed (a side road off ours; the left's is an unprotected one either way): the
+  # pulse bands below are the corner speed's (junction_of(side) until 2026-11-14, which the look now walks a right into)
+  mans = [(J, "turn", side, junction_of(side, branches=1)), (J + 1200., "turn", nxt, junction_of(nxt, 2))]
   sim = Sim(mans)
   done = []
   def outlier(sim, instr):
     if sim.s < J - near or done:
       return instr, True
     done.append(sim.s)
-    return nav_instruction(J - sim.s + off, "turn", side, remaining=J + 1300. - sim.s + off, junction=junction_of(side),
+    return nav_instruction(J - sim.s + off, "turn", side, remaining=J + 1300. - sim.s + off, junction=junction_of(side, branches=1),
                            ahead=[(mans[1][0] - sim.s + off,) + tuple(mans[1][1:])]), True
   sim.nav_filter = outlier
   committed_at, stops, errors, pulsed = None, [], [], False
@@ -1920,8 +1933,10 @@ def test_one_true_reading_inside_a_lasting_long_bias_never_has_a_right_pulsed_pa
   # held to its cap through the junction. Since 2026-11-07 the curb side reaches its corner speed by 15 m (turn_speed
   # CORNER_CURB_M), so on readings 8-10 m long the car is still braking 10 m before the true junction (4.0-4.5 m/s there,
   # 3.0-3.5 before): the margin against a long bias went from about 20 m to about 15 m, and the junction itself is unchanged
+  # (until 2026-11-14 also braking all the way: the look, scene_policy, walks the car to the node it dead-reckons and the
+  # corner cap takes it on from there)
   approach = [v for s, v, _ in sim.trace if J - 10. < s < J]
-  assert max(approach) < 4.6 and all(b <= a + 1e-6 for a, b in zip(approach, approach[1:], strict=False)), case  # braking all the way
+  assert max(approach) < 4.6, case
   assert max(v for s, v, _ in sim.trace if J - 3. < s < J + 2.) < 3.5, case
 
 
@@ -2269,7 +2284,7 @@ def test_left_from_a_t_stem_or_a_right_has_no_unprotected_stop():
                     [(300., "turn", "right", junction_of("right")), (1500., "turn", "left", junction_of("left"))]):
     sim = Sim(maneuvers)
     sim.go_taps = False
-    sim.run(40., turn_at=300.)
+    sim.run(50., turn_at=300.)  # (40 s until 2026-11-14: the look at a junction nothing controls walks the car in, 5-10 s)
     assert sim.s > 320. and not any(p.shouldStop or p.controlPrompt != 'none' for _, _, p in sim.trace if p.maneuverDistance > -20.)
 
 
@@ -2968,7 +2983,9 @@ def test_a_shallow_turn_taken_from_a_stop_is_not_called_missed():
   assert any(p.turnMissed for p in plans)
 
 
-RIGHT_AT_A_CORNER = [(300., "turn", "right", junction_of("right")), (1500., "turn", "left", T_LEFT)]
+# a right off the road into a side road (navd: the one other road straight on), which the look leaves at its corner speed: the
+# stall's stands were measured from turns driven so (junction_of("right") until 2026-11-14)
+RIGHT_AT_A_CORNER = [(300., "turn", "right", junction_of("right", branches=1)), (1500., "turn", "left", T_LEFT)]
 
 
 def model_stands_in_the_turn(sim, deg, junction=300., side=-1):

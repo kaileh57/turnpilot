@@ -455,3 +455,74 @@ def test_a_stop_sign_with_a_parked_car_in_view_goes_as_soon_as_an_empty_one_at_t
   k, a = go_frame(sim), arrived(plans)
   assert k is not None and not handed_back(plans)
   assert (k - a) * DT_MDL < (8. if parked else 4.), ((k - a) * DT_MDL, sorted({p.reason for p in plans[a:k]}))
+
+
+# ------------------------------------------------------------------- the look at an uncontrolled junction (scene_policy)
+
+def look_turn(side: str, cars, geo=None):
+  """A turn at a junction with no mapped control at the shipped cruise, cars(sim) boxed as Feed takes them, the side views on
+  the stand cadence whenever the plan asks the side look at walking pace. [(t, s, v, plan)] to 20 m past the junction."""
+  from openpilot.selfdrive.turnpilot.hooks import TAKE_CONTROL_PROMPTS
+  geo = geo or (T_LEFT if side == 'left' else ct.T_RIGHT)
+  sim = shipped(Sim([(ct.JUNCTION, "turn", side, geo), (1900., "turn", "right", junction_of("right"))], controls_status='ok'))
+  sim.answers_prompt = True
+  feed, rows = Feed(cars), []
+  while sim.s < ct.JUNCTION + 20. and sim.t < 120.:
+    plan = step(sim, feed)
+    rows.append((sim.t, sim.s, sim.v, plan))
+  assert not any(str(p.controlPrompt) in TAKE_CONTROL_PROMPTS for *_, p in rows)
+  return rows, feed
+
+
+def collision_course(meet: float, frm: str, v: float):
+  """A car on the cross road at v m/s in the lane carrying traffic from frm, at our path when the car's bumper would be in that
+  lane (meet); never boxed by the forward passes (on a collision course its bearing, atan(v / ours), is past them)."""
+  sign = 1. if frm == 'left' else -1.
+
+  def cars(sim):
+    t = sim.t - meet
+    return [(ct.LANE[frm] - sim.s, -sign * v * t, False)] if -8. <= t <= 2. else []
+  return cars
+
+
+@pytest.mark.parametrize('side, frm, v', [('right', 'left', 9.), ('right', 'left', 13.), ('left', 'left', 13.), ('left', 'right', 13.)])
+def test_an_uncontrolled_turn_slows_to_look_and_holds_short_for_a_crossing_car_the_forward_passes_cannot_see(side, frm, v):
+  # rails 2026-11-14 (matrix right_nocontrol / left_nocontrol_T, crossing car 9-13 m/s): the turn was driven in at its corner
+  # speed (a right 3.0 m/s, a left 4.6), the side views never ran (over SIDE_VIEW_V_MAX) and the car, on a constant bearing
+  # of 70-77 deg the whole way in, was never boxed: contact, nothing said. Now the turn comes down to walking pace by
+  # LOOK_M, the side look is asked and runs, the car is tracked and the cross-traffic hold stands it short of the lane
+  from openpilot.selfdrive.turnpilot.scene_policy import LOOK_M, LOOK_REASON, LOOK_V
+  alone, _ = look_turn(side, lambda sim: [])
+  meet = next(t for t, s, _, _ in alone if s + ct.BUMPER_M >= ct.LANE[frm]) + 0.4
+  rows, feed = look_turn(side, collision_course(meet, frm, v))
+  assert ct.bumper_as_it_crosses(rows, meet, v) < ct.JUNCTION - 3.6
+  assert any(str(p.reason) == CROSS_REASON for *_, p in rows) and any(str(p.reason) == LOOK_REASON for *_, p in rows)
+  assert any(vw.startswith('side') for _, vw in feed.ran)
+  assert next(v for _, s, v, _ in alone if s >= ct.JUNCTION - LOOK_M) <= LOOK_V + 0.3  # under SIDE_VIEW_V_MAX with room
+  assert rows[-1][1] >= ct.JUNCTION + 20.
+
+
+@pytest.mark.parametrize('side', ['left', 'right'])
+def test_an_empty_uncontrolled_junction_is_a_rolling_look_its_side_views_clear_before_the_lane(side):
+  # a yield, not a stop: walking pace and the side look asked, each side view that matters (scene_policy.look_views) LOOK_RUNS
+  # runs clear, then the cap goes and the turn is made at its own speed, never stopping and never at walking pace in the lane
+  from openpilot.selfdrive.turnpilot.scene_policy import LOOK_REASON, LOOK_STOP_M, LOOK_V
+  from openpilot.selfdrive.turnpilot.turn_speed import V_CORNER, V_CORNER_CURB
+  rows, feed = look_turn(side, lambda sim: [])
+  near = [(s, v) for _, s, v, _ in rows if ct.JUNCTION - 15. <= s <= ct.JUNCTION]
+  assert min(v for _, v in near) > 1.2 and min(v for _, v in near) <= LOOK_V + 0.2  # walked, never stood
+  views = {vw for _, vw in feed.ran if vw.startswith('side')}
+  assert views == ({'sideLeft', 'sideRight'} if side == 'left' else {'sideLeft'}) or views >= {'sideLeft'}
+  v_lane = next(v for _, s, v, _ in rows if s >= ct.JUNCTION - 6.)
+  assert v_lane > LOOK_V + 0.5  # the look was done short of LOOK_STOP_M: going on
+  assert not any(str(p.reason) == LOOK_REASON for _, s, _, p in rows if s >= ct.JUNCTION - LOOK_STOP_M + 1.)
+  assert max(v for _, s, v, _ in rows if ct.JUNCTION <= s <= ct.JUNCTION + 5.) <= (V_CORNER if side == 'left' else V_CORNER_CURB) + 0.1
+
+
+def test_a_car_parked_on_the_cross_road_only_a_side_view_sees_holds_the_look_only_until_its_track_is_trusted():
+  # a box every side run on the near arm 20 m up: a new track may be coming (look_blocks, cross_stops' rule) until it is
+  # side-trusted standing; the car may stand short of the lane meanwhile, a few seconds at most, then goes
+  rows, _ = look_turn('right', lambda sim: [(ct.LANE['left'] - sim.s, 20., False)] if ct.JUNCTION - sim.s < 40. else [])
+  alone, _ = look_turn('right', lambda sim: [])
+  t_end = lambda rs: next(t for t, s, _, _ in rs if s >= ct.JUNCTION + 20.)  # noqa: E731
+  assert t_end(rows) - t_end(alone) < 7.
